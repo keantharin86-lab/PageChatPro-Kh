@@ -1,0 +1,50 @@
+[
+  {
+    "id": "prod_1",
+    "name": "Modern Khmer Silk Blouse & Dress",
+    "nameKh": "រ៉ូបហូលផាមួងខ្មែរម៉ូដសម័យ",
+    "price": 38,
+    "priceKhr": 155800,
+    "stock": 24,
+    "sku": "SLK-GLD-01",
+    "category": "Fashion",
+    "imageUrl": "https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=600&q=80",
+    "description": "រ៉ូបកាត់តាមបែបប្រពៃណីខ្មែរទំនើប សាច់សូត្រទន់រលោង មិនក្តៅ ថែមក្រមាសូត្រមួយជូនភ្លាមៗ។"
+  },
+  {
+    "id": "prod_2",
+    "name": "Botanica Herbal Radiance Serum Set",
+    "nameKh": "សេរ៉ូមធម្មជាតិ Botanica Herbal",
+    "price": 25,
+    "priceKhr": 102500,
+    "stock": 45,
+    "sku": "SKN-SRM-02",
+    "category": "Beauty",
+    "imageUrl": "https://images.unsplash.com/photo-1620916566398-39f1143ab7be?auto=format&fit=crop&w=600&q=80",
+    "description": "ឈុតសេរ៉ូមចម្រាញ់ពីរុក្ខជាតិធម្មជាតិ ជួយឱ្យស្បែកមុខភ្លឺថ្លារលោង គ្មានជាតិកាត់ សុវត្ថិភាពខ្ពស់។"
+  },
+  {
+    "id": "prod_3",
+    "name": "Sonos Pro Wireless Noise Cancelling Earbuds",
+    "nameKh": "កាសឥតខ្សែ Sonos Pro សម្លេងបាសធ្ងន់",
+    "price": 49,
+    "priceKhr": 200900,
+    "stock": 18,
+    "sku": "TECH-EAR-03",
+    "category": "Electronics",
+    "imageUrl": "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?auto=format&fit=crop&w=600&q=80",
+    "description": "កាសប៊្លូធូសជំនាន់ចុងក្រោយ កាត់បន្ថយសម្លេងរំខាន ANC ថ្មកាន់បាន 36 ម៉ោង ធន់នឹងទឹក IPX5។"
+  },
+  {
+    "id": "prod_4",
+    "name": "Traditional Khmer Silk Scarf",
+    "nameKh": "ក្រមាសូត្រខ្មែរត្បាញដៃប្រណិត",
+    "price": 15,
+    "priceKhr": 61500,
+    "stock": 35,
+    "sku": "SLK-SCF-04",
+    "category": "Fashion",
+    "imageUrl": "https://images.unsplash.com/photo-1601924994987-69e26d50dc26?auto=format&fit=crop&w=600&q=80",
+    "description": "ក្រមាសូត្រខ្មែរសុទ្ធ ១០០% ត្បាញដោយដៃពីខេត្តតាកែវ ពណ៌ស្រស់ឆើតឆាយ មិនបែកពណ៌។"
+  }
+]

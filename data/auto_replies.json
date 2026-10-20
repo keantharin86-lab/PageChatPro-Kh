@@ -1,0 +1,41 @@
+[
+  {
+    "id": "ar_1",
+    "enabled": true,
+    "triggerKeywords": [
+      "ថ្លៃប៉ុន្មាន",
+      "តម្លៃ",
+      "តំលៃ",
+      "how much",
+      "price",
+      "ថ្លៃ"
+    ],
+    "responseKh": "ជំរាបសួរបង! ម៉ូដនេះតម្លៃពេញ $38.00 (ឥឡូវប្រូម៉ូសិនពិសេសត្រឹម $34.00 ប៉ុណ្ណោះបង) មានទំហំ S, M, L, XL ពេញស្តុកបងចា៎ ✨",
+    "matchType": "contains"
+  },
+  {
+    "id": "ar_2",
+    "enabled": true,
+    "triggerKeywords": [
+      "ដឹក",
+      "សេវាដឹក",
+      "delivery",
+      "ថ្លៃសេវា"
+    ],
+    "responseKh": "សេវាដឹកជញ្ជូនភ្នំពេញ $1.50 (១ថ្ងៃដល់) តាមបណ្តាខេត្ត $2.00 (១-២ ថ្ងៃតាម J&T / វីរៈប៊ុនថាំ) ណា៎បងចា៎ 🚚",
+    "matchType": "contains"
+  },
+  {
+    "id": "ar_3",
+    "enabled": true,
+    "triggerKeywords": [
+      "aba",
+      "កុង",
+      "គណនី",
+      "transfer",
+      "khqr"
+    ],
+    "responseKh": "បងអាចស្កេនទូទាត់តាម ABA / Bakong KHQR គណនីលេខ: 005 452 334 (Sok Chea CHHAI) ឬជ្រើសរើសបង់លុយពេលអីវ៉ាន់ដល់ដៃ (COD) ក៏បានបងចា៎! 💳",
+    "matchType": "contains"
+  }
+]
