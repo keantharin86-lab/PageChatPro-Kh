@@ -7,7 +7,8 @@ import {
   SlidersHorizontal,
   PlusCircle,
   Sparkles,
-  Menu
+  Menu,
+  RefreshCw
 } from 'lucide-react';
 import { ChatThread, ThreadStatus, PlatformType, PageAccount } from '../types';
 
@@ -17,6 +18,7 @@ interface ConversationListProps {
   onSelectThread: (threadId: string) => void;
   language: 'kh' | 'en';
   onSimulateCustomerChat: () => void;
+  onSyncPageMessages?: () => void;
   selectedPage?: PageAccount;
   pages?: PageAccount[];
   onOpenMobileMenu?: () => void;
@@ -29,6 +31,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   onSelectThread,
   language,
   onSimulateCustomerChat,
+  onSyncPageMessages,
   selectedPage,
   pages = [],
   onOpenMobileMenu,
@@ -38,6 +41,17 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   const [statusFilter, setStatusFilter] = useState<ThreadStatus>('all');
   const [platformFilter, setPlatformFilter] = useState<PlatformType | 'all'>('all');
   const [pageScope, setPageScope] = useState<'current' | 'all'>('all');
+  const [isSyncingPage, setIsSyncingPage] = useState(false);
+
+  const handleSyncClick = () => {
+    setIsSyncingPage(true);
+    if (onSyncPageMessages) {
+      onSyncPageMessages();
+    } else {
+      onSimulateCustomerChat();
+    }
+    setTimeout(() => setIsSyncingPage(false), 600);
+  };
 
   const statusTabs: { id: ThreadStatus; labelKh: string; labelEn: string }[] = [
     { id: 'all', labelKh: 'ទាំងអស់', labelEn: 'All' },
@@ -59,7 +73,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   }, [threads, pageScope, selectedPage]);
 
   const filteredThreads = useMemo(() => {
-    return threads.filter((thread) => {
+    const matching = threads.filter((thread) => {
       // Page scope filter
       if (pageScope === 'current' && selectedPage && thread.pageId !== selectedPage.id) {
         return false;
@@ -87,6 +101,16 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 
       return true;
     });
+
+    // Prioritize threads belonging to the currently selected page so newly connected pages appear at the top
+    if (selectedPage) {
+      return [...matching].sort((a, b) => {
+        const aIsCurrent = a.pageId === selectedPage.id ? 1 : 0;
+        const bIsCurrent = b.pageId === selectedPage.id ? 1 : 0;
+        return bIsCurrent - aIsCurrent;
+      });
+    }
+    return matching;
   }, [threads, statusFilter, platformFilter, searchQuery, pageScope, selectedPage]);
 
   const getPlatformBadge = (platform: PlatformType) => {
@@ -126,13 +150,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             </span>
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
             {/* Live Online Modal Trigger Button */}
             {onOpenLiveOnlineModal && (
               <button
                 type="button"
                 onClick={onOpenLiveOnlineModal}
-                className={`flex items-center gap-1 px-2 py-1 text-xs font-bold rounded-md border transition-all ${
+                className={`flex items-center gap-1 px-2 py-1 text-xs font-bold rounded-md border transition-all cursor-pointer ${
                   (selectedPage?.isLiveOnline || selectedPage?.accessToken)
                     ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100 shadow-2xs'
                     : 'bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100'
@@ -140,16 +164,24 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 title={language === 'kh' ? 'ស្ថានភាព Live Online លើ Messenger' : 'Open Live Online on Messenger settings'}
               >
                 <span className={`w-2 h-2 rounded-full ${(selectedPage?.isLiveOnline || selectedPage?.accessToken) ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
-                <span className="hidden xs:inline">
-                  {(selectedPage?.isLiveOnline || selectedPage?.accessToken) ? 'Live Online' : 'បើក Live'}
-                </span>
-                <span className="xs:hidden">Live</span>
+                <span className="hidden sm:inline">Live</span>
               </button>
             )}
 
             <button
-              onClick={onSimulateCustomerChat}
-              className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200/80 rounded-md transition-colors shadow-2xs"
+              type="button"
+              onClick={handleSyncClick}
+              className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md transition-colors shadow-2xs cursor-pointer"
+              title={language === 'kh' ? 'ទាញយកសារថ្មីពីផេក (Sync Page Messages)' : 'Sync messages from page'}
+            >
+              <RefreshCw className={`w-3 h-3 ${isSyncingPage ? 'animate-spin' : ''}`} />
+              <span>{language === 'kh' ? 'ទាញសារផេក' : 'Sync'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onSimulateCustomerChat()}
+              className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200/80 rounded-md transition-colors shadow-2xs cursor-pointer"
               title={language === 'kh' ? 'សាកល្បងទទួលសារ Messenger Live ថ្មី' : 'Simulate incoming customer message on Messenger Live'}
             >
               <span>+ សារថ្មី</span>
@@ -162,7 +194,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           <div className="flex items-center gap-1 mb-2.5 bg-slate-100 p-0.5 rounded-lg text-xs font-medium text-slate-600">
             <button
               onClick={() => setPageScope('all')}
-              className={`flex-1 py-1 px-2 rounded-md transition-all text-center truncate ${
+              className={`flex-1 py-1 px-2 rounded-md transition-all text-center truncate cursor-pointer ${
                 pageScope === 'all'
                   ? 'bg-white text-slate-900 shadow-xs font-semibold'
                   : 'hover:text-slate-900'
@@ -172,14 +204,14 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             </button>
             <button
               onClick={() => setPageScope('current')}
-              className={`flex-1 py-1 px-2 rounded-md transition-all text-center truncate flex items-center justify-center gap-1.5 ${
+              className={`flex-1 py-1 px-2 rounded-md transition-all text-center truncate flex items-center justify-center gap-1.5 cursor-pointer ${
                 pageScope === 'current'
                   ? 'bg-white text-blue-700 shadow-xs font-semibold'
                   : 'hover:text-slate-900'
               }`}
-              title={selectedPage.name}
+              title={`${selectedPage.name} (Messenger Live Online)`}
             >
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-600 shrink-0"></span>
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
               <span className="truncate">{selectedPage.name.split(' - ')[0] || selectedPage.name}</span>
             </button>
           </div>
@@ -248,11 +280,19 @@ export const ConversationList: React.FC<ConversationListProps> = ({
           <div className="p-8 text-center text-slate-400">
             <MessageCircle className="w-10 h-10 mx-auto text-slate-300 mb-2 stroke-[1.5]" />
             <p className="text-sm font-medium text-slate-600">
-              {language === 'kh' ? 'មិនមានសារជជែកទេ' : 'No conversations found'}
+              {language === 'kh' ? 'មិនមានសារជជែកក្នុងតម្រងនេះទេ' : 'No conversations found'}
             </p>
-            <p className="text-xs text-slate-400 mt-1">
-              {language === 'kh' ? 'ចុចប៊ូតុង "+ សារថ្មី" ដើម្បីសាកល្បង' : 'Click "Simulate" to test new incoming chat'}
-            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setStatusFilter('all');
+                setSearchQuery('');
+                onSimulateCustomerChat();
+              }}
+              className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
+            >
+              <span>+ {language === 'kh' ? 'ទទួលសារ Messenger Live ថ្មី' : 'New Messenger Live Chat'}</span>
+            </button>
           </div>
         ) : (
           filteredThreads.map((thread) => {

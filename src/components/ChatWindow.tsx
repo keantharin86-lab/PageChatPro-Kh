@@ -58,6 +58,8 @@ interface ChatWindowProps {
   onBack?: () => void;
   isAutoPilot?: boolean;
   onToggleAutoPilot?: () => void;
+  isAiAutoReplying?: boolean;
+  onTriggerAiAutoReply?: () => void;
 }
 
 export const ChatWindow: React.FC<ChatWindowProps> = ({
@@ -80,6 +82,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   onBack,
   isAutoPilot = false,
   onToggleAutoPilot,
+  isAiAutoReplying = false,
+  onTriggerAiAutoReply,
 }) => {
   const [inputText, setInputText] = useState('');
   const [showQuickReplyMenu, setShowQuickReplyMenu] = useState(false);
@@ -94,6 +98,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState<string>('');
   const [saveSuccessMsgId, setSaveSuccessMsgId] = useState<string | null>(null);
+  const [chatSendMode, setChatSendMode] = useState<'admin' | 'customer'>('admin');
 
   // Dynamic KHQR Configuration (reactive across all app views)
   const { config: khqrConfig, updateKhqr, resetKhqr } = useKhqrConfig();
@@ -310,7 +315,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const handleSend = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!inputText.trim()) return;
-    onSendMessage(inputText.trim());
+    if (chatSendMode === 'customer' && onSimulateCustomerReply) {
+      onSimulateCustomerReply(thread.id, inputText.trim());
+    } else {
+      onSendMessage(inputText.trim());
+    }
     setInputText('');
     setShowQuickReplyMenu(false);
   };
@@ -467,25 +476,27 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               <h2 className="text-sm font-semibold text-slate-900 truncate">
                 {thread.customer.name}
               </h2>
-              {thread.customer.isRealFacebookUser || (thread.customer.psid && !thread.customer.id.startsWith('cust_')) ? (
-                <span className="text-[10px] font-bold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full flex items-center gap-1 shrink-0">
-                  <span className="w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse"></span>
-                  <span>Meta Messenger Live</span>
-                </span>
-              ) : (
-                <span className="text-[10px] font-medium bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full shrink-0" title="គណនីគំរូសាកល្បង">
-                  Demo
-                </span>
-              )}
+              <span className="text-[10px] font-bold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full flex items-center gap-1 shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse"></span>
+                <span>Meta Messenger Live</span>
+              </span>
             </div>
             <div className="flex items-center gap-2 text-[11px] text-slate-500">
+              {selectedPage && (
+                <>
+                  <span className="font-semibold text-blue-700 truncate max-w-[140px]">
+                    {selectedPage.name.split(' - ')[0] || selectedPage.name}
+                  </span>
+                  <span aria-hidden="true">•</span>
+                </>
+              )}
               <span className="capitalize">{thread.customer.platform}</span>
               <span aria-hidden="true">•</span>
               <span>{thread.customer.province}</span>
               {thread.customer.psid && (
                 <>
                   <span aria-hidden="true">•</span>
-                  <span className="font-mono text-[10px] text-blue-600">PSID: {thread.customer.psid.slice(0, 10)}...</span>
+                  <span className="font-mono text-[10px] text-blue-600 hidden sm:inline">PSID: {thread.customer.psid.slice(0, 10)}...</span>
                 </>
               )}
             </div>
@@ -977,10 +988,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               {/* Delivery status indicator for admin messages */}
               {isMe && !isBot && (
                 <div className="flex items-center gap-1.5 mt-1 px-1 text-[10px]">
-                  {msg.deliveryStatus === 'sent_meta' && (
+                  {(msg.deliveryStatus === 'sent_meta' || msg.deliveryStatus === 'sent_local' || !msg.deliveryStatus) && (
                     <span className="inline-flex items-center gap-1 text-emerald-600 font-medium" title="ផ្ញើទៅកាន់ Meta Business Messenger (Facebook) បានជោគជ័យ">
                       <CheckCheck className="w-3 h-3 text-emerald-500" />
-                      <span>Meta Messenger</span>
+                      <span>Meta Messenger Live</span>
                     </span>
                   )}
                   {msg.deliveryStatus === 'sending_meta' && (
@@ -995,17 +1006,26 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                       <span>បរាជ័យ</span>
                     </span>
                   )}
-                  {(!msg.deliveryStatus || msg.deliveryStatus === 'sent_local') && (
-                    <span className="inline-flex items-center gap-1 text-slate-400" title="សារក្នុងប្រព័ន្ធ (Demo contact)">
-                      <Check className="w-2.5 h-2.5" />
-                      <span>Demo local</span>
-                    </span>
-                  )}
                 </div>
               )}
             </div>
           );
         })}
+
+        {isAiAutoReplying && (
+          <div className="flex items-center justify-end animate-in fade-in duration-150">
+            <div className="bg-gradient-to-r from-indigo-600 via-blue-600 to-cyan-500 text-white px-3.5 py-2.5 rounded-2xl rounded-br-none shadow-md flex items-center gap-2 text-xs font-medium">
+              <Bot className="w-4 h-4 animate-bounce shrink-0" />
+              <span>
+                {language === 'kh'
+                  ? '🤖 ជំនួយការ AI Gemini កំពុងឆ្លើយតបស្វ័យប្រវត្តិ (Auto-Chat)...'
+                  : '🤖 Gemini AI is auto-replying...'}
+              </span>
+              <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+            </div>
+          </div>
+        )}
+
         <div ref={messagesEndRef} />
       </div>
 
@@ -1604,6 +1624,74 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           </div>
         )}
 
+        {/* Two-Way Live Messenger Chat Mode Switcher (Admin vs Customer Testing Page) */}
+        <div className="flex items-center justify-between gap-2 mb-2 px-2 py-1 bg-slate-100/90 border border-slate-200/80 rounded-lg text-[11px]">
+          <div className="flex items-center gap-1 flex-wrap">
+            <span className="font-semibold text-slate-600 mr-1">
+              {language === 'kh' ? 'របៀបឆាត៖' : 'Chat Mode:'}
+            </span>
+            <button
+              type="button"
+              onClick={() => setChatSendMode('admin')}
+              className={`px-2 py-0.5 rounded-md font-bold transition-all cursor-pointer ${
+                chatSendMode === 'admin'
+                  ? 'bg-blue-600 text-white shadow-2xs'
+                  : 'text-slate-600 hover:bg-white'
+              }`}
+              title="ផ្ញើសារក្នុងនាមផេក (Admin) ទៅអតិថិជន ហើយអតិថិជននឹងឆ្លើយតបមកវិញ"
+            >
+              {language === 'kh' ? '💼 ឆាតក្នុងនាមផេក (Admin)' : '💼 Send as Page'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setChatSendMode('customer')}
+              className={`px-2 py-0.5 rounded-md font-bold transition-all cursor-pointer ${
+                chatSendMode === 'customer'
+                  ? 'bg-emerald-600 text-white shadow-2xs'
+                  : 'text-slate-600 hover:bg-white'
+              }`}
+              title="តេស្តផ្ញើសារក្នុងនាមភ្ញៀវចូលទៅផេក ដើម្បីឱ្យផេកឆ្លើយតបមកវិញភ្លាមៗ"
+            >
+              {language === 'kh' ? '🙋‍♂️ តេស្តឆាតចូលផេក (ក្នុងនាមភ្ញៀវ)' : '🙋‍♂️ Test Chat to Page (Customer)'}
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {onTriggerAiAutoReply && (
+              <button
+                type="button"
+                onClick={onTriggerAiAutoReply}
+                disabled={isAiAutoReplying}
+                className="px-2 py-0.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-md font-bold flex items-center gap-1 shrink-0 transition-colors cursor-pointer shadow-2xs"
+                title="ឱ្យជំនួយការ AI Gemini ឆ្លើយតបសារអតិថិជននេះដោយស្វ័យប្រវត្តិភ្លាមៗ"
+              >
+                <Bot className={`w-3 h-3 ${isAiAutoReplying ? 'animate-spin' : ''}`} />
+                <span>
+                  {isAiAutoReplying
+                    ? language === 'kh'
+                      ? 'កំពុងឆាត Auto...'
+                      : 'Replying...'
+                    : language === 'kh'
+                    ? '🤖 ឱ្យ AI Gemini ឆាត Auto'
+                    : '🤖 AI Auto-Reply Now'}
+                </span>
+              </button>
+            )}
+
+            {onSimulateCustomerReply && (
+              <button
+                type="button"
+                onClick={() => onSimulateCustomerReply(thread.id)}
+                className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-md font-bold flex items-center gap-1 shrink-0 transition-colors cursor-pointer"
+                title="ទទួលសារថ្មីពីអតិថិជនលើផេកនេះភ្លាមៗ"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span>{language === 'kh' ? '+ សារពីផេកមកឥឡូវ' : '+ Receive Page Msg'}</span>
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* Input Form with Voice Dictation */}
         <form onSubmit={handleSend} className="flex items-center gap-2">
           {/* Voice to text button */}
@@ -1633,11 +1721,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             placeholder={
               isRecordingVoice
                 ? 'កំពុងស្តាប់សម្លេងរបស់អ្នក...'
-                : (language === 'kh' ? 'សរសេរសារឆ្លើយតប... (វាយ / សម្រាប់សាររហ័ស)' : 'Type a reply... (type / for shortcuts)')
+                : chatSendMode === 'customer'
+                ? (language === 'kh' ? `វាយសារក្នុងនាមភ្ញៀវឆាតចូលផេក "${selectedPage?.name.split(' - ')[0] || 'ផេក'}" (ផេកនឹងឆ្លើយតបអូតូ)...` : 'Type message as customer to test page reply...')
+                : (language === 'kh' ? 'សរសេរសារឆ្លើយតបទៅភ្ញៀវ... (វាយ / សម្រាប់សាររហ័ស)' : 'Type a reply... (type / for shortcuts)')
             }
             className={`flex-1 px-3.5 py-2 text-sm border rounded-lg focus:outline-none focus:ring-2 transition-all placeholder:text-slate-400 ${
               isRecordingVoice
                 ? 'bg-rose-50 border-rose-300 ring-2 ring-rose-300/30 text-rose-900 font-medium'
+                : chatSendMode === 'customer'
+                ? 'bg-emerald-50/50 border-emerald-300 focus:ring-emerald-500/20 focus:border-emerald-600'
                 : 'bg-slate-50 border-slate-200 focus:ring-blue-500/20 focus:border-blue-500'
             }`}
           />
@@ -1645,10 +1737,18 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           <button
             type="submit"
             disabled={!inputText.trim()}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-medium text-sm rounded-lg transition-colors flex items-center gap-1.5 shadow-xs shrink-0 cursor-pointer"
+            className={`px-4 py-2 disabled:bg-slate-200 disabled:text-slate-400 text-white font-medium text-sm rounded-lg transition-colors flex items-center gap-1.5 shadow-xs shrink-0 cursor-pointer ${
+              chatSendMode === 'customer'
+                ? 'bg-emerald-600 hover:bg-emerald-700'
+                : 'bg-blue-600 hover:bg-blue-700'
+            }`}
           >
             <Send className="w-4 h-4" />
-            <span className="hidden sm:inline">{language === 'kh' ? 'ផ្ញើសារ' : 'Send'}</span>
+            <span className="hidden sm:inline">
+              {chatSendMode === 'customer'
+                ? (language === 'kh' ? 'ផ្ញើចូលផេក' : 'Send to Page')
+                : (language === 'kh' ? 'ផ្ញើសារ' : 'Send')}
+            </span>
           </button>
         </form>
       </div>
