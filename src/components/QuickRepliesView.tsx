@@ -414,6 +414,38 @@ export const QuickRepliesView: React.FC<QuickRepliesViewProps> = ({
       </div>
 
       <div className="p-5 md:p-6 space-y-6">
+        {/* Strict AI Gemini Pricing Scope Banner */}
+        <div className="bg-gradient-to-r from-indigo-50 via-blue-50 to-emerald-50 border border-indigo-200/80 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-extrabold text-slate-900">
+                  {language === 'kh'
+                    ? 'ជំនួយការ AI Gemini ប្រាប់តម្លៃតាមប្រអប់ "ទំនិញ" និង "សាររហ័ស & Bot" តែប៉ុណ្ណោះ'
+                    : 'AI Gemini Strictly Quotes Prices from "Products" & "Quick Replies & Bot" Only'}
+                </span>
+                <span className="px-2 py-0.5 text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-md">
+                  Strict Price Lock Active
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-600 mt-0.5">
+                {language === 'kh'
+                  ? 'រាល់ពេលអតិថិជនសួរតម្លៃ AI Gemini នឹងឆ្លើយតបតែតម្លៃដែលបងបានកំណត់ក្នុង "ទំនិញ" (${products}) និងក្នុងប្រអប់ "សាររហ័ស & Bot" នេះប៉ុណ្ណោះ (មិនប្រឌិតតម្លៃផ្សេងឡើយ)។'
+                  : 'Whenever a customer asks for prices, AI Gemini only replies with the exact prices configured in Products and this Quick Replies & Bot box.'}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0 text-[11px] font-bold text-indigo-700 bg-white/90 px-3 py-1.5 rounded-xl border border-indigo-200">
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+            <span>
+              {quickReplies.length} សាររហ័ស • {autoReplies.filter((r) => r.enabled).length} Bot សកម្ម
+            </span>
+          </div>
+        </div>
+
         {/* Search Toolbar */}
         <div className="relative max-w-md">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />

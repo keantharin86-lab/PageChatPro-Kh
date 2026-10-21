@@ -11,7 +11,8 @@ import {
   Plus, 
   X,
   ExternalLink,
-  ChevronRight
+  ChevronRight,
+  FileDown
 } from 'lucide-react';
 import { Customer, Order } from '../types';
 
@@ -21,6 +22,7 @@ interface CustomerPanelProps {
   onUpdateCustomer: (updated: Partial<Customer>) => void;
   onOpenCreateOrder: () => void;
   onViewOrderInvoice: (orderId: string) => void;
+  onExportConversationPdf?: () => void;
   language: 'kh' | 'en';
 }
 
@@ -57,6 +59,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   onUpdateCustomer,
   onOpenCreateOrder,
   onViewOrderInvoice,
+  onExportConversationPdf,
   language,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
@@ -164,6 +167,26 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
               </p>
             </div>
           </div>
+
+          {onExportConversationPdf && (
+            <button
+              type="button"
+              onClick={onExportConversationPdf}
+              className="w-full mt-3 px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-colors shadow-xs cursor-pointer"
+              title={
+                language === 'kh'
+                  ? 'ទាញយកប្រវត្តិសន្ទនាអតិថិជនទាំងអស់ជាឯកសារ PDF'
+                  : 'Export full conversation history as PDF document'
+              }
+            >
+              <FileDown className="w-3.5 h-3.5 text-sky-400" />
+              <span>
+                {language === 'kh'
+                  ? 'ទាញយកប្រវត្តិឆាតជា PDF'
+                  : 'Export Chat History (PDF)'}
+              </span>
+            </button>
+          )}
         </div>
 
         {/* Contact & Delivery Details */}

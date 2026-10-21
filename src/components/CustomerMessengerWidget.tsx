@@ -5,16 +5,67 @@ import {
   X,
   Minimize2,
   Maximize2,
-  Sparkles,
   Bot,
   Radio,
   UserPlus,
-  RefreshCw,
   CheckCheck,
   KeyRound,
   CheckCircle2,
+  Image as ImageIcon,
+  Volume2,
+  Play,
+  Pause,
 } from 'lucide-react';
 import { ChatThread, PageAccount } from '../types';
+
+const WIDGET_FALLBACK_IMAGE_SVG =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="260" viewBox="0 0 360 260">
+      <rect width="360" height="260" rx="18" fill="#eff6ff"/>
+      <circle cx="115" cy="88" r="24" fill="#93c5fd"/>
+      <path d="M40 215 L130 125 L205 190 L260 140 L320 215 Z" fill="#60a5fa"/>
+      <text x="180" y="242" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="bold" fill="#1e40af">រូបភាពក្នុងឆាត (Messenger Image)</text>
+    </svg>`
+  );
+
+function createWidgetWavDataUrl(durationSec = 3): string {
+  try {
+    const sampleRate = 8000;
+    const numSamples = Math.max(1, Math.floor(sampleRate * durationSec));
+    const buffer = new ArrayBuffer(44 + numSamples * 2);
+    const view = new DataView(buffer);
+    const writeStr = (offset: number, str: string) => {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    };
+    writeStr(0, 'RIFF');
+    view.setUint32(4, 36 + numSamples * 2, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, 'data');
+    view.setUint32(40, numSamples * 2, true);
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / sampleRate;
+      const env = Math.sin(Math.min(1, t * 6) * (Math.PI / 2)) * Math.max(0, 1 - t / durationSec);
+      const freq = 220 + 40 * Math.sin(2 * Math.PI * 2 * t);
+      const s = Math.sin(2 * Math.PI * freq * t) * env * 0.6;
+      view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, s)) * 12000, true);
+    }
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+    return `data:audio/wav;base64,${btoa(binary)}`;
+  } catch {
+    return '';
+  }
+}
 
 interface CustomerMessengerWidgetProps {
   selectedPage: PageAccount;
@@ -23,7 +74,12 @@ interface CustomerMessengerWidgetProps {
   isAiAutoReplying: boolean;
   autoIncomingStream: boolean;
   onToggleAutoIncomingStream: () => void;
-  onSendCustomerMessageToPage: (text: string, asNewCustomer?: boolean, customerName?: string) => void;
+  onSendCustomerMessageToPage: (
+    text: string,
+    asNewCustomer?: boolean,
+    customerName?: string,
+    attachments?: any[]
+  ) => void;
   onConnectRealToken?: (token: string) => Promise<boolean>;
   language: 'kh' | 'en';
 }
@@ -48,8 +104,10 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
   const [tokenValue, setTokenValue] = useState<string>('');
   const [isConnectingToken, setIsConnectingToken] = useState<boolean>(false);
   const [tokenSuccess, setTokenSuccess] = useState<boolean>(false);
+  const [playingWidgetAudioId, setPlayingWidgetAudioId] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const widgetImageInputRef = useRef<HTMLInputElement>(null);
 
   const isRealGraphToken = Boolean(
     selectedPage.accessToken &&
@@ -75,6 +133,80 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
     if (sendAsNewCustomer) {
       setSendAsNewCustomer(false);
     }
+  };
+
+  // Customer uploads an image in the Messenger Widget
+  const handleCustomerImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const rawUrl = ev.target?.result as string;
+      if (!rawUrl) return;
+      const img = new Image();
+      img.onload = () => {
+        let finalUrl = rawUrl;
+        try {
+          const MAX_DIM = 900;
+          let w = img.width || 600;
+          let h = img.height || 600;
+          if (w > MAX_DIM || h > MAX_DIM) {
+            if (w > h) {
+              h = Math.round((h * MAX_DIM) / w);
+              w = MAX_DIM;
+            } else {
+              w = Math.round((w * MAX_DIM) / h);
+              h = MAX_DIM;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+            ctx.drawImage(img, 0, 0, w, h);
+            finalUrl = canvas.toDataURL('image/jpeg', 0.85);
+          }
+        } catch {}
+
+        const caption = customerInput.trim() || 'បង ម៉ូដក្នុងរូបភាពនេះតម្លៃប៉ុន្មានដែរ?';
+        onSendCustomerMessageToPage(
+          `📷 [រូបភាពពីអតិថិជន]: ${caption}`,
+          sendAsNewCustomer,
+          customSenderName.trim() || undefined,
+          [{ type: 'image', data: { url: finalUrl, caption } }]
+        );
+        setCustomerInput('');
+      };
+      img.src = rawUrl;
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  // Customer sends a Voice Sound message into the Page
+  const handleSendCustomerVoiceSound = () => {
+    const voiceText =
+      customerInput.trim() || 'សួស្តីបង ម៉ូដនេះមានក្នុងស្តុកអត់? ហើយតម្លៃប៉ុន្មានដែរចា៎?';
+    const wavUrl = createWidgetWavDataUrl(3.5);
+    onSendCustomerMessageToPage(
+      `🎤 [សារសម្លេង Voice]: "${voiceText}"`,
+      sendAsNewCustomer,
+      customSenderName.trim() || undefined,
+      [
+        {
+          type: 'audio',
+          data: {
+            url: wavUrl,
+            duration: '0:04',
+            transcript: voiceText,
+          },
+        },
+      ]
+    );
+    setCustomerInput('');
   };
 
   const quickCustomerQuestions = [
@@ -122,9 +254,18 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
   return (
     <div
       className={`fixed right-3 bottom-3 z-40 bg-white rounded-2xl shadow-2xl border-2 border-[#0084FF]/40 flex flex-col overflow-hidden transition-all duration-200 ${
-        isMinimized ? 'w-80 h-14' : 'w-84 sm:w-92 h-[470px] max-h-[82vh]'
+        isMinimized ? 'w-80 h-14' : 'w-84 sm:w-92 h-[490px] max-h-[84vh]'
       }`}
     >
+      {/* Hidden Image Input for Customer Messenger Widget */}
+      <input
+        type="file"
+        ref={widgetImageInputRef}
+        onChange={handleCustomerImageUpload}
+        accept="image/*"
+        className="hidden"
+      />
+
       {/* Messenger Blue Header */}
       <div className="bg-gradient-to-r from-[#0084FF] to-[#0099FF] text-white px-3.5 py-2.5 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2.5 min-w-0">
@@ -151,8 +292,8 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
             </div>
             <p className="text-[10px] text-blue-100 truncate">
               {language === 'kh'
-                ? 'ឆាតពីទីនេះ ចូលក្នុងកម្មវិធីភ្លាមៗ Auto + AI ឆ្លើយតប'
-                : 'Chat here -> Enters App Auto + AI Replies'}
+                ? 'គាំទ្រសារអក្សរ, រូបភាព និងសារសម្លេង (Voice Sound)'
+                : 'Supports Text, Photos & Voice Sound'}
             </p>
           </div>
         </div>
@@ -284,7 +425,6 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
             </div>
 
             {(activeThread?.messages || []).slice(-10).map((msg) => {
-              // In Customer Messenger view: Customer's own messages are on the RIGHT (blue), Page/Bot replies are on the LEFT (white)
               const isCustomerMe = msg.sender === 'customer';
               const isBot = msg.sender === 'bot';
 
@@ -301,7 +441,7 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
                       : `💼 ${selectedPage.name.split(' - ')[0]} (Admin)`}
                   </span>
                   <div
-                    className={`max-w-[85%] px-3 py-2 rounded-2xl text-xs leading-relaxed shadow-2xs ${
+                    className={`max-w-[85%] px-3 py-2 rounded-2xl text-xs leading-relaxed shadow-2xs space-y-1.5 ${
                       isCustomerMe
                         ? 'bg-[#0084FF] text-white rounded-br-xs'
                         : isBot
@@ -310,6 +450,100 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
                     }`}
                   >
                     <p className="whitespace-pre-wrap break-words">{msg.text}</p>
+
+                    {/* Render Image, Audio, Product, and KHQR Attachments inside Customer Messenger Widget */}
+                    {msg.attachments && msg.attachments.length > 0 && (
+                      <div className="space-y-1.5 pt-1">
+                        {msg.attachments.map((att, idx) => {
+                          if (att.type === 'image') {
+                            const imgUrl = att.data?.url || (att as any).url || WIDGET_FALLBACK_IMAGE_SVG;
+                            return (
+                              <div key={idx} className="rounded-xl overflow-hidden border border-white/20 bg-white">
+                                <img
+                                  src={imgUrl}
+                                  alt={att.data?.caption || 'Image'}
+                                  referrerPolicy="no-referrer"
+                                  onError={(e) => {
+                                    const target = e.currentTarget;
+                                    const src = target.getAttribute('src') || '';
+                                    if (src.startsWith('http') && !src.includes('/api/facebook/proxy-media')) {
+                                      target.src = `/api/facebook/proxy-media?url=${encodeURIComponent(src)}`;
+                                      return;
+                                    }
+                                    if (src !== WIDGET_FALLBACK_IMAGE_SVG) {
+                                      target.src = WIDGET_FALLBACK_IMAGE_SVG;
+                                    }
+                                  }}
+                                  className="w-full max-h-40 object-cover block"
+                                />
+                              </div>
+                            );
+                          }
+
+                          if (att.type === 'audio') {
+                            const audUrl = att.data?.url || (att as any).url || createWidgetWavDataUrl(3);
+                            const isPlaying = playingWidgetAudioId === msg.id;
+                            return (
+                              <div
+                                key={idx}
+                                className={`p-2 rounded-xl flex items-center gap-2 ${
+                                  isCustomerMe ? 'bg-white/20 text-white' : 'bg-indigo-50 text-indigo-950 border border-indigo-200'
+                                }`}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (playingWidgetAudioId === msg.id) {
+                                      setPlayingWidgetAudioId(null);
+                                      return;
+                                    }
+                                    setPlayingWidgetAudioId(msg.id);
+                                    const audio = new Audio(audUrl);
+                                    audio.onended = () => setPlayingWidgetAudioId(null);
+                                    audio.onerror = () => setPlayingWidgetAudioId(null);
+                                    audio.play().catch(() => setPlayingWidgetAudioId(null));
+                                  }}
+                                  className="w-7 h-7 rounded-full bg-white text-[#0084FF] flex items-center justify-center shrink-0 cursor-pointer shadow-2xs"
+                                >
+                                  {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
+                                </button>
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-[10px] font-bold flex items-center gap-1">
+                                    <Volume2 className="w-3 h-3" />
+                                    <span>សារសម្លេង ({att.data?.duration || '0:04'})</span>
+                                  </div>
+                                  {att.data?.transcript && (
+                                    <p className="text-[10px] opacity-90 truncate">"{att.data.transcript}"</p>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          }
+
+                          if (att.type === 'product' && att.data) {
+                            return (
+                              <div key={idx} className="p-2 rounded-xl bg-slate-50 text-slate-900 border border-slate-200 flex items-center gap-2">
+                                <img
+                                  src={att.data.imageUrl || WIDGET_FALLBACK_IMAGE_SVG}
+                                  alt={att.data.nameKh}
+                                  referrerPolicy="no-referrer"
+                                  onError={(e) => {
+                                    e.currentTarget.src = WIDGET_FALLBACK_IMAGE_SVG;
+                                  }}
+                                  className="w-10 h-10 rounded-lg object-cover shrink-0"
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-[11px] font-bold truncate">{att.data.nameKh}</p>
+                                  <p className="text-[10px] text-blue-600 font-extrabold">${Number(att.data.price || 0).toFixed(2)}</p>
+                                </div>
+                              </div>
+                            );
+                          }
+
+                          return null;
+                        })}
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-1 mt-0.5 px-1 text-[9px] text-slate-400">
                     <span>{msg.timestamp}</span>
@@ -349,17 +583,33 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
             ))}
           </div>
 
-          {/* Customer Messenger Input Form */}
+          {/* Customer Messenger Input Form with Photo & Voice Sound buttons */}
           <form
             onSubmit={handleSubmit}
-            className="bg-white border-t border-slate-200 p-2.5 flex items-center gap-2 shrink-0"
+            className="bg-white border-t border-slate-200 p-2 flex items-center gap-1.5 shrink-0"
           >
+            <button
+              type="button"
+              onClick={() => widgetImageInputRef.current?.click()}
+              className="w-8 h-8 rounded-full bg-blue-50 hover:bg-blue-100 text-[#0084FF] flex items-center justify-center shrink-0 transition-colors cursor-pointer"
+              title="ផ្ញើរូបភាពពីអតិថិជនចូលផេក"
+            >
+              <ImageIcon className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={handleSendCustomerVoiceSound}
+              className="w-8 h-8 rounded-full bg-indigo-50 hover:bg-indigo-100 text-indigo-600 flex items-center justify-center shrink-0 transition-colors cursor-pointer"
+              title="ផ្ញើសារសម្លេង (Voice Sound) ពីអតិថិជនចូលផេក"
+            >
+              <Volume2 className="w-4 h-4" />
+            </button>
             <input
               type="text"
               value={customerInput}
               onChange={(e) => setCustomerInput(e.target.value)}
-              placeholder="វាយសារភ្ញៀវឆាតចូលផេក Messenger ទីនេះ..."
-              className="flex-1 bg-slate-100 border border-slate-200 rounded-full px-3.5 py-2 text-xs text-slate-800 focus:outline-none focus:border-[#0084FF] focus:bg-white"
+              placeholder="វាយសារ, ផ្ញើរូប ឬសម្លេងចូលផេក..."
+              className="flex-1 bg-slate-100 border border-slate-200 rounded-full px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:border-[#0084FF] focus:bg-white"
             />
             <button
               type="submit"

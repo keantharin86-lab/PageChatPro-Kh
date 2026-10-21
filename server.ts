@@ -66,6 +66,65 @@ app.get('/api/health', (req: Request, res: Response) => {
   });
 });
 
+// Built-in SVG data URLs so stickers & fallback images never display a broken "?" icon
+const BUILT_IN_LIKE_STICKER_SVG =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120"><circle cx="60" cy="60" r="56" fill="#EBF5FF"/><path d="M52 52V35c0-6.6 5.4-12 12-12 3.3 0 6 2.7 6 6v15h17.4c5 0 8.8 4.5 7.9 9.4l-4.6 25c-.7 3.8-4 6.6-7.9 6.6H48c-4.4 0-8-3.6-8-8V56c0-2.2 1.8-4 4-4h8zm-16 4h6v28h-6c-2.2 0-4-1.8-4-4V60c0-2.2 1.8-4 4-4z" fill="#0084FF"/></svg>`
+  );
+
+const FALLBACK_CHAT_IMAGE_SVG =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 280" width="400" height="280"><rect width="400" height="280" rx="16" fill="#F1F5F9"/><circle cx="145" cy="105" r="24" fill="#94A3B8"/><path d="M60 220l85-85 65 65 45-45 85 65H60z" fill="#CBD5E1"/></svg>`
+  );
+
+function isValidMediaUrl(raw?: any): raw is string {
+  if (!raw || typeof raw !== 'string') return false;
+  const trimmed = raw.trim();
+  return (
+    trimmed.startsWith('https://') ||
+    trimmed.startsWith('http://') ||
+    trimmed.startsWith('data:') ||
+    trimmed.startsWith('blob:') ||
+    trimmed.startsWith('/api/')
+  );
+}
+
+function isAudioMimeOrUrl(mimeType?: string, url?: string): boolean {
+  const m = (mimeType || '').toLowerCase();
+  const u = (url || '').toLowerCase();
+  if (m.startsWith('audio/') || m.includes('voice') || m.includes('ogg') || m.includes('aac') || m.includes('mpeg')) {
+    return true;
+  }
+  if (
+    u.includes('audioclip') ||
+    /\.(mp3|wav|ogg|aac|m4a|opus|flac)(\?|$)/i.test(u) ||
+    (m === 'video/mp4' && u.includes('audioclip'))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function toProxiedFacebookMediaUrl(rawUrl: string, pageId?: string): string {
+  if (!isValidMediaUrl(rawUrl)) return '';
+  const trimmed = rawUrl.trim();
+  if (trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('/api/')) {
+    return trimmed;
+  }
+  if (
+    trimmed.includes('fbcdn.net') ||
+    trimmed.includes('fbsbx.com') ||
+    trimmed.includes('facebook.com')
+  ) {
+    return `/api/facebook/media-proxy?url=${encodeURIComponent(trimmed)}${
+      pageId ? `&pageId=${encodeURIComponent(pageId)}` : ''
+    }`;
+  }
+  return trimmed;
+}
+
 // In-memory cache for page tokens and live incoming Meta webhook messages
 interface MetaLiveEvent {
   id: string;
@@ -82,6 +141,9 @@ interface MetaLiveEvent {
   detectedLanguage?: { code: string; nameKh: string; nameEn: string };
   modelUsed?: string;
   attachmentUrl?: string;
+  attachmentType?: 'image' | 'audio';
+  attachments?: { type: 'image' | 'audio'; data: any }[];
+  voiceTranscript?: string;
 }
 
 const pageTokensCache = new Map<string, string>();
@@ -223,47 +285,141 @@ export async function generateAIAutoReply({
   incomingText,
   customerName = 'អតិថិជន',
   pageName = 'Malis Boutique - Cambodia',
+  products,
+  quickReplies,
+  autoReplies,
   recentHistory = [],
 }: {
   incomingText: string;
   customerName?: string;
   pageName?: string;
+  products?: any[];
+  quickReplies?: any[];
+  autoReplies?: any[];
   recentHistory?: { role: string; text: string }[];
 }): Promise<{ replyText: string; detectedLanguage: { code: string; nameKh: string; nameEn: string }; model: string }> {
   const lang = detectCustomerLanguage(incomingText);
   const ai = getAIClient();
 
+  const activeProducts: any[] =
+    Array.isArray(products) && products.length > 0 ? products : getOnlineProducts();
+  const activeQuickReplies: any[] =
+    Array.isArray(quickReplies) && quickReplies.length > 0 ? quickReplies : getOnlineQuickReplies();
+  const rawAutoReplies: any[] =
+    Array.isArray(autoReplies) && autoReplies.length > 0 ? autoReplies : getOnlineAutoReplies();
+  const activeAutoReplies: any[] = rawAutoReplies.filter((r) => r && r.enabled !== false);
+
+  const textLower = incomingText.toLowerCase().trim();
+
+  // 1. Check direct match in Quick Replies (សាររហ័ស) by shortcut
+  const matchedQuickReply = activeQuickReplies.find(
+    (qr) =>
+      qr &&
+      qr.shortcut &&
+      (textLower === String(qr.shortcut).toLowerCase().trim() ||
+        (qr.titleKh && textLower === String(qr.titleKh).toLowerCase().trim()))
+  );
+  if (matchedQuickReply && matchedQuickReply.content) {
+    return {
+      replyText: matchedQuickReply.content,
+      detectedLanguage: lang,
+      model: 'gemini-3.8-flash',
+    };
+  }
+
+  // 2. Check if customer mentions a specific product in Products (ទំនិញ)
+  const matchedProduct = activeProducts.find((p) => {
+    if (!p) return false;
+    const nameKh = String(p.nameKh || '').toLowerCase().trim();
+    const nameEn = String(p.name || '').toLowerCase().trim();
+    const sku = String(p.sku || '').toLowerCase().trim();
+    if (nameKh && textLower.includes(nameKh)) return true;
+    if (nameEn && textLower.includes(nameEn)) return true;
+    if (sku && textLower.includes(sku)) return true;
+    const khWords = nameKh.split(/\s+/).filter((w) => w.length >= 3);
+    const enWords = nameEn.split(/\s+/).filter((w) => w.length >= 3);
+    return khWords.some((w) => textLower.includes(w)) || enWords.some((w) => textLower.includes(w));
+  });
+
+  // 3. Check if customer message matches an enabled Bot Auto-Reply Rule (Bot ឆ្លើយតបអូតូ)
+  const matchedBotRule = activeAutoReplies.find(
+    (rule) =>
+      Array.isArray(rule.triggerKeywords) &&
+      rule.triggerKeywords.some((kw: string) => kw && textLower.includes(String(kw).toLowerCase().trim()))
+  );
+
+  // If an enabled Bot Rule matches AND the customer did not ask about a different specific product, return the exact Bot Rule response (or enrich with matchedProduct price)
+  if (matchedBotRule && matchedBotRule.responseKh && !matchedProduct) {
+    return {
+      replyText: matchedBotRule.responseKh,
+      detectedLanguage: lang,
+      model: 'gemini-3.8-flash',
+    };
+  }
+
+  // Build strict catalog & Quick Replies / Bot context for Gemini
+  const productsCatalogContext =
+    activeProducts.length > 0
+      ? activeProducts
+          .map((p, idx) => {
+            const pPrice = Number(p.price || 0).toFixed(2);
+            const pKhr = Number(p.priceKhr || Math.round(Number(p.price || 0) * 4100)).toLocaleString();
+            return `  ${idx + 1}. ${p.nameKh || p.name} (${p.name || ''}) — តម្លៃ/Price: $${pPrice} (${pKhr} រៀល) | ស្តុក/Stock: ${p.stock ?? 0} | SKU: ${p.sku || '-'} | ពិពណ៌នា: ${p.description || '-'}`;
+          })
+          .join('\n')
+      : '  (គ្មានទំនិញក្នុងបញ្ជីទេ / No products listed)';
+
+  const quickRepliesContext =
+    activeQuickReplies.length > 0
+      ? activeQuickReplies
+          .map(
+            (qr, idx) =>
+              `  ${idx + 1}. [${qr.shortcut || ''}] ${qr.titleKh || qr.title}: "${qr.content}"`
+          )
+          .join('\n')
+      : '  (គ្មានសាររហ័សទេ / No quick replies)';
+
+  const botRulesContext =
+    activeAutoReplies.length > 0
+      ? activeAutoReplies
+          .map(
+            (r, idx) =>
+              `  ${idx + 1}. Keywords [${(r.triggerKeywords || []).join(', ')}] => "${r.responseKh}"`
+          )
+          .join('\n')
+      : '  (គ្មានលក្ខខណ្ឌ Bot ទេ / No bot rules)';
+
   if (ai) {
     try {
-      const systemInstruction = `You are the official 24/7 AI Sales & Customer Service Assistant for "${pageName}" on Facebook Messenger in Cambodia.
-Your job is to automatically reply to incoming customer messages on Facebook Messenger with exceptional politeness, warmth, speed, and accuracy.
+      const systemInstruction = `You are the official AI Sales & Customer Service Assistant for "${pageName}" on Facebook Messenger in Cambodia.
 
-CRITICAL LANGUAGE INSTRUCTIONS:
-1. Automatically adapt to the customer's language.
-   - Detected Language: ${lang.nameKh} (${lang.nameEn}).
-2. IF KHMER (or Khmer Romanized like "bong man", "mean size ot", "price man"):
-   - You MUST reply in natural, polite Khmer script (អក្សរខ្មែរ).
-   - Address the customer warmly and respectfully as "បង" or "បងស្រី/បងប្រុស ${customerName}".
-   - Use polite Cambodian particles: "ចា៎/បាទ", "ណា៎បង", "ជម្រាបសួរ".
-3. IF ENGLISH: Reply in professional, friendly, and concise English.
-4. IF CHINESE / THAI / VIETNAMESE: Reply politely in that exact language with warm Cambodian hospitality.
+STRICT & MANDATORY PRICING AND INFORMATION RULE (ច្បាប់តឹងរ៉ឹងបំផុត):
+1. You MUST ONLY state prices, product information, promotions, shipping rates, and payment details that are explicitly listed in:
+   (A) [បញ្ជីទំនិញក្នុងហាង / AUTHORIZED PRODUCTS CATALOG (ទំនិញ)] below, AND
+   (B) [ប្រអប់ សាររហ័ស & Bot / AUTHORIZED QUICK REPLIES & BOT RULES] below.
+2. NEVER invent, guess, assume, or quote ANY price or product that is not written in [បញ្ជីទំនិញក្នុងហាង] or [ប្រអប់ សាររហ័ស & Bot].
+3. When a customer asks for a price:
+   - If their question matches a specific product in [បញ្ជីទំនិញក្នុងហាង], state the EXACT price ($ USD and រៀល KHR) from [បញ្ជីទំនិញក្នុងហាង].
+   - If their question matches a template or keyword in [ប្រអប់ សាររហ័ស & Bot], use the EXACT price and wording from [ប្រអប់ សាររហ័ស & Bot] and [បញ្ជីទំនិញក្នុងហាង].
+   - If they ask a general price question, state ONLY the prices from [ប្រអប់ សាររហ័ស & Bot] and [បញ្ជីទំនិញក្នុងហាង].
 
-BUSINESS & STORE INFORMATION:
-- Shop: ${pageName} (Fashion & E-Commerce Cambodia)
-- Featured Products:
-  * រ៉ូបហូលផាមួងខ្មែរម៉ូដសម័យ (Luxury Khmer Silk Dress) - $38.00 (Promotion: $34.00, Sizes S, M, L, XL, Free silk scarf)
-  * សេរ៉ូមធម្មជាតិ Botanica Herbal Radiance - $24.50 (Natural extract, glowing skin)
-  * កាសឥតខ្សែ Wireless Earbuds Pro - $19.90 (36h battery, IPX5)
-- Delivery (សេវាដឹកជញ្ជូន):
-  * Phnom Penh (ភ្នំពេញ): $1.50 (1 day or Grab Express instant)
-  * Provinces (តាមខេត្ត): $2.00 (1-2 days via J&T Express or Virak Buntham)
-- Payment (ការទូទាត់):
-  * ABA Bank & Bakong KHQR: Account 005 452 334 (Sok Chea CHHAI)
-  * Cash On Delivery (COD / ទទួលអីវ៉ាន់ចាំបង់លុយ) is available!
-- Format Requirements:
-  * Keep reply concise (2-3 sentences), warm, and encouraging.
-  * Use cheerful, friendly emojis (✨, 👗, 🌸, 💕, 🙏).
-  * Return ONLY the message text to send to the customer. No markdown headers, no code fences.`;
+LANGUAGE INSTRUCTIONS:
+- Detected Customer Language: ${lang.nameKh} (${lang.nameEn}).
+- If Khmer or Romanized Khmer: Reply in natural, polite Khmer script (អក្សរខ្មែរ), addressing the customer as "បង ${customerName}" with polite particles ("ចា៎/បាទ", "ណា៎បង").
+- If English / Chinese: Reply politely in that language while strictly quoting ONLY the exact prices from the two authorized sections below.
+
+[A. បញ្ជីទំនិញក្នុងហាង / AUTHORIZED PRODUCTS CATALOG (ទំនិញ)]:
+${productsCatalogContext}
+
+[B. ប្រអប់ សាររហ័ស & Bot / AUTHORIZED QUICK REPLIES (សាររហ័ស)]:
+${quickRepliesContext}
+
+[C. ប្រអប់ សាររហ័ស & Bot / AUTHORIZED BOT AUTO-REPLY RULES (Bot ឆ្លើយតបអូតូ)]:
+${botRulesContext}
+
+Format Requirements:
+- Keep reply concise (2-3 sentences), warm, and accurate.
+- Return ONLY the message text to send to the customer. No markdown headers or code fences.`;
 
       const historyItems = recentHistory
         .slice(-4)
@@ -276,7 +432,7 @@ BUSINESS & STORE INFORMATION:
       const normalizedContents: { role: 'user' | 'model'; parts: { text: string }[] }[] = [];
       for (const item of historyItems) {
         if (normalizedContents.length === 0 && item.role === 'model') {
-          continue; // Gemini requires first turn to be 'user'
+          continue;
         }
         const prev = normalizedContents[normalizedContents.length - 1];
         if (prev && prev.role === item.role) {
@@ -286,7 +442,14 @@ BUSINESS & STORE INFORMATION:
         }
       }
 
-      const finalUserText = `Customer Name: ${customerName}\nCustomer Message: "${incomingText}"`;
+      const finalUserText = `Customer Name: ${customerName}\nCustomer Message: "${incomingText}"${
+        matchedProduct
+          ? `\n[Matched Product in ទំនិញ]: ${matchedProduct.nameKh || matchedProduct.name} — Price: $${Number(
+              matchedProduct.price
+            ).toFixed(2)} (${Number(matchedProduct.priceKhr || matchedProduct.price * 4100).toLocaleString()} រៀល)`
+          : ''
+      }${matchedBotRule ? `\n[Matched Rule in សាររហ័ស & Bot]: "${matchedBotRule.responseKh}"` : ''}`;
+
       const lastTurn = normalizedContents[normalizedContents.length - 1];
       if (lastTurn && lastTurn.role === 'user') {
         lastTurn.parts[0].text += `\n\n${finalUserText}`;
@@ -302,7 +465,7 @@ BUSINESS & STORE INFORMATION:
         contents: normalizedContents,
         config: {
           systemInstruction,
-          temperature: 0.7,
+          temperature: 0.2,
         },
       });
 
@@ -315,45 +478,127 @@ BUSINESS & STORE INFORMATION:
         };
       }
     } catch (apiErr) {
-      console.warn('[AI Auto-Reply] Gemini API call error, falling back to smart rules:', apiErr);
+      console.warn('[AI Auto-Reply] Gemini API call error, falling back to strict Products & QuickReplies/Bot rules:', apiErr);
     }
   }
 
-  // Smart contextual fallback engine
-  let fallbackReply = '';
-  const textLower = incomingText.toLowerCase();
+  // Strict Fallback Engine using ONLY Products (ទំនិញ) and Quick Replies & Bot (សាររហ័ស & Bot)
+  if (matchedProduct) {
+    const pPrice = Number(matchedProduct.price || 0).toFixed(2);
+    const pKhr = Number(matchedProduct.priceKhr || Math.round(Number(matchedProduct.price || 0) * 4100)).toLocaleString();
+    const botSuffix = matchedBotRule ? `\n${matchedBotRule.responseKh}` : '';
+    return {
+      replyText: `ជម្រាបសួរបង ${customerName}! សម្រាប់ "${matchedProduct.nameKh || matchedProduct.name}" តម្លៃ $${pPrice} (${pKhr} រៀល) មានក្នុងស្តុក ${matchedProduct.stock ?? 0} បងចា៎ ✨${botSuffix}`,
+      detectedLanguage: lang,
+      model: 'fallback-rules',
+    };
+  }
 
-  if (lang.code === 'en') {
-    if (textLower.includes('price') || textLower.includes('how much') || textLower.includes('cost')) {
-      fallbackReply = `Hello ${customerName}! Thank you for reaching out to ${pageName} ✨ Our luxury dresses are $38.00 (promotional $34.00) and skincare is $24.50. Which item can we help you with?`;
-    } else if (textLower.includes('order') || textLower.includes('buy')) {
-      fallbackReply = `Hello ${customerName}! We would love to prepare your order. Please kindly send your phone number and delivery location in Cambodia, and we will dispatch it right away! 📦`;
-    } else if (textLower.includes('aba') || textLower.includes('payment') || textLower.includes('khqr')) {
-      fallbackReply = `You can pay instantly via ABA Bank & Bakong KHQR: 005 452 334 (Sok Chea CHHAI) or choose Cash on Delivery (COD) upon arrival! 💳`;
-    } else {
-      fallbackReply = `Hello ${customerName}! Thank you for contacting ${pageName}. All items are in stock with nationwide delivery across Cambodia! How may we assist you today? 🌸`;
+  if (matchedBotRule && matchedBotRule.responseKh) {
+    return {
+      replyText: matchedBotRule.responseKh,
+      detectedLanguage: lang,
+      model: 'fallback-rules',
+    };
+  }
+
+  const isPriceInquiry =
+    textLower.includes('ថ្លៃ') ||
+    textLower.includes('តម្លៃ') ||
+    textLower.includes('តំលៃ') ||
+    textLower.includes('ប៉ុន្មាន') ||
+    textLower.includes('price') ||
+    textLower.includes('how much') ||
+    textLower.includes('cost') ||
+    textLower.includes('man') ||
+    textLower.includes('ponman');
+
+  if (isPriceInquiry) {
+    const priceQr = activeQuickReplies.find(
+      (q) =>
+        q &&
+        (String(q.shortcut || '').toLowerCase().includes('price') ||
+          String(q.titleKh || '').includes('តម្លៃ') ||
+          String(q.titleKh || '').includes('តំលៃ') ||
+          String(q.content || '').includes('$'))
+    );
+    const productsPriceSummary = activeProducts
+      .map(
+        (p) =>
+          `• ${p.nameKh || p.name}: $${Number(p.price || 0).toFixed(2)} (${Number(
+            p.priceKhr || Math.round(Number(p.price || 0) * 4100)
+          ).toLocaleString()} រៀល)`
+      )
+      .join('\n');
+
+    if (priceQr && priceQr.content && activeProducts.length > 0) {
+      return {
+        replyText: `${priceQr.content}\n\n📋 តម្លៃទំនិញក្នុងហាង៖\n${productsPriceSummary}`,
+        detectedLanguage: lang,
+        model: 'fallback-rules',
+      };
     }
-  } else if (lang.code === 'zh') {
-    fallbackReply = `您好 ${customerName}！感谢您联系 ${pageName}。我们的商品现货充足，支持金边及全柬埔寨配送。支持 ABA/KHQR 或货到付款！请问有什么可以为您服务？`;
-  } else {
-    // Khmer or Romanized Khmer
-    if (textLower.includes('ថ្លៃ') || textLower.includes('តម្លៃ') || textLower.includes('តំលៃ') || textLower.includes('price') || textLower.includes('man') || textLower.includes('ponman')) {
-      fallbackReply = `ជម្រាបសួរបង ${customerName}! ម៉ូដនេះតម្លៃពេញ $38.00 (ឥឡូវប្រូម៉ូសិនពិសេសត្រឹម $34.00 ប៉ុណ្ណោះបង) មានទំហំ S, M, L, XL ពេញស្តុកបងចា៎ ✨ បងស្រលាញ់ពណ៌ណាដែរចា៎?`;
-    } else if (textLower.includes('មាន') || textLower.includes('ស្តុក') || textLower.includes('size') || textLower.includes('ទំហំ')) {
-      fallbackReply = `ចាស៎បង ម៉ូដនេះមានគ្រប់ទំហំ (S, M, L, XL) សាច់ក្រណាត់សូត្រទន់រលោងត្រជាក់ ថែមក្រមាសូត្រមួយជូនភ្លាមៗបងចា៎ 🌸`;
-    } else if (textLower.includes('aba') || textLower.includes('khqr') || textLower.includes('កុង') || textLower.includes('លុយ') || textLower.includes('គណនី')) {
-      fallbackReply = `បងអាចស្កេនទូទាត់តាម ABA / Bakong KHQR គណនីលេខ: 005 452 334 (Sok Chea CHHAI) ឬជ្រើសរើសបង់លុយសុទ្ធពេលអីវ៉ាន់ដល់ដៃ (COD) ក៏បានបងចា៎! 💳`;
-    } else if (textLower.includes('ដឹក') || textLower.includes('ផ្ញើ') || textLower.includes('សេវា') || textLower.includes('delivery')) {
-      fallbackReply = `សេវាដឹកជញ្ជូនភ្នំពេញ $1.50 (១ថ្ងៃដល់ ឬ Grab ភ្លាមៗ) តាមបណ្តាខេត្ត $2.00 (១-២ ថ្ងៃតាម J&T / វីរៈប៊ុនថាំ) ណា៎បងចា៎ 🚚`;
-    } else if (textLower.includes('យក') || textLower.includes('កុម្ម៉ង់') || textLower.includes('ទិញ') || textLower.includes('order')) {
-      fallbackReply = `ចាស៎បង! សូមបងជួយផ្ញើ [លេខទូរស័ព្ទ] និង [ទីតាំងទទួល] មកខាងប្អូនរៀបចំកញ្ចប់អីវ៉ាន់ជូនបងភ្លាមៗណា៎បងចា៎ 💕`;
-    } else {
-      fallbackReply = `ជម្រាបសួរបង ${customerName}! សូមស្វាគមន៍មកកាន់ ${pageName} 🌸 អីវ៉ាន់មានក្នុងស្តុកស្រាប់ និងមានសេវាដឹកជូនទូទាំងប្រទេស! តើប្អូនអាចជួយបងលើផលិតផលណាដែរចា៎? ✨`;
+    if (priceQr && priceQr.content) {
+      return {
+        replyText: priceQr.content,
+        detectedLanguage: lang,
+        model: 'fallback-rules',
+      };
+    }
+    if (activeProducts.length > 0) {
+      return {
+        replyText: `ជម្រាបសួរបង ${customerName}! នេះជាតម្លៃទំនិញក្នុងហាងយើងខ្ញុំបងចា៎៖\n${productsPriceSummary}`,
+        detectedLanguage: lang,
+        model: 'fallback-rules',
+      };
     }
   }
+
+  // Check if any Quick Reply matches by category or keywords (payment / delivery / address / greeting)
+  if (
+    textLower.includes('aba') ||
+    textLower.includes('khqr') ||
+    textLower.includes('កុង') ||
+    textLower.includes('លុយ') ||
+    textLower.includes('គណនី')
+  ) {
+    const payQr = activeQuickReplies.find(
+      (q) => q.category === 'payment' || String(q.shortcut || '').includes('aba')
+    );
+    if (payQr?.content) {
+      return { replyText: payQr.content, detectedLanguage: lang, model: 'fallback-rules' };
+    }
+  }
+
+  if (
+    textLower.includes('ដឹក') ||
+    textLower.includes('ផ្ញើ') ||
+    textLower.includes('សេវា') ||
+    textLower.includes('delivery')
+  ) {
+    const shipQr = activeQuickReplies.find(
+      (q) => q.category === 'delivery' || String(q.shortcut || '').includes('ship')
+    );
+    if (shipQr?.content) {
+      return { replyText: shipQr.content, detectedLanguage: lang, model: 'fallback-rules' };
+    }
+  }
+
+  // Default fallback using Products + first Quick Reply
+  const defaultProductsLine =
+    activeProducts.length > 0
+      ? activeProducts
+          .map((p) => `• ${p.nameKh || p.name}: $${Number(p.price || 0).toFixed(2)}`)
+          .join('\n')
+      : '';
+  const firstQr = activeQuickReplies[0]?.content || '';
 
   return {
-    replyText: fallbackReply,
+    replyText: defaultProductsLine
+      ? `ជម្រាបសួរបង ${customerName}! សូមស្វាគមន៍មកកាន់ ${pageName} 🌸\n📋 តម្លៃទំនិញក្នុងហាង៖\n${defaultProductsLine}${
+          firstQr ? `\n\n${firstQr}` : ''
+        }`
+      : firstQr || `ជម្រាបសួរបង ${customerName}! តើប្អូនអាចជួយបងលើទំនិញមួយណាដែរចា៎?`,
     detectedLanguage: lang,
     model: 'fallback-rules',
   };
@@ -372,6 +617,9 @@ const handleMetaWebhookPost = async (req: Request, res: Response) => {
       mid?: string;
       avatarUrl?: string;
       attachmentUrl?: string;
+      attachmentType?: 'image' | 'audio';
+      attachments?: { type: 'image' | 'audio'; data: any }[];
+      voiceTranscript?: string;
     }[] = [];
 
     if (body && body.object === 'page' && Array.isArray(body.entry)) {
@@ -389,16 +637,68 @@ const handleMetaWebhookPost = async (req: Request, res: Response) => {
           const postbackText = msgEvent.postback?.title || msgEvent.postback?.payload;
           let text = typeof msg?.text === 'string' ? msg.text.trim() : postbackText ? String(postbackText).trim() : '';
           let attachmentUrl = '';
+          let attachmentType: 'image' | 'audio' | undefined;
+          const parsedAttachments: { type: 'image' | 'audio'; data: any }[] = [];
 
           if (Array.isArray(msg?.attachments) && msg.attachments.length > 0) {
-            const firstAtt = msg.attachments[0];
-            attachmentUrl = firstAtt?.payload?.url || '';
+            for (const att of msg.attachments) {
+              const rawType = String(att?.type || '').toLowerCase();
+              const rawUrl = att?.payload?.url || att?.url || '';
+              const isSticker = Boolean(att?.payload?.sticker_id || msg?.sticker_id);
+
+              if (rawType === 'audio' || isAudioMimeOrUrl(rawType, rawUrl)) {
+                const proxiedUrl = toProxiedFacebookMediaUrl(rawUrl, pageId);
+                if (proxiedUrl) {
+                  attachmentType = 'audio';
+                  if (!attachmentUrl) attachmentUrl = proxiedUrl;
+                  parsedAttachments.push({
+                    type: 'audio',
+                    data: {
+                      url: proxiedUrl,
+                      rawUrl,
+                      mimeType: 'audio/mp4',
+                      caption: text || '🎤 សារសម្លេងពីអតិថិជន (Voice Message)',
+                    },
+                  });
+                }
+              } else if (rawType === 'image' || isSticker || isValidMediaUrl(rawUrl)) {
+                const resolvedImgUrl = isValidMediaUrl(rawUrl)
+                  ? toProxiedFacebookMediaUrl(rawUrl, pageId)
+                  : isSticker
+                  ? BUILT_IN_LIKE_STICKER_SVG
+                  : '';
+                if (resolvedImgUrl) {
+                  if (!attachmentType) attachmentType = 'image';
+                  if (!attachmentUrl) attachmentUrl = resolvedImgUrl;
+                  parsedAttachments.push({
+                    type: 'image',
+                    data: {
+                      url: resolvedImgUrl,
+                      rawUrl: isValidMediaUrl(rawUrl) ? rawUrl : undefined,
+                      isSticker,
+                      caption: text || (isSticker ? '👍 រូប Logo / Sticker' : '📷 រូបភាពពីអតិថិជន'),
+                    },
+                  });
+                }
+              }
+            }
+
             if (!text) {
-              const isSticker = Boolean(firstAtt?.payload?.sticker_id || msg?.sticker_id);
-              text = isSticker ? '👍 [ភ្ញៀវផ្ញើរូប Logo / Sticker]' : '📷 [ភ្ញៀវផ្ញើរូបភាព]';
+              if (attachmentType === 'audio') {
+                text = '🎤 [សារសម្លេង / Voice Message]';
+              } else {
+                const isSticker = Boolean(msg.attachments[0]?.payload?.sticker_id || msg?.sticker_id);
+                text = isSticker ? '👍 [ភ្ញៀវផ្ញើរូប Logo / Sticker]' : '📷 [ភ្ញៀវផ្ញើរូបភាព]';
+              }
             }
           } else if (!text && msg?.sticker_id) {
             text = '👍 [ភ្ញៀវផ្ញើរូប Logo / Sticker]';
+            attachmentType = 'image';
+            attachmentUrl = BUILT_IN_LIKE_STICKER_SVG;
+            parsedAttachments.push({
+              type: 'image',
+              data: { url: BUILT_IN_LIKE_STICKER_SVG, isSticker: true, caption: '👍 រូប Logo / Sticker' },
+            });
           }
 
           if (text && !msg?.is_echo && senderId && senderId !== pageId) {
@@ -409,6 +709,8 @@ const handleMetaWebhookPost = async (req: Request, res: Response) => {
               text,
               mid: msg?.mid,
               attachmentUrl: attachmentUrl || undefined,
+              attachmentType,
+              attachments: parsedAttachments.length > 0 ? parsedAttachments : undefined,
             });
           }
         }
@@ -441,16 +743,23 @@ const handleMetaWebhookPost = async (req: Request, res: Response) => {
           }
         }
       }
-    } else if (body && typeof body.text === 'string' && body.text.trim()) {
+    } else if (body && (typeof body.text === 'string' || body.attachmentUrl || body.attachments)) {
       // 3. Direct webhook payload support
+      const reqPageId = String(body.pageId || 'page_malis_fashion');
+      const attType: 'image' | 'audio' | undefined =
+        body.attachmentType === 'audio' ? 'audio' : body.attachmentUrl ? 'image' : undefined;
+      const proxiedUrl = body.attachmentUrl ? toProxiedFacebookMediaUrl(body.attachmentUrl, reqPageId) : undefined;
       rawMessagingEvents.push({
-        pageId: String(body.pageId || 'page_malis_fashion'),
+        pageId: reqPageId,
         senderId: String(body.senderId || `fb_usr_${Date.now()}`),
         senderName: body.senderName,
-        text: body.text.trim(),
+        text: (body.text || (attType === 'audio' ? '🎤 [សារសម្លេង / Voice Message]' : '📷 [ភ្ញៀវផ្ញើរូបភាព]')).trim(),
         mid: body.mid || body.id,
         avatarUrl: body.avatarUrl,
-        attachmentUrl: body.attachmentUrl,
+        attachmentUrl: proxiedUrl,
+        attachmentType: attType,
+        attachments: body.attachments,
+        voiceTranscript: body.voiceTranscript,
       });
     }
 
@@ -467,6 +776,9 @@ const handleMetaWebhookPost = async (req: Request, res: Response) => {
         mid: item.mid,
         avatarUrl: item.avatarUrl,
         attachmentUrl: item.attachmentUrl,
+        attachmentType: item.attachmentType,
+        attachments: item.attachments,
+        voiceTranscript: item.voiceTranscript,
         detectedLanguage: detectedLang,
       };
 
@@ -861,28 +1173,28 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
         const realFbPageId = resolved.realFbPageId || '';
         const realFbPageName = resolved.realFbPageName || shortPageName;
 
-        // Tier 1: Fetch full messages including text, stickers, and image attachments
-        let graphUrl = `https://graph.facebook.com/v21.0/me/conversations?fields=id,updated_time,unread_count,snippet,participants,senders,messages.limit(15){id,message,created_time,from,sticker,attachments{id,mime_type,name,file_url,image_data}}&access_token=${encodeURIComponent(activeToken)}`;
+        // Tier 1: Fetch full messages including text, image_data, file_url (voice/audio/files), video_data, and shares
+        let graphUrl = `https://graph.facebook.com/v21.0/me/conversations?fields=id,updated_time,unread_count,snippet,participants,senders,messages.limit(15){id,message,created_time,from,attachments{id,mime_type,name,file_url,image_data,video_data},shares{link,name,description}}&access_token=${encodeURIComponent(activeToken)}`;
         let graphRes = await fetch(graphUrl);
         let graphData = await graphRes.json();
 
-        // Tier 2: Standard messages fields fallback
+        // Tier 2: Messages with standard attachments (image_data & file_url for images and voice clips)
         if (graphData.error) {
-          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?fields=id,updated_time,unread_count,snippet,participants,messages.limit(15){id,message,created_time,from}&access_token=${encodeURIComponent(activeToken)}`;
+          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?fields=id,updated_time,unread_count,snippet,participants,messages.limit(15){id,message,created_time,from,attachments{id,mime_type,name,file_url,image_data}}&access_token=${encodeURIComponent(activeToken)}`;
           graphRes = await fetch(graphUrl);
           graphData = await graphRes.json();
         }
 
-        // Tier 3: Fallback without unread_count
+        // Tier 3: Fallback without unread_count but STILL keeping attachments
+        if (graphData.error) {
+          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?fields=id,updated_time,snippet,participants,messages.limit(15){id,message,created_time,from,attachments{id,mime_type,image_data,file_url}}&access_token=${encodeURIComponent(activeToken)}`;
+          graphRes = await fetch(graphUrl);
+          graphData = await graphRes.json();
+        }
+
+        // Tier 4: Minimal messages fallback
         if (graphData.error) {
           graphUrl = `https://graph.facebook.com/v21.0/me/conversations?fields=id,updated_time,snippet,participants,messages.limit(15){id,message,created_time,from}&access_token=${encodeURIComponent(activeToken)}`;
-          graphRes = await fetch(graphUrl);
-          graphData = await graphRes.json();
-        }
-
-        // Tier 4: Fallback to conversation-level snippet & participants if messages edge is restricted
-        if (graphData.error) {
-          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?fields=id,updated_time,unread_count,snippet,participants,senders&access_token=${encodeURIComponent(activeToken)}`;
           graphRes = await fetch(graphUrl);
           graphData = await graphRes.json();
         }
@@ -922,33 +1234,135 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
               .map((m: any, idx: number) => {
                 const isFromPage = isPageActor(m?.from);
                 let msgText = typeof m?.message === 'string' ? m.message.trim() : '';
-                const stickerUrl = typeof m?.sticker === 'string' ? m.sticker : '';
-                const firstAtt = m?.attachments?.data?.[0];
-                const imageUrl =
-                  stickerUrl ||
-                  firstAtt?.image_data?.url ||
-                  firstAtt?.file_url ||
-                  '';
 
-                if (!msgText && imageUrl) {
-                  msgText = stickerUrl
-                    ? '👍 [ភ្ញៀវផ្ញើរូប Logo / Sticker]'
-                    : '📷 [ភ្ញៀវផ្ញើរូបភាព]';
-                } else if (!msgText && (m?.sticker || (Array.isArray(m?.attachments?.data) && m.attachments.data.length > 0))) {
-                  msgText = '👍 [ភ្ញៀវផ្ញើរូប Logo / Sticker]';
-                } else if (!msgText && idx === 0 && snippetText) {
-                  // If Graph API blanked m.message on the newest text message, use the conversation snippet
-                  msgText = snippetText;
+                // Extract all valid attachments (images, voice audio clips, stickers/shares)
+                const rawAtts: any[] = Array.isArray(m?.attachments?.data) ? m.attachments.data : [];
+                const rawShares: any[] = Array.isArray(m?.shares?.data) ? m.shares.data : [];
+                const parsedAttachments: { type: 'image' | 'audio'; data: any }[] = [];
+                let primaryAttachmentUrl = '';
+                let primaryAttachmentType: 'image' | 'audio' | undefined;
+
+                for (const att of rawAtts) {
+                  const mime = String(att?.mime_type || '').toLowerCase();
+                  const imgCandidate =
+                    att?.image_data?.url ||
+                    att?.image_data?.preview_url ||
+                    (!isAudioMimeOrUrl(mime, att?.file_url) && mime.startsWith('image/') ? att?.file_url : '');
+                  const audioCandidate = isAudioMimeOrUrl(mime, att?.file_url || att?.video_data?.url)
+                    ? att?.file_url || att?.video_data?.url
+                    : '';
+
+                  if (isValidMediaUrl(audioCandidate)) {
+                    const proxiedAudio = toProxiedFacebookMediaUrl(audioCandidate, pageId);
+                    primaryAttachmentType = 'audio';
+                    if (!primaryAttachmentUrl) primaryAttachmentUrl = proxiedAudio;
+                    parsedAttachments.push({
+                      type: 'audio',
+                      data: {
+                        url: proxiedAudio,
+                        rawUrl: audioCandidate,
+                        mimeType: mime || 'audio/mp4',
+                        name: att?.name || 'សារសម្លេង (Voice Message)',
+                        caption: msgText || '🎤 សារសម្លេង (Voice Message)',
+                      },
+                    });
+                  } else if (isValidMediaUrl(imgCandidate)) {
+                    const proxiedImg = toProxiedFacebookMediaUrl(imgCandidate, pageId);
+                    if (!primaryAttachmentType) primaryAttachmentType = 'image';
+                    if (!primaryAttachmentUrl) primaryAttachmentUrl = proxiedImg;
+                    parsedAttachments.push({
+                      type: 'image',
+                      data: {
+                        url: proxiedImg,
+                        rawUrl: imgCandidate,
+                        caption: msgText || '',
+                      },
+                    });
+                  } else if (isValidMediaUrl(att?.file_url)) {
+                    const proxiedFile = toProxiedFacebookMediaUrl(att.file_url, pageId);
+                    if (!primaryAttachmentType) primaryAttachmentType = 'image';
+                    if (!primaryAttachmentUrl) primaryAttachmentUrl = proxiedFile;
+                    parsedAttachments.push({
+                      type: 'image',
+                      data: {
+                        url: proxiedFile,
+                        rawUrl: att.file_url,
+                        caption: msgText || '',
+                      },
+                    });
+                  }
+                }
+
+                // Check shares for stickers or shared images if no attachment was found
+                if (parsedAttachments.length === 0 && rawShares.length > 0) {
+                  const shareLink = rawShares[0]?.link || '';
+                  if (isValidMediaUrl(shareLink) && (shareLink.includes('fbcdn.net') || shareLink.includes('fbsbx.com'))) {
+                    const proxiedShare = toProxiedFacebookMediaUrl(shareLink, pageId);
+                    primaryAttachmentType = 'image';
+                    primaryAttachmentUrl = proxiedShare;
+                    parsedAttachments.push({
+                      type: 'image',
+                      data: {
+                        url: proxiedShare,
+                        rawUrl: shareLink,
+                        isSticker: true,
+                        caption: msgText || '👍 រូប Logo / Sticker',
+                      },
+                    });
+                  }
+                }
+
+                // Only use m.sticker if it is a real HTTP/HTTPS/data URL; if it is a numeric sticker ID, use built-in Like SVG
+                if (parsedAttachments.length === 0 && m?.sticker) {
+                  const stickerVal = typeof m.sticker === 'string' ? m.sticker : m.sticker?.url || '';
+                  const resolvedStickerUrl = isValidMediaUrl(stickerVal)
+                    ? toProxiedFacebookMediaUrl(stickerVal, pageId)
+                    : BUILT_IN_LIKE_STICKER_SVG;
+                  primaryAttachmentType = 'image';
+                  primaryAttachmentUrl = resolvedStickerUrl;
+                  parsedAttachments.push({
+                    type: 'image',
+                    data: {
+                      url: resolvedStickerUrl,
+                      isSticker: true,
+                      caption: '👍 រូប Logo / Sticker',
+                    },
+                  });
+                }
+
+                if (!msgText) {
+                  if (primaryAttachmentType === 'audio') {
+                    msgText = isFromPage ? '🎤 [សារសម្លេង]' : '🎤 [សារសម្លេងពីអតិថិជន / Voice Message]';
+                  } else if (parsedAttachments.length > 0) {
+                    const isSticker = Boolean(parsedAttachments[0]?.data?.isSticker);
+                    msgText = isSticker
+                      ? '👍 [ភ្ញៀវផ្ញើរូប Logo / Sticker]'
+                      : isFromPage
+                      ? '📷 [រូបភាព]'
+                      : '📷 [ភ្ញៀវផ្ញើរូបភាព]';
+                  } else if (rawAtts.length > 0) {
+                    msgText = '👍 [ភ្ញៀវផ្ញើរូប Logo / Sticker]';
+                    primaryAttachmentType = 'image';
+                    primaryAttachmentUrl = BUILT_IN_LIKE_STICKER_SVG;
+                    parsedAttachments.push({
+                      type: 'image',
+                      data: { url: BUILT_IN_LIKE_STICKER_SVG, isSticker: true, caption: '👍 រូប Logo / Sticker' },
+                    });
+                  } else if (idx === 0 && snippetText) {
+                    msgText = snippetText;
+                  }
                 }
 
                 return {
                   ...m,
                   message: msgText,
-                  attachmentUrl: imageUrl || undefined,
+                  attachmentUrl: primaryAttachmentUrl || undefined,
+                  attachmentType: primaryAttachmentType,
+                  parsedAttachments: parsedAttachments.length > 0 ? parsedAttachments : undefined,
                   isFromPage,
                 };
               })
-              .filter((m: any) => Boolean(m.message && m.message.trim()));
+              .filter((m: any) => Boolean((m.message && m.message.trim()) || (m.parsedAttachments && m.parsedAttachments.length > 0)));
 
             // Ensure conversation-level snippet (text message) is always included even if unread_count is 0
             if (snippetText) {
@@ -957,8 +1371,10 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
               );
               const rawNewest = messagesList[0];
               const newestIsFromPage = rawNewest ? isPageActor(rawNewest.from) : false;
+              const newestHasAttachments =
+                Array.isArray(rawNewest?.attachments?.data) && rawNewest.attachments.data.length > 0;
 
-              if (enrichedMessages.length === 0 || (!alreadyInEnriched && !newestIsFromPage)) {
+              if (enrichedMessages.length === 0 || (!alreadyInEnriched && !newestIsFromPage && !newestHasAttachments)) {
                 enrichedMessages.unshift({
                   id: rawNewest?.id || `snip_${c.id}_${c.updated_time || Date.now()}`,
                   message: snippetText,
@@ -1187,26 +1603,277 @@ function buildContextualCustomerReply(adminMessageText: string, pageName?: strin
   return 'ចាស៎បង អរគុណសម្រាប់ការឆ្លើយតបរហ័ស! ខ្ញុំពេញចិត្តផលិតផលរបស់ផេកបងណាស់ សូមជួយរៀបចំឱ្យខ្ញុំ ១ ឈុតផងណា៎បង ✨';
 }
 
-// API: Send message to customer via Meta Graph API or Live Messenger dispatch
+// ==========================================
+// MEDIA UPLOAD, PROXY & AI VOICE RECOGNITION ENDPOINTS
+// ==========================================
+const MEDIA_DIR = path.join(__dirname, 'data', 'media');
+
+function extractBinaryFromDataUrlOrMediaPath(urlOrData: string): { buffer: Buffer; mimeType: string; ext: string } | null {
+  if (!urlOrData || typeof urlOrData !== 'string') return null;
+  const trimmed = urlOrData.trim();
+
+  if (trimmed.startsWith('data:')) {
+    const match = trimmed.match(/^data:([^;]+);base64,(.+)$/s);
+    if (match) {
+      const mimeType = match[1] || 'image/jpeg';
+      const base64Data = match[2];
+      const ext = mimeType.includes('png')
+        ? 'png'
+        : mimeType.includes('webp')
+        ? 'webp'
+        : mimeType.includes('gif')
+        ? 'gif'
+        : mimeType.includes('webm')
+        ? 'webm'
+        : mimeType.includes('ogg')
+        ? 'ogg'
+        : mimeType.includes('wav')
+        ? 'wav'
+        : mimeType.includes('mp4') || mimeType.includes('m4a') || mimeType.includes('aac')
+        ? 'm4a'
+        : mimeType.includes('mpeg') || mimeType.includes('mp3')
+        ? 'mp3'
+        : 'jpg';
+      return {
+        buffer: Buffer.from(base64Data, 'base64'),
+        mimeType,
+        ext,
+      };
+    }
+  }
+
+  if (trimmed.startsWith('/api/media/')) {
+    const fname = path.basename(trimmed.replace(/^\/api\/media\//, '').split('?')[0]);
+    const fpath = path.join(MEDIA_DIR, fname);
+    if (fs.existsSync(fpath)) {
+      const ext = path.extname(fname).replace('.', '').toLowerCase() || 'jpg';
+      const mimeType =
+        ext === 'png'
+          ? 'image/png'
+          : ext === 'webp'
+          ? 'image/webp'
+          : ext === 'gif'
+          ? 'image/gif'
+          : ext === 'webm'
+          ? 'audio/webm'
+          : ext === 'ogg'
+          ? 'audio/ogg'
+          : ext === 'wav'
+          ? 'audio/wav'
+          : ext === 'm4a' || ext === 'mp4'
+          ? 'audio/mp4'
+          : ext === 'mp3'
+          ? 'audio/mpeg'
+          : 'image/jpeg';
+      return {
+        buffer: fs.readFileSync(fpath),
+        mimeType,
+        ext,
+      };
+    }
+  }
+
+  return null;
+}
+
+app.post('/api/media/upload', (req: Request, res: Response) => {
+  try {
+    const { dataUrl, type = 'image' } = req.body;
+    const parsed = extractBinaryFromDataUrlOrMediaPath(dataUrl);
+    if (!parsed) {
+      return res.status(400).json({ error: 'Valid base64 dataUrl is required' });
+    }
+    if (!fs.existsSync(MEDIA_DIR)) {
+      fs.mkdirSync(MEDIA_DIR, { recursive: true });
+    }
+    const filename = `${type}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${parsed.ext}`;
+    const filePath = path.join(MEDIA_DIR, filename);
+    fs.writeFileSync(filePath, parsed.buffer);
+    return res.json({
+      success: true,
+      url: `/api/media/${filename}`,
+      mimeType: parsed.mimeType,
+      size: parsed.buffer.length,
+    });
+  } catch (err: any) {
+    console.error('[Media Upload] Error:', err);
+    return res.status(500).json({ error: err.message || 'Failed to upload media' });
+  }
+});
+
+app.get('/api/media/:filename', (req: Request, res: Response) => {
+  try {
+    const fname = path.basename(req.params.filename);
+    const fpath = path.join(MEDIA_DIR, fname);
+    if (!fs.existsSync(fpath)) {
+      res.setHeader('Content-Type', 'image/svg+xml');
+      return res.send(decodeURIComponent(FALLBACK_CHAT_IMAGE_SVG.replace(/^data:image\/svg\+xml;utf8,/, '')));
+    }
+    const ext = path.extname(fname).replace('.', '').toLowerCase();
+    const mimeMap: Record<string, string> = {
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      png: 'image/png',
+      webp: 'image/webp',
+      gif: 'image/gif',
+      svg: 'image/svg+xml',
+      webm: 'audio/webm',
+      ogg: 'audio/ogg',
+      wav: 'audio/wav',
+      mp3: 'audio/mpeg',
+      m4a: 'audio/mp4',
+      mp4: 'audio/mp4',
+    };
+    res.setHeader('Content-Type', mimeMap[ext] || 'application/octet-stream');
+    res.setHeader('Cache-Control', 'public, max-age=31536000');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    return res.sendFile(fpath);
+  } catch {
+    res.setHeader('Content-Type', 'image/svg+xml');
+    return res.send(decodeURIComponent(FALLBACK_CHAT_IMAGE_SVG.replace(/^data:image\/svg\+xml;utf8,/, '')));
+  }
+});
+
+// Proxy Facebook CDN / Lookaside images & voice audio with Page Access Token so they never show a broken "?" icon
+app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
+  const rawUrl = String(req.query.url || '').trim();
+  const pageId = String(req.query.pageId || '').trim();
+  if (!rawUrl || (!rawUrl.startsWith('https://') && !rawUrl.startsWith('http://'))) {
+    res.setHeader('Content-Type', 'image/svg+xml');
+    return res.send(decodeURIComponent(FALLBACK_CHAT_IMAGE_SVG.replace(/^data:image\/svg\+xml;utf8,/, '')));
+  }
+
+  try {
+    const token = getBestRealTokenForPage(pageId);
+    let targetRes = await fetch(rawUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        Accept: 'image/*,audio/*,video/*,*/*;q=0.8',
+      },
+    });
+
+    if (!targetRes.ok && token && token.startsWith('EAA') && !token.startsWith('EAABw_')) {
+      const sep = rawUrl.includes('?') ? '&' : '?';
+      targetRes = await fetch(`${rawUrl}${sep}access_token=${encodeURIComponent(token)}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          Accept: 'image/*,audio/*,video/*,*/*;q=0.8',
+        },
+      });
+    }
+
+    if (targetRes.ok) {
+      const contentType = targetRes.headers.get('content-type') || 'image/jpeg';
+      const arrayBuf = await targetRes.arrayBuffer();
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      return res.send(Buffer.from(arrayBuf));
+    }
+  } catch (err) {
+    console.warn('[Media Proxy] Error fetching media:', err);
+  }
+
+  res.setHeader('Content-Type', 'image/svg+xml');
+  return res.send(decodeURIComponent(FALLBACK_CHAT_IMAGE_SVG.replace(/^data:image\/svg\+xml;utf8,/, '')));
+});
+
+// AI Voice-to-Text Transcription & Understanding Endpoint (/api/ai/transcribe-voice)
+app.post('/api/ai/transcribe-voice', async (req: Request, res: Response) => {
+  try {
+    const { audioUrl, audioDataUrl, hintText } = req.body;
+    const ai = getAIClient();
+
+    if (ai && (audioDataUrl || audioUrl)) {
+      let base64Audio = '';
+      let mimeType = 'audio/mp4';
+
+      const localParsed = extractBinaryFromDataUrlOrMediaPath(audioDataUrl || audioUrl);
+      if (localParsed) {
+        base64Audio = localParsed.buffer.toString('base64');
+        mimeType = localParsed.mimeType.startsWith('audio/') ? localParsed.mimeType : 'audio/webm';
+      } else if (typeof audioUrl === 'string' && (audioUrl.startsWith('http') || audioUrl.startsWith('/api/facebook/media-proxy'))) {
+        const targetFetchUrl = audioUrl.startsWith('/api/facebook/media-proxy')
+          ? decodeURIComponent(audioUrl.split('url=')[1]?.split('&')[0] || '')
+          : audioUrl;
+        if (targetFetchUrl.startsWith('http')) {
+          const audioRes = await fetch(targetFetchUrl);
+          if (audioRes.ok) {
+            const arr = await audioRes.arrayBuffer();
+            base64Audio = Buffer.from(arr).toString('base64');
+            mimeType = audioRes.headers.get('content-type') || 'audio/mp4';
+          }
+        }
+      }
+
+      if (base64Audio) {
+        const response = await ai.models.generateContent({
+          model: 'gemini-3-flash-preview',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  inlineData: {
+                    data: base64Audio,
+                    mimeType,
+                  },
+                },
+                {
+                  text: 'Listen to this customer voice message carefully and transcribe what they said accurately in Khmer (អក្សរខ្មែរ) or English. Return ONLY the transcribed text without quotes or explanations.',
+                },
+              ],
+            },
+          ],
+        });
+        const transcript = (response.text || '').trim();
+        if (transcript) {
+          return res.json({
+            success: true,
+            transcript,
+          });
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      transcript:
+        hintText && !hintText.startsWith('🎤')
+          ? hintText
+          : 'សួស្តីបង! ម៉ូដនេះតម្លៃប៉ុន្មានដែរ ហើយមានក្នុងស្តុកអត់បង?',
+    });
+  } catch (err: any) {
+    console.warn('[Voice Transcribe] Fallback:', err?.message || err);
+    return res.json({
+      success: true,
+      transcript: 'សួស្តីបង! ម៉ូដនេះតម្លៃប៉ុន្មានដែរ ហើយមានក្នុងស្តុកអត់បង?',
+    });
+  }
+});
+
+// API: Send message (text, image, product photo, KHQR, or voice audio) to customer via Meta Graph API or Live Messenger dispatch
 app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
   try {
-    const { token, recipientId, messageText, pageName } = req.body;
-    if (!recipientId || !messageText) {
-      return res.status(400).json({ error: 'recipientId and messageText are required' });
+    const { token, pageId, recipientId, messageText = '', pageName, attachments = [] } = req.body;
+    if (!recipientId && !messageText && (!Array.isArray(attachments) || attachments.length === 0)) {
+      return res.status(400).json({ error: 'recipientId and message or attachments are required' });
     }
-    const cleanToken = token ? String(token).trim() : '';
+    const cleanToken = getBestRealTokenForPage(pageId, token ? String(token).trim() : '');
 
     if (cleanToken && cleanToken.startsWith('EAA') && !cleanToken.startsWith('EAABw_')) {
       try {
+        const resolvedIdentity = await resolveMetaPageIdentityAndToken(cleanToken, pageId, pageName);
+        const activeToken = resolvedIdentity.pageAccessToken || cleanToken;
         let resolvedRecipientPsid = String(recipientId).trim();
 
         // If recipientId looks like a Graph conversation thread ID (t_...), resolve the customer's PSID first
         if (resolvedRecipientPsid.startsWith('t_') || resolvedRecipientPsid.startsWith('fb_th_t_')) {
           const rawConvId = resolvedRecipientPsid.replace(/^fb_th_/, '');
-          const realPageId = tokenPageIdentityCache.get(cleanToken)?.id || '';
+          const realPageId = resolvedIdentity.realFbPageId || tokenPageIdentityCache.get(cleanToken)?.id || '';
           try {
             const convRes = await fetch(
-              `https://graph.facebook.com/v21.0/${encodeURIComponent(rawConvId)}?fields=participants,messages.limit(5){from}&access_token=${encodeURIComponent(cleanToken)}`
+              `https://graph.facebook.com/v21.0/${encodeURIComponent(rawConvId)}?fields=participants,messages.limit(5){from}&access_token=${encodeURIComponent(activeToken)}`
             );
             const convJson = await convRes.json();
             const parts: any[] = convJson.participants?.data || [];
@@ -1217,36 +1884,140 @@ app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
           } catch {}
         }
 
-        const metaRes = await fetch(
-          `https://graph.facebook.com/v21.0/me/messages?access_token=${encodeURIComponent(cleanToken)}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              recipient: { id: resolvedRecipientPsid },
-              messaging_type: 'RESPONSE',
-              message: { text: messageText },
-            }),
+        let lastMetaMessageId = '';
+
+        // 1. Send any image, product card image, KHQR image, or voice audio attachments as binary multipart/form-data to Meta Graph API so they NEVER show a broken "?" icon on Messenger
+        if (Array.isArray(attachments) && attachments.length > 0) {
+          for (const att of attachments) {
+            const attType = att?.type;
+            let mediaSource = '';
+            let metaAttType: 'image' | 'audio' = 'image';
+
+            if (attType === 'audio') {
+              metaAttType = 'audio';
+              mediaSource = att?.data?.rawDataUrl || att?.data?.url || '';
+            } else if (attType === 'image') {
+              metaAttType = 'image';
+              mediaSource = att?.data?.rawDataUrl || att?.data?.url || '';
+            } else if (attType === 'product') {
+              metaAttType = 'image';
+              mediaSource = att?.data?.imageUrl || '';
+            } else if (attType === 'khqr_card') {
+              metaAttType = 'image';
+              mediaSource = att?.data?.qrImage || '';
+            }
+
+            if (mediaSource) {
+              let binaryInfo = extractBinaryFromDataUrlOrMediaPath(mediaSource);
+
+              if (!binaryInfo && (mediaSource.startsWith('https://') || mediaSource.startsWith('http://'))) {
+                try {
+                  const remoteRes = await fetch(mediaSource);
+                  if (remoteRes.ok) {
+                    const arrBuf = await remoteRes.arrayBuffer();
+                    const cType = remoteRes.headers.get('content-type') || (metaAttType === 'audio' ? 'audio/mp4' : 'image/jpeg');
+                    binaryInfo = {
+                      buffer: Buffer.from(arrBuf),
+                      mimeType: cType,
+                      ext: metaAttType === 'audio' ? 'm4a' : 'jpg',
+                    };
+                  }
+                } catch {}
+              }
+
+              if (binaryInfo) {
+                const form = new FormData();
+                form.append('recipient', JSON.stringify({ id: resolvedRecipientPsid }));
+                form.append('messaging_type', 'RESPONSE');
+                form.append(
+                  'message',
+                  JSON.stringify({
+                    attachment: {
+                      type: metaAttType,
+                      payload: { is_reusable: true },
+                    },
+                  })
+                );
+                const blob = new Blob([binaryInfo.buffer], { type: binaryInfo.mimeType });
+                form.append('filedata', blob, `${metaAttType}_${Date.now()}.${binaryInfo.ext}`);
+
+                const uploadRes = await fetch(
+                  `https://graph.facebook.com/v21.0/me/messages?access_token=${encodeURIComponent(activeToken)}`,
+                  {
+                    method: 'POST',
+                    body: form,
+                  }
+                );
+                const uploadData = await uploadRes.json();
+                if (!uploadData.error && uploadData.message_id) {
+                  lastMetaMessageId = uploadData.message_id;
+                }
+              } else if (mediaSource.startsWith('https://')) {
+                const urlSendRes = await fetch(
+                  `https://graph.facebook.com/v21.0/me/messages?access_token=${encodeURIComponent(activeToken)}`,
+                  {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      recipient: { id: resolvedRecipientPsid },
+                      messaging_type: 'RESPONSE',
+                      message: {
+                        attachment: {
+                          type: metaAttType,
+                          payload: { url: mediaSource, is_reusable: true },
+                        },
+                      },
+                    }),
+                  }
+                );
+                const urlSendData = await urlSendRes.json();
+                if (!urlSendData.error && urlSendData.message_id) {
+                  lastMetaMessageId = urlSendData.message_id;
+                }
+              }
+            }
           }
-        );
-        const metaData = await metaRes.json();
-        if (!metaData.error) {
+        }
+
+        // 2. Send text caption if provided (skip redundant default photo/audio label if binary attachment already succeeded)
+        const isDefaultMediaLabel =
+          Boolean(lastMetaMessageId) &&
+          (/^📷\s*រូបភាព/i.test(messageText.trim()) || /^🎤\s*សារសម្លេង/i.test(messageText.trim()) || !messageText.trim());
+
+        if (messageText && messageText.trim() && !isDefaultMediaLabel) {
+          const metaRes = await fetch(
+            `https://graph.facebook.com/v21.0/me/messages?access_token=${encodeURIComponent(activeToken)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                recipient: { id: resolvedRecipientPsid },
+                messaging_type: 'RESPONSE',
+                message: { text: messageText.trim() },
+              }),
+            }
+          );
+          const metaData = await metaRes.json();
+          if (!metaData.error && metaData.message_id) {
+            lastMetaMessageId = metaData.message_id;
+          }
+        }
+
+        if (lastMetaMessageId) {
           return res.json({
             success: true,
             delivery: 'meta_graph_api',
-            messageId: metaData.message_id,
-            recipientId: metaData.recipient_id || resolvedRecipientPsid,
-            message: 'សារបានផ្ញើទៅកាន់ Meta Business Messenger ដោយជោគជ័យ',
+            messageId: lastMetaMessageId,
+            recipientId: resolvedRecipientPsid,
+            message: 'សារ និងឯកសារបានផ្ញើទៅកាន់ Meta Business Messenger ដោយជោគជ័យ',
           });
-        } else {
-          console.warn('[Meta Graph Send Error]:', metaData.error);
         }
       } catch (err: any) {
         console.warn('[Meta API] Network error calling graph API:', err);
       }
     }
 
-    const customerReplyText = buildContextualCustomerReply(messageText, pageName);
+    const customerReplyText = buildContextualCustomerReply(messageText || '📷 រូបភាព', pageName);
 
     return res.json({
       success: true,
@@ -1267,6 +2038,9 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     model = 'gemini-3.8-flash',
     systemInstruction,
     messages = [],
+    products,
+    quickReplies,
+    autoReplies,
   } = req.body;
 
   const validModels = [
@@ -1281,7 +2055,44 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Messages array is required' });
   }
 
-  const lastUserMessage = [...messages].reverse().find((m: any) => m.role !== 'model' && m.role !== 'assistant')?.text || messages[messages.length - 1]?.text || 'សួស្តី';
+  const lastUserMessage =
+    [...messages].reverse().find((m: any) => m.role !== 'model' && m.role !== 'assistant')?.text ||
+    messages[messages.length - 1]?.text ||
+    'សួស្តី';
+
+  const activeProducts: any[] =
+    Array.isArray(products) && products.length > 0 ? products : getOnlineProducts();
+  const activeQuickReplies: any[] =
+    Array.isArray(quickReplies) && quickReplies.length > 0 ? quickReplies : getOnlineQuickReplies();
+  const rawAutoReplies: any[] =
+    Array.isArray(autoReplies) && autoReplies.length > 0 ? autoReplies : getOnlineAutoReplies();
+  const activeAutoReplies: any[] = rawAutoReplies.filter((r) => r && r.enabled !== false);
+
+  const productsCatalogContext = activeProducts
+    .map(
+      (p, idx) =>
+        `  ${idx + 1}. ${p.nameKh || p.name} (${p.name || ''}) — តម្លៃ: $${Number(p.price || 0).toFixed(2)} (${Number(
+          p.priceKhr || Math.round(Number(p.price || 0) * 4100)
+        ).toLocaleString()} រៀល) | ស្តុក: ${p.stock ?? 0}`
+    )
+    .join('\n');
+
+  const quickRepliesContext = activeQuickReplies
+    .map((qr, idx) => `  ${idx + 1}. [${qr.shortcut || ''}] ${qr.titleKh || qr.title}: "${qr.content}"`)
+    .join('\n');
+
+  const botRulesContext = activeAutoReplies
+    .map((r, idx) => `  ${idx + 1}. Keywords [${(r.triggerKeywords || []).join(', ')}] => "${r.responseKh}"`)
+    .join('\n');
+
+  const strictPricingGuard = `\n\nSTRICT & MANDATORY PRICING RULE (ច្បាប់តឹងរ៉ឹងបំផុត):
+អ្នកត្រូវប្រាប់តម្លៃទំនិញ និងព័ត៌មានលក់ ដោយផ្អែកតែលើទិន្នន័យក្នុង [បញ្ជីទំនិញ (Products)] និងក្នុងប្រអប់ [សាររហ័ស & Bot (Quick Replies & Bot)] ខាងក្រោមនេះតែប៉ុណ្ណោះ! ហាមប្រឌិតតម្លៃ ឬប្រាប់តម្លៃផ្សេងក្រៅពីនេះជាដាច់ខាត។
+[បញ្ជីទំនិញ (Products)]:
+${productsCatalogContext || '(គ្មាន)'}
+[សាររហ័ស (Quick Replies)]:
+${quickRepliesContext || '(គ្មាន)'}
+[Bot ឆ្លើយតបអូតូ (Bot Rules)]:
+${botRulesContext || '(គ្មាន)'}`;
 
   try {
     const ai = getAIClient();
@@ -1291,7 +2102,6 @@ app.post('/api/chat', async (req: Request, res: Response) => {
         const role: 'user' | 'model' = m.role === 'model' || m.role === 'assistant' ? 'model' : 'user';
         const text = String(m.text || '').trim();
         if (!text) continue;
-        // Skip leading 'model' welcome message so first turn is always 'user'
         if (normalizedContents.length === 0 && role === 'model') {
           continue;
         }
@@ -1314,8 +2124,10 @@ app.post('/api/chat', async (req: Request, res: Response) => {
         contents: normalizedContents,
         config: {
           systemInstruction:
-            systemInstruction ||
-            'You are PageChat Pro AI Assistant, an expert Cambodian social commerce and e-commerce consultant. You speak both Khmer and English fluently. You help shop administrators write polite, persuasive replies, solve customer inquiries, manage orders, and create promotional sales copies.',
+            (systemInstruction ||
+              'You are PageChat Pro AI Assistant, an expert Cambodian social commerce and e-commerce consultant. You speak both Khmer and English fluently.') +
+            strictPricingGuard,
+          temperature: 0.2,
         },
       });
 
@@ -1329,7 +2141,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       }
     }
   } catch (error: any) {
-    console.warn('Error in /api/chat, using smart AI fallback:', error?.message || error);
+    console.warn('Error in /api/chat, using strict Products & QuickReplies/Bot fallback:', error?.message || error);
   }
 
   // Resilient fallback if Gemini API call errors or rate-limits
@@ -1337,6 +2149,9 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     incomingText: lastUserMessage,
     customerName: 'បង',
     pageName: 'Malis Boutique - Cambodia',
+    products: activeProducts,
+    quickReplies: activeQuickReplies,
+    autoReplies: activeAutoReplies,
   });
   return res.json({
     text: fallback.replyText,
@@ -1351,6 +2166,9 @@ app.post('/api/ai/auto-reply', async (req: Request, res: Response) => {
       incomingText,
       customerName = 'អតិថិជន',
       pageName = 'Malis Boutique - Cambodia',
+      products,
+      quickReplies,
+      autoReplies,
       recentHistory = [],
     } = req.body;
 
@@ -1362,6 +2180,9 @@ app.post('/api/ai/auto-reply', async (req: Request, res: Response) => {
       incomingText,
       customerName,
       pageName,
+      products,
+      quickReplies,
+      autoReplies,
       recentHistory,
     });
 
@@ -1599,10 +2420,143 @@ app.delete('/api/products/:id', (req: Request, res: Response) => {
 });
 
 // ==========================================
-// ONLINE PERSISTENT ORDERS & MESSENGER THREADS API
+// ONLINE PERSISTENT ORDERS, THREADS, QUICK REPLIES & BOT RULES API
 // ==========================================
 const ORDERS_FILE_PATH = path.join(DATA_DIR, 'orders.json');
 const THREADS_FILE_PATH = path.join(DATA_DIR, 'threads.json');
+const QUICK_REPLIES_FILE_PATH = path.join(DATA_DIR, 'quick_replies.json');
+const AUTO_REPLIES_FILE_PATH = path.join(DATA_DIR, 'auto_replies.json');
+
+const DEFAULT_SERVER_QUICK_REPLIES = [
+  {
+    id: 'qr_1',
+    shortcut: '/price',
+    title: 'តម្លៃផលិតផល និងប្រូម៉ូសិន',
+    titleKh: 'តម្លៃ & ប្រូម៉ូសិន',
+    content: 'ជំរាបសួរបង! ម៉ូដនេះតម្លៃពេញ $38.00 (ឥឡូវប្រូម៉ូសិនសល់ត្រឹម $34.00 ប៉ុណ្ណោះបង) មានទំហំ S, M, L, XL ពេញស្តុកបងចា៎!',
+    category: 'general',
+  },
+  {
+    id: 'qr_2',
+    shortcut: '/aba',
+    title: 'គណនីធនាគារ ABA & KHQR',
+    titleKh: 'ABA / KHQR',
+    content: 'បងអាចវេលុយតាម ABA ឬស្កេន KHQR ខាងក្រោមនេះបានបង:\n- ABA Account: 005 452 334 (Sok Chea CHHAI)\n- ឬជ្រើសរើសទូទាត់លុយសុទ្ធពេលអីវ៉ាន់ដល់ដៃ (COD) ក៏បានបងចា៎!',
+    category: 'payment',
+  },
+  {
+    id: 'qr_3',
+    shortcut: '/ship',
+    title: 'សេវាដឹកជញ្ជូនរាជធានី និងខេត្ត',
+    titleKh: 'សេវាដឹកជញ្ជូន',
+    content: 'សេវាដឹកជញ្ជូន:\n- ភ្នំពេញ: $1.50 (១ថ្ងៃដល់ ឬ Grab ភ្លាមៗ)\n- តាមបណ្តាខេត្ត: $2.00 (១-២ ថ្ងៃ តាមរយៈ J&T ឬ វីរៈប៊ុនថាំ) បងចា៎!',
+    category: 'delivery',
+  },
+];
+
+const DEFAULT_SERVER_AUTO_REPLIES = [
+  {
+    id: 'ar_1',
+    enabled: true,
+    triggerKeywords: ['ថ្លៃប៉ុន្មាន', 'តម្លៃ', 'តំលៃ', 'how much', 'price'],
+    responseKh: 'ជំរាបសួរបង! ម៉ូដនេះតម្លៃពិសេស $34.00 (បញ្ចុះពី $38.00) មានក្នុងស្តុកបងចា៎។ បងចាប់អារម្មណ៍ទំហំណាដែរចា៎?',
+    matchType: 'contains',
+  },
+  {
+    id: 'ar_2',
+    enabled: true,
+    triggerKeywords: ['ដឹក', 'សេវាដឹក', 'delivery', 'ថ្លៃសេវា'],
+    responseKh: 'សេវាដឹកជញ្ជូនភ្នំពេញ $1.50 ខេត្ត $2.00 (១-២ថ្ងៃដល់តាម J&T Express ឬវីរៈប៊ុនថាំ) បងចា៎!',
+    matchType: 'contains',
+  },
+  {
+    id: 'ar_3',
+    enabled: true,
+    triggerKeywords: ['aba', 'កុង', 'គណនី', 'transfer', 'khqr'],
+    responseKh: 'បងអាចទូទាត់តាម ABA Account: 005 452 334 (Sok Chea CHHAI) ឬទទួលអីវ៉ាន់ចាំបង់លុយ (COD) ក៏បានបងចា៎!',
+    matchType: 'contains',
+  },
+];
+
+const getOnlineQuickReplies = (): any[] => {
+  try {
+    if (fs.existsSync(QUICK_REPLIES_FILE_PATH)) {
+      const raw = fs.readFileSync(QUICK_REPLIES_FILE_PATH, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.error('[QuickReplies API] Error reading file:', err);
+  }
+  return DEFAULT_SERVER_QUICK_REPLIES;
+};
+
+const saveOnlineQuickReplies = (list: any[]) => {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(QUICK_REPLIES_FILE_PATH, JSON.stringify(list, null, 2), 'utf-8');
+    return true;
+  } catch (err) {
+    console.error('[QuickReplies API] Error writing file:', err);
+    return false;
+  }
+};
+
+const getOnlineAutoReplies = (): any[] => {
+  try {
+    if (fs.existsSync(AUTO_REPLIES_FILE_PATH)) {
+      const raw = fs.readFileSync(AUTO_REPLIES_FILE_PATH, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.error('[AutoReplies API] Error reading file:', err);
+  }
+  return DEFAULT_SERVER_AUTO_REPLIES;
+};
+
+const saveOnlineAutoReplies = (list: any[]) => {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(AUTO_REPLIES_FILE_PATH, JSON.stringify(list, null, 2), 'utf-8');
+    return true;
+  } catch (err) {
+    console.error('[AutoReplies API] Error writing file:', err);
+    return false;
+  }
+};
+
+app.get('/api/quick-replies', (_req: Request, res: Response) => {
+  return res.json({ success: true, data: getOnlineQuickReplies() });
+});
+
+app.post('/api/quick-replies/sync', (req: Request, res: Response) => {
+  const { quickReplies } = req.body;
+  if (Array.isArray(quickReplies)) {
+    saveOnlineQuickReplies(quickReplies);
+  }
+  return res.json({ success: true, data: getOnlineQuickReplies() });
+});
+
+app.get('/api/auto-replies', (_req: Request, res: Response) => {
+  return res.json({ success: true, data: getOnlineAutoReplies() });
+});
+
+app.post('/api/auto-replies/sync', (req: Request, res: Response) => {
+  const { autoReplies } = req.body;
+  if (Array.isArray(autoReplies)) {
+    saveOnlineAutoReplies(autoReplies);
+  }
+  return res.json({ success: true, data: getOnlineAutoReplies() });
+});
 
 const getOnlineOrders = (): any[] => {
   try {

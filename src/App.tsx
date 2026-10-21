@@ -20,6 +20,7 @@ import { PWAInstallButton } from './components/PWAInstallButton';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { MobileAppView } from './components/MobileAppView';
 import { CustomerMessengerWidget } from './components/CustomerMessengerWidget';
+import { ConversationPdfExportModal } from './components/ConversationPdfExportModal';
 import { useOnlineStatus } from './hooks/usePWAInstall';
 import {
   saveToDesktopIndexedDB,
@@ -329,6 +330,7 @@ export default function App() {
   const processedWebhookEventIdsRef = useRef<Set<string>>(new Set());
   const [isHydrated, setIsHydrated] = useState<boolean>(false);
   const [aiTypingThreadIds, setAiTypingThreadIds] = useState<string[]>([]);
+  const [isConversationPdfModalOpen, setIsConversationPdfModalOpen] = useState<boolean>(false);
   const autoRepliedMsgIdsRef = useRef<Set<string>>(new Set());
   const inFlightAutoReplyThreadsRef = useRef<Set<string>>(new Set());
 
@@ -338,8 +340,27 @@ export default function App() {
   productsRef.current = products;
   const selectedPageRef = useRef<PageAccount>(selectedPage);
   selectedPageRef.current = selectedPage;
+  const quickRepliesRef = useRef<QuickReplyTemplate[]>(quickReplies);
+  quickRepliesRef.current = quickReplies;
   const autoRepliesRef = useRef<AutoReplyRule[]>(autoReplies);
   autoRepliesRef.current = autoReplies;
+
+  // Keep backend in sync with client Quick Replies & Auto-Reply Bot rules
+  useEffect(() => {
+    fetch('/api/quick-replies/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quickReplies }),
+    }).catch(() => {});
+  }, [quickReplies]);
+
+  useEffect(() => {
+    fetch('/api/auto-replies/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ autoReplies }),
+    }).catch(() => {});
+  }, [autoReplies]);
 
   useEffect(() => {
     isAutoPilotRef.current = isAutoPilot;
@@ -778,10 +799,28 @@ export default function App() {
                   ? Boolean(m.isFromPage)
                   : m.from?.id === targetPage.id || (json.realPageId && m.from?.id === json.realPageId);
               const rawText = typeof m.message === 'string' ? m.message.trim() : '';
+              const isAudio = m.attachmentType === 'audio';
               const fallbackText =
                 rawText ||
+                (isAudio ? '🎤 [សារសម្លេង / Voice Message]' : '') ||
                 (m.sticker ? '👍 [ភ្ញៀវផ្ញើរូប Logo / Sticker]' : '') ||
                 (m.attachmentUrl ? '📷 [ភ្ញៀវផ្ញើរូបភាព]' : '');
+
+              const resolvedAttachments =
+                Array.isArray(m.parsedAttachments) && m.parsedAttachments.length > 0
+                  ? m.parsedAttachments
+                  : m.attachmentUrl
+                  ? [
+                      {
+                        type: (isAudio ? 'audio' : 'image') as 'audio' | 'image',
+                        data: {
+                          url: m.attachmentUrl,
+                          caption: rawText || '',
+                        },
+                      },
+                    ]
+                  : undefined;
+
               return {
                 id: m.id,
                 sender: (isPageSender ? 'admin' : 'customer') as 'admin' | 'customer',
@@ -790,14 +829,12 @@ export default function App() {
                 timestamp: m.created_time
                   ? new Date(m.created_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                   : 'ឥឡូវនេះ',
-                attachments: m.attachmentUrl
-                  ? [{ type: 'image' as const, data: { url: m.attachmentUrl, caption: fallbackText } }]
-                  : undefined,
+                attachments: resolvedAttachments,
                 deliveryStatus: 'sent_meta' as const,
                 isLiveMeta: true,
               };
             })
-            .filter((gm: ChatMessage) => Boolean(gm.text && gm.text.trim()))
+            .filter((gm: ChatMessage) => Boolean((gm.text && gm.text.trim()) || (gm.attachments && gm.attachments.length > 0)))
             .reverse();
 
           // Preserve existing messages first in chronological order, then append any new Graph messages at the end
@@ -806,13 +843,18 @@ export default function App() {
           graphMessages.forEach((gm) => {
             const alreadyExists = mergedMessages.some((em) => {
               if (em.id === gm.id) return true;
-              // Only deduplicate admin/bot messages by text if local ID was temporary; never drop customer text messages by text match
-              if (
-                gm.sender === 'admin' &&
-                em.text.trim() === gm.text.trim() &&
-                (em.sender === 'admin' || em.sender === 'bot')
-              ) {
-                return true;
+              // Deduplicate admin/bot messages by text or attachment type if local ID was temporary; never drop customer messages
+              if (gm.sender === 'admin' && (em.sender === 'admin' || em.sender === 'bot')) {
+                if (em.text.trim() === gm.text.trim()) return true;
+                if (
+                  em.attachments &&
+                  em.attachments.length > 0 &&
+                  gm.attachments &&
+                  gm.attachments.length > 0 &&
+                  em.attachments[0].type === gm.attachments[0].type
+                ) {
+                  return true;
+                }
               }
               return false;
             });
@@ -1000,6 +1042,8 @@ export default function App() {
           customerName,
           pageName: activePage.name,
           products: productsRef.current,
+          quickReplies: quickRepliesRef.current,
+          autoReplies: autoRepliesRef.current,
           recentHistory,
         }),
       });
@@ -1009,30 +1053,54 @@ export default function App() {
         if (data.detectedLanguage) detectedLang = data.detectedLanguage;
       }
     } catch (apiErr) {
-      console.warn('Failed to call /api/ai/auto-reply, using smart client-side fallback:', apiErr);
+      console.warn('Failed to call /api/ai/auto-reply, using strict Products & QuickReplies/Bot fallback:', apiErr);
     } finally {
       inFlightAutoReplyThreadsRef.current.delete(targetThreadId);
       setAiTypingThreadIds((prev) => prev.filter((id) => id !== targetThreadId));
     }
 
     if (!replyText) {
-      const textLower = resolvedIncomingText.toLowerCase();
-      const matched = autoRepliesRef.current.find(
-        (rule) => rule.enabled && rule.triggerKeywords.some((kw) => textLower.includes(kw.toLowerCase()))
+      const textLower = resolvedIncomingText.toLowerCase().trim();
+      const matchedQr = quickRepliesRef.current.find(
+        (qr) =>
+          qr.shortcut &&
+          (textLower === qr.shortcut.toLowerCase().trim() ||
+            (qr.titleKh && textLower === qr.titleKh.toLowerCase().trim()))
       );
-      if (matched) {
-        replyText = matched.responseKh;
-      } else if (textLower.includes('price') || textLower.includes('how much') || textLower.includes('cost')) {
-        replyText = `Hello ${customerName}! Thank you for contacting ${activePage.name} ✨ Our luxury dresses are $38.00 (promotional $34.00) and skincare is $24.50. Which item may we help you with?`;
-        detectedLang = { code: 'en', nameKh: 'ភាសាអង់គ្លេស', nameEn: 'English' };
-      } else if (textLower.includes('aba') || textLower.includes('khqr') || textLower.includes('កុង') || textLower.includes('លុយ') || textLower.includes('គណនី')) {
-        replyText = 'បងអាចស្កេនទូទាត់តាម ABA / Bakong KHQR គណនីលេខ: 005 452 334 (Sok Chea CHHAI) ឬជ្រើសរើសបង់លុយពេលអីវ៉ាន់ដល់ដៃ (COD) ក៏បានបងចា៎! 💳';
-      } else if (textLower.includes('ដឹក') || textLower.includes('ផ្ញើ') || textLower.includes('សេវា') || textLower.includes('delivery')) {
-        replyText = 'សេវាដឹកជញ្ជូនភ្នំពេញ $1.50 (១ថ្ងៃដល់) តាមខេត្ត $2.00 (១-២ ថ្ងៃតាម J&T / វីរៈប៊ុនថាំ) បងចា៎! 🚚';
-      } else if (textLower.includes('យក') || textLower.includes('កុម្ម៉ង់') || textLower.includes('ទិញ') || textLower.includes('order')) {
-        replyText = `ចាស៎បង ${customerName}! សូមបងជួយផ្ញើ [លេខទូរស័ព្ទ] និង [ទីតាំងទទួល] មកប្អូនរៀបចំកញ្ចប់អីវ៉ាន់ជូនបងភ្លាមៗណា៎! 💕`;
+      const matchedProduct = productsRef.current.find((p) => {
+        const nameKh = (p.nameKh || '').toLowerCase().trim();
+        const nameEn = (p.name || '').toLowerCase().trim();
+        const sku = (p.sku || '').toLowerCase().trim();
+        if ((nameKh && textLower.includes(nameKh)) || (nameEn && textLower.includes(nameEn)) || (sku && textLower.includes(sku))) {
+          return true;
+        }
+        const khWords = nameKh.split(/\s+/).filter((w) => w.length >= 3);
+        const enWords = nameEn.split(/\s+/).filter((w) => w.length >= 3);
+        return khWords.some((w) => textLower.includes(w)) || enWords.some((w) => textLower.includes(w));
+      });
+      const matchedBot = autoRepliesRef.current.find(
+        (rule) => rule.enabled && rule.triggerKeywords.some((kw) => kw && textLower.includes(kw.toLowerCase().trim()))
+      );
+
+      if (matchedQr) {
+        replyText = matchedQr.content;
+      } else if (matchedProduct) {
+        const pPrice = Number(matchedProduct.price || 0).toFixed(2);
+        const pKhr = Number(matchedProduct.priceKhr || Math.round(Number(matchedProduct.price || 0) * 4100)).toLocaleString();
+        replyText = `ជម្រាបសួរបង ${customerName}! សម្រាប់ "${matchedProduct.nameKh || matchedProduct.name}" តម្លៃគឺ $${pPrice} (${pKhr} រៀល) មានក្នុងស្តុកចំនួន ${matchedProduct.stock} ណា៎បងចា៎!${
+          matchedBot ? `\n${matchedBot.responseKh}` : ''
+        }`;
+      } else if (matchedBot) {
+        replyText = matchedBot.responseKh;
       } else {
-        replyText = `ជម្រាបសួរបង ${customerName}! សូមស្វាគមន៍មកកាន់ ${activePage.name} 🌸 អីវ៉ាន់មានក្នុងស្តុកស្រាប់ និងមានសេវាដឹកជូនទូទាំងប្រទេស! តើប្អូនអាចជួយបងលើផលិតផលណាដែរចា៎? ✨`;
+        const priceQr = quickRepliesRef.current.find((q) => q.shortcut === '/price' || q.category === 'general');
+        const catalogLine = productsRef.current
+          .slice(0, 4)
+          .map((p) => `• ${p.nameKh || p.name}: $${Number(p.price).toFixed(2)}`)
+          .join('\n');
+        replyText = priceQr
+          ? `${priceQr.content}\n\nតារាងតម្លៃទំនិញក្នុងហាង:\n${catalogLine}`
+          : `ជម្រាបសួរបង ${customerName}! នេះជាតម្លៃទំនិញក្នុងហាង:\n${catalogLine}`;
       }
     }
 
@@ -1188,6 +1256,22 @@ export default function App() {
           t.id === `fb_th_${evt.senderId}`
       );
 
+      const resolvedWebhookAttachments =
+        Array.isArray(evt.attachments) && evt.attachments.length > 0
+          ? evt.attachments
+          : evt.attachmentUrl
+          ? [
+              {
+                type: (evt.attachmentType === 'audio' ? 'audio' : 'image') as 'audio' | 'image',
+                data: {
+                  url: evt.attachmentUrl,
+                  transcript: evt.voiceTranscript,
+                  caption: evt.text,
+                },
+              },
+            ]
+          : undefined;
+
       const newMsg: ChatMessage = {
         id: evt.id,
         sender: isBotReply ? 'bot' : 'customer',
@@ -1196,9 +1280,7 @@ export default function App() {
         timestamp:
           evt.timeFormatted ||
           new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        attachments: evt.attachmentUrl
-          ? [{ type: 'image' as const, data: { url: evt.attachmentUrl, caption: evt.text } }]
-          : undefined,
+        attachments: resolvedWebhookAttachments,
         isRead: isBotReply,
         deliveryStatus: 'sent_meta',
         isLiveMeta: true,
@@ -1370,11 +1452,12 @@ export default function App() {
     return () => clearInterval(streamTimer);
   }, [autoIncomingStream, selectedPage.id]);
 
-  // Handler for sending a customer message directly from the CustomerMessengerWidget into the Page
+  // Handler for sending a customer message (text, image, or voice audio) directly from the CustomerMessengerWidget into the Page
   const handleSendCustomerMessageToPage = (
     text: string,
     asNewCustomer?: boolean,
-    customCustomerName?: string
+    customCustomerName?: string,
+    attachments?: any[]
   ) => {
     const now = new Date();
     const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
@@ -1405,6 +1488,7 @@ export default function App() {
         senderName: custName,
         text,
         timestamp: timeStr,
+        attachments,
         deliveryStatus: 'sent_meta',
         isLiveMeta: true,
       };
@@ -1424,11 +1508,13 @@ export default function App() {
       setThreads(nextThreads);
       setSelectedThreadId(newThreadId);
       soundNotifier.playMessageChime();
+
+      const voiceTranscript = attachments?.find((a) => a.type === 'audio')?.data?.transcript;
       setTimeout(() => {
-        triggerAutoPilotResponse(newThreadId, text, msgId);
+        triggerAutoPilotResponse(newThreadId, voiceTranscript || text, msgId);
       }, 450);
     } else {
-      handleSimulateCustomerReply(selectedThread.id, text);
+      handleSimulateCustomerReply(selectedThread.id, text, attachments);
     }
   };
 
@@ -1580,9 +1666,11 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             token: selectedPage.accessToken || `EAABw_LIVE_${selectedPage.id}`,
+            pageId: selectedPage.id,
             recipientId: recipientPsid,
             messageText: text,
             pageName: selectedPage.name,
+            attachments,
           }),
         });
         const data = await res.json();
@@ -1593,7 +1681,11 @@ export default function App() {
                 ...t,
                 messages: t.messages.map((m) => {
                   if (m.id === msgId) {
-                    return { ...m, deliveryStatus: 'sent_meta' as const };
+                    return {
+                      ...m,
+                      id: data.messageId || m.id,
+                      deliveryStatus: 'sent_meta' as const,
+                    };
                   }
                   return m;
                 }),
@@ -1623,11 +1715,6 @@ export default function App() {
           threadsRef.current = next;
           return next;
         });
-        deliverContextualCustomerReply(
-          targetThreadId,
-          customerName,
-          'ចាស៎បង អរគុណសម្រាប់ការឆ្លើយតប! ខ្ញុំសុំកុម្ម៉ង់ ១ ឈុត ដឹកមកភ្នំពេញលេខទូរស័ព្ទ 012 889 977 ណា៎បង ✨'
-        );
       }
     }
   };
@@ -1739,12 +1826,12 @@ export default function App() {
     }
   };
 
-  const handleSimulateCustomerReply = (threadId: string, replyText?: string) => {
+  const handleSimulateCustomerReply = (threadId: string, replyText?: string, attachments?: any[]) => {
     const defaultReplies = [
       'ចាស៎បង តម្លៃសមរម្យណាស់ ខ្ញុំសម្រេចយកមួយហើយបង!',
       'ផ្ញើតាមឡាន J&T មកផ្ទះលេខ 45B ផ្លូវ 315 លេខទូរស័ព្ទ 012 889 977 ណា៎បង',
       'ខ្ញុំបានស្កេនទូទាត់តាម KHQR រួចរាល់ហើយបង សូមជួយពិនិត្យផង',
-      'អរគុណបងច្រើនណាស់!'
+      'អរគុណបងច្រើនណាស់!',
     ];
     const text = replyText || defaultReplies[Math.floor(Math.random() * defaultReplies.length)];
     const now = new Date();
@@ -1758,6 +1845,7 @@ export default function App() {
       senderName: targetThread?.customer?.name || 'អតិថិជន (Messenger Live)',
       text,
       timestamp: timeStr,
+      attachments,
       deliveryStatus: 'sent_meta',
       isLiveMeta: true,
     };
@@ -1784,9 +1872,12 @@ export default function App() {
     setSelectedThreadId(threadId);
     soundNotifier.playMessageChime();
 
+    // If customer sent a voice message with a transcript, pass the transcript to AI Gemini Auto-Reply
+    const voiceTranscript = attachments?.find((a) => a.type === 'audio')?.data?.transcript;
+
     // Always trigger the Page AI / Auto-Reply when customer sends a message into the page
     setTimeout(() => {
-      triggerAutoPilotResponse(threadId, text, msgId);
+      triggerAutoPilotResponse(threadId, voiceTranscript || text, msgId);
     }, 500);
   };
 
@@ -2514,6 +2605,7 @@ export default function App() {
                 <ChatWindow
                   thread={selectedThread}
                   quickReplies={quickReplies}
+                  autoReplies={autoReplies}
                   products={products}
                   orders={orders}
                   onSendMessage={handleSendMessage}
@@ -2547,6 +2639,7 @@ export default function App() {
                       true
                     );
                   }}
+                  onExportConversationPdf={() => setIsConversationPdfModalOpen(true)}
                 />
               ) : (
                 <div className="flex-1 flex items-center justify-center text-slate-400">
@@ -2564,6 +2657,7 @@ export default function App() {
                   onUpdateCustomer={handleUpdateCustomer}
                   onOpenCreateOrder={() => setIsOrderModalOpen(true)}
                   onViewOrderInvoice={(orderId) => setActiveInvoiceOrderId(orderId)}
+                  onExportConversationPdf={() => setIsConversationPdfModalOpen(true)}
                   language={language}
                 />
               </div>
@@ -2636,6 +2730,8 @@ export default function App() {
             currentCustomer={selectedThread?.customer}
             currentCustomerThread={selectedThread}
             products={products}
+            quickReplies={quickReplies}
+            autoReplies={autoReplies}
             recentOrders={orders}
             threads={threads}
             isAutoPilot={isAutoPilot}
@@ -2800,6 +2896,18 @@ export default function App() {
         initialEditMode={isInvoiceEditMode}
         language={language}
       />
+
+      {/* Export Conversation History as PDF Modal */}
+      {isConversationPdfModalOpen && selectedThread && (
+        <ConversationPdfExportModal
+          isOpen={isConversationPdfModalOpen}
+          onClose={() => setIsConversationPdfModalOpen(false)}
+          thread={selectedThread}
+          page={selectedPage}
+          orders={orders}
+          language={language}
+        />
+      )}
 
       {/* Connect / Edit Page Modal */}
       <ConnectPageModal

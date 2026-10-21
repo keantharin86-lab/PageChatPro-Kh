@@ -18,13 +18,15 @@ import {
   ArrowRight,
   Database
 } from 'lucide-react';
-import { ChatThread, ProductItem, Order, Customer } from '../types';
+import { ChatThread, ProductItem, QuickReplyTemplate, AutoReplyRule, Order, Customer } from '../types';
 
 interface GeminiChatbotViewProps {
   language?: 'kh' | 'en';
   currentCustomer?: Customer;
   currentCustomerThread?: ChatThread;
   products: ProductItem[];
+  quickReplies?: QuickReplyTemplate[];
+  autoReplies?: AutoReplyRule[];
   recentOrders?: Order[];
   orders?: Order[];
   threads?: ChatThread[];
@@ -52,6 +54,8 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
   currentCustomer,
   currentCustomerThread,
   products,
+  quickReplies = [],
+  autoReplies = [],
   recentOrders = [],
   threads = [],
   isAutoPilot = true,
@@ -74,8 +78,10 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
       id: 'sales_agent',
       nameKh: 'ជំនួយការលក់ & បម្រើអតិថិជន (Sales & Concierge)',
       nameEn: 'Sales & Customer Concierge',
-      instructionKh: 'អ្នកគឺជាជំនួយការផ្នែកលក់ និងបម្រើអតិថិជនប្រកបដោយភាពរួសរាយរាក់ទាក់ និងជំនាញច្បាស់លាស់សម្រាប់ PageChat Pro នៅកម្ពុជា។ ឆ្លើយតបជាភាសាខ្មែរយ៉ាងផ្អែមល្ហែម ណែនាំទំនិញ និងបញ្ចុះបញ្ចូលអតិថិជនឱ្យទិញ ព្រមទាំងពន្យល់ពីការទូទាត់ KHQR និងការដឹកជញ្ជូនច្បាស់លាស់។',
-      instructionEn: 'You are a warm, courteous, and highly knowledgeable sales and customer concierge for PageChat Pro in Cambodia. Speak fluently in Khmer and English, recommend items persuasively, and explain payments (ABA KHQR) and deliveries clearly.',
+      instructionKh:
+        'អ្នកគឺជាជំនួយការ AI Gemini ផ្នែកលក់សម្រាប់ PageChat Pro។ ច្បាប់តឹងរ៉ឹងបំផុត៖ អ្នកអាចប្រាប់តម្លៃក្នុង [ទំនិញ] និងប្រាប់ពីតម្លៃក្នុងប្រអប់ [សាររហ័ស & Bot] តែប៉ុណ្ណោះ! ហាមប្រឌិត ឬប្រាប់តម្លៃផ្សេងក្រៅពីតម្លៃដែលមានក្នុង [ទំនិញ] និងប្រអប់ [សាររហ័ស & Bot] ជាដាច់ខាត។',
+      instructionEn:
+        'You are the Gemini AI sales concierge for PageChat Pro. STRICT RULE: You must ONLY state prices listed in the [Products (ទំនិញ)] catalog and the [Quick Replies & Bot (សាររហ័ស & Bot)] box. Never invent or quote any other prices.',
       recommendedModel: 'gemini-3.8-flash' as const,
     },
     {
@@ -149,11 +155,17 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
   // Inject context helpers
   const handleInjectProducts = () => {
     const productSummary = products
-      .slice(0, 4)
-      .map((p) => `- ${p.nameKh} ($${p.price} / ${p.priceKhr.toLocaleString()} KHR, ស្តុក ${p.stock})`)
+      .map((p) => `- ${p.nameKh} ($${p.price.toFixed(2)} / ${(p.priceKhr || Math.round(p.price * 4100)).toLocaleString()} រៀល, ស្តុក ${p.stock})`)
       .join('\n');
-    setInputPrompt((prev) => 
-      `${prev ? prev + '\n\n' : ''}[ទំនិញក្នុងហាង]:\n${productSummary}\n\nសូមជួយព្រាងសារណែនាំទំនិញទាំងនេះជូនអតិថិជន:`
+    const qrSummary = quickReplies
+      .map((q) => `- [${q.shortcut}] ${q.titleKh || q.title}: ${q.content}`)
+      .join('\n');
+    const botSummary = autoReplies
+      .filter((r) => r.enabled)
+      .map((r) => `- Keywords (${r.triggerKeywords.join(', ')}): ${r.responseKh}`)
+      .join('\n');
+    setInputPrompt((prev) =>
+      `${prev ? prev + '\n\n' : ''}[ទំនិញក្នុងហាង (ទំនិញ)]:\n${productSummary}\n\n[ប្រអប់ សាររហ័ស & Bot]:\n${qrSummary}\n${botSummary}\n\nសូមឆ្លើយតបអតិថិជនដោយប្រើតែតម្លៃក្នុង [ទំនិញ] និងក្នុងប្រអប់ [សាររហ័ស & Bot] នេះប៉ុណ្ណោះ:`
     );
   };
 
@@ -163,7 +175,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
       .map((m) => `${m.sender}: ${m.text}`)
       .join('\n') || '';
     setInputPrompt((prev) => 
-      `${prev ? prev + '\n\n' : ''}[អតិថិជន]: ${currentCustomer.name} (ទូរស័ព្ទ: ${currentCustomer.phone}, ខេត្ត: ${currentCustomer.province})\n[សារចុងក្រោយ]:\n${historySnippet}\n\nសូមជួយព្រាងសារឆ្លើយតបទៅកាន់អតិថិជននេះ:`
+      `${prev ? prev + '\n\n' : ''}[អតិថិជន]: ${currentCustomer.name} (ទូរស័ព្ទ: ${currentCustomer.phone}, ខេត្ត: ${currentCustomer.province})\n[សារចុងក្រោយ]:\n${historySnippet}\n\nសូមជួយព្រាងសារឆ្លើយតបទៅកាន់អតិថិជននេះ (ប្រាប់តែតម្លៃក្នុង ទំនិញ និង សាររហ័ស & Bot ប៉ុណ្ណោះ):`
     );
   };
 
@@ -203,6 +215,9 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
         body: JSON.stringify({
           model: selectedModel,
           systemInstruction: customSystemInstruction,
+          products,
+          quickReplies,
+          autoReplies,
           messages: payloadMessages,
         }),
       });
