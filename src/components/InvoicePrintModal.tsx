@@ -83,6 +83,61 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
   const [items, setItems] = useState<OrderLineItem[]>(order?.items || []);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
 
+  // Editable Shop Header Info (Shop Name, Category/Subtitle, and Shop Phone on Invoice)
+  const [shopName, setShopName] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(`pagechat_invoice_shop_${page.id}`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.shopName) return parsed.shopName;
+      }
+    } catch {}
+    return page.name;
+  });
+  const [shopCategory, setShopCategory] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(`pagechat_invoice_shop_${page.id}`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.shopCategory !== undefined) return parsed.shopCategory;
+      }
+    } catch {}
+    return page.category;
+  });
+  const [shopPhone, setShopPhone] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(`pagechat_invoice_shop_${page.id}`) || localStorage.getItem('pagechat_invoice_shop_default');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.shopPhone) return parsed.shopPhone;
+      }
+    } catch {}
+    return '012 234 567 / 098 765 432';
+  });
+  const [isEditingShopInfoInline, setIsEditingShopInfoInline] = useState(false);
+  const [shopPhoneSavedBadge, setShopPhoneSavedBadge] = useState(false);
+
+  const handleSaveShopInfo = () => {
+    const cleanPhone = shopPhone.trim() || '012 234 567 / 098 765 432';
+    const cleanName = shopName.trim() || page.name;
+    const cleanCategory = shopCategory.trim() || page.category;
+    setShopPhone(cleanPhone);
+    setShopName(cleanName);
+    setShopCategory(cleanCategory);
+    try {
+      const payload = JSON.stringify({
+        shopName: cleanName,
+        shopCategory: cleanCategory,
+        shopPhone: cleanPhone,
+      });
+      localStorage.setItem(`pagechat_invoice_shop_${page.id}`, payload);
+      localStorage.setItem('pagechat_invoice_shop_default', payload);
+    } catch {}
+    setIsEditingShopInfoInline(false);
+    setShopPhoneSavedBadge(true);
+    setTimeout(() => setShopPhoneSavedBadge(false), 2500);
+  };
+
   // Dynamic KHQR Configuration
   const { config: khqrConfig, updateKhqr, resetKhqr } = useKhqrConfig();
   const invoiceKhqrFileInputRef = useRef<HTMLInputElement>(null);
@@ -216,6 +271,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
     if (onSaveOrder) {
       onSaveOrder(updatedOrder);
     }
+    handleSaveShopInfo();
     if (status !== order.status) {
       onUpdateOrderStatus(order.id, status);
     }
@@ -334,8 +390,44 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
             <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-3 shadow-2xs">
               <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
                 <Store className="w-4 h-4 text-blue-600" />
-                <span>{language === 'kh' ? '១. ព័ត៌មានអតិថិជន និងការដឹកជញ្ជូន' : '1. Customer & Delivery Info'}</span>
+                <span>{language === 'kh' ? '១. ព័ត៌មានហាង និងអតិថិជន' : '1. Shop & Customer Info'}</span>
               </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pb-3 border-b border-slate-100">
+                <div>
+                  <label className="block text-[11px] font-semibold text-blue-700 mb-1">
+                    {language === 'kh' ? 'ឈ្មោះហាងលើវិក្កយបត្រ' : 'Shop Name'}
+                  </label>
+                  <input
+                    type="text"
+                    value={shopName}
+                    onChange={(e) => setShopName(e.target.value)}
+                    className="w-full px-3 py-1.5 text-xs bg-blue-50/40 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-blue-700 mb-1">
+                    {language === 'kh' ? 'ប្រភេទហាង / អាសយដ្ឋានហាង' : 'Shop Subtitle'}
+                  </label>
+                  <input
+                    type="text"
+                    value={shopCategory}
+                    onChange={(e) => setShopCategory(e.target.value)}
+                    className="w-full px-3 py-1.5 text-xs bg-blue-50/40 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-blue-700 mb-1">
+                    {language === 'kh' ? 'លេខទូរស័ព្ទហាង (ទូរស័ព្ទ:)' : 'Shop Phone Numbers'}
+                  </label>
+                  <input
+                    type="text"
+                    value={shopPhone}
+                    onChange={(e) => setShopPhone(e.target.value)}
+                    placeholder="012 234 567 / 098 765 432"
+                    className="w-full px-3 py-1.5 text-xs bg-blue-50/40 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono font-bold"
+                  />
+                </div>
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-600 mb-1">
@@ -635,10 +727,72 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                   <div className="w-7 h-7 rounded-lg bg-blue-600 text-white flex items-center justify-center text-xs font-bold">
                     💬
                   </div>
-                  <h2 className="text-base font-bold text-slate-900">{page.name}</h2>
+                  <h2 className="text-base font-bold text-slate-900">{shopName || page.name}</h2>
                 </div>
-                <p className="text-xs text-slate-500">{page.category}</p>
-                <p className="text-xs text-slate-500">ទូរស័ព្ទ: 012 234 567 / 098 765 432</p>
+                <p className="text-xs text-slate-500">{shopCategory || page.category}</p>
+                <p className="text-xs text-slate-500 mt-0.5 flex flex-wrap items-center gap-1.5">
+                  {isEditingShopInfoInline ? (
+                    <span className="inline-flex flex-wrap items-center gap-1.5 bg-blue-50 border border-blue-200 rounded-lg p-1.5 print:hidden">
+                      <span className="font-semibold text-slate-700 text-[11px]">ទូរស័ព្ទ:</span>
+                      <input
+                        type="text"
+                        value={shopPhone}
+                        onChange={(e) => setShopPhone(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleSaveShopInfo();
+                          } else if (e.key === 'Escape') {
+                            setIsEditingShopInfoInline(false);
+                          }
+                        }}
+                        placeholder="012 234 567 / 098 765 432"
+                        autoFocus
+                        className="px-2 py-0.5 text-xs font-mono font-semibold text-slate-900 bg-white border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 w-48 sm:w-56"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleSaveShopInfo}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] rounded transition-colors cursor-pointer"
+                      >
+                        <Save className="w-2.5 h-2.5" />
+                        <span>{language === 'kh' ? 'រក្សាទុក' : 'Save'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingShopInfoInline(false)}
+                        className="px-1.5 py-0.5 text-[10px] text-slate-500 hover:text-slate-700 cursor-pointer"
+                      >
+                        {language === 'kh' ? 'បោះបង់' : 'Cancel'}
+                      </button>
+                    </span>
+                  ) : (
+                    <>
+                      <span
+                        onClick={() => setIsEditingShopInfoInline(true)}
+                        title={language === 'kh' ? 'ចុចដើម្បីកែប្រែលេខទូរស័ព្ទហាង' : 'Click to edit shop phone'}
+                        className="cursor-pointer hover:text-blue-600 transition-colors"
+                      >
+                        ទូរស័ព្ទ: {shopPhone}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingShopInfoInline(true)}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded transition-colors cursor-pointer print:hidden"
+                        title={language === 'kh' ? 'កែប្រែលេខទូរស័ព្ទហាង' : 'Edit shop phone'}
+                      >
+                        <Edit3 className="w-2.5 h-2.5" />
+                        <span>{language === 'kh' ? 'កែប្រែ' : 'Edit'}</span>
+                      </button>
+                      {shopPhoneSavedBadge && (
+                        <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 print:hidden">
+                          <Check className="w-2.5 h-2.5" />
+                          <span>{language === 'kh' ? 'បានរក្សាទុក' : 'Saved'}</span>
+                        </span>
+                      )}
+                    </>
+                  )}
+                </p>
               </div>
               <div className="text-right">
                 <span className="text-xs font-bold text-blue-600 uppercase tracking-wider block">
