@@ -1,14 +1,13 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Search, 
   MessageCircle, 
-  Send, 
   CheckCheck, 
-  SlidersHorizontal,
-  PlusCircle,
-  Sparkles,
   Menu,
-  RefreshCw
+  RefreshCw,
+  Archive,
+  ArchiveRestore,
+  X
 } from 'lucide-react';
 import { ChatThread, ThreadStatus, PlatformType, PageAccount } from '../types';
 
@@ -23,6 +22,8 @@ interface ConversationListProps {
   pages?: PageAccount[];
   onOpenMobileMenu?: () => void;
   onOpenLiveOnlineModal?: () => void;
+  onBulkMarkAsRead?: (threadIds: string[]) => void;
+  onBulkArchive?: (threadIds: string[], archive?: boolean) => void;
 }
 
 export const ConversationList: React.FC<ConversationListProps> = ({
@@ -36,12 +37,16 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   pages = [],
   onOpenMobileMenu,
   onOpenLiveOnlineModal,
+  onBulkMarkAsRead,
+  onBulkArchive,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<ThreadStatus>('all');
   const [platformFilter, setPlatformFilter] = useState<PlatformType | 'all'>('all');
   const [pageScope, setPageScope] = useState<'current' | 'all'>('all');
   const [isSyncingPage, setIsSyncingPage] = useState(false);
+  const [selectedThreadIds, setSelectedThreadIds] = useState<string[]>([]);
+  const [bulkFeedback, setBulkFeedback] = useState<string | null>(null);
 
   const handleSyncClick = () => {
     setIsSyncingPage(true);
@@ -59,16 +64,26 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     { id: 'needs_reply', labelKh: 'រង់ចាំឆ្លើយ', labelEn: 'Pending' },
     { id: 'ordered', labelKh: 'បានកុម្ម៉ង់', labelEn: 'Ordered' },
     { id: 'completed', labelKh: 'រួចរាល់', labelEn: 'Done' },
+    { id: 'archived', labelKh: 'បណ្ណសារ', labelEn: 'Archived' },
   ];
 
+  const isThreadArchived = (thread: ChatThread) =>
+    Boolean(thread.archived || thread.status === 'archived');
+
   const tabCounts = useMemo(() => {
-    const scoped = threads.filter((t) => (pageScope === 'current' && selectedPage ? t.pageId === selectedPage.id : true));
+    const scoped = threads.filter((t) =>
+      pageScope === 'current' && selectedPage ? t.pageId === selectedPage.id : true
+    );
+    const activeThreads = scoped.filter((t) => !isThreadArchived(t));
+    const archivedThreads = scoped.filter((t) => isThreadArchived(t));
+
     return {
-      all: scoped.length,
-      unread: scoped.filter((t) => t.unreadCount > 0).length,
-      needs_reply: scoped.filter((t) => t.status === 'needs_reply').length,
-      ordered: scoped.filter((t) => t.status === 'ordered').length,
-      completed: scoped.filter((t) => t.status === 'completed').length,
+      all: activeThreads.length,
+      unread: activeThreads.filter((t) => t.unreadCount > 0).length,
+      needs_reply: activeThreads.filter((t) => t.status === 'needs_reply').length,
+      ordered: activeThreads.filter((t) => t.status === 'ordered').length,
+      completed: activeThreads.filter((t) => t.status === 'completed').length,
+      archived: archivedThreads.length,
     };
   }, [threads, pageScope, selectedPage]);
 
@@ -79,12 +94,18 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         return false;
       }
 
-      // Status filter
-      if (statusFilter === 'unread' && thread.unreadCount === 0) return false;
-      if (statusFilter === 'needs_reply' && thread.status !== 'needs_reply') return false;
-      if (statusFilter === 'ordered' && thread.status !== 'ordered') return false;
-      if (statusFilter === 'completed' && thread.status !== 'completed') return false;
-      if (statusFilter === 'vip' && !thread.customer.tags.includes('VIP')) return false;
+      const archived = isThreadArchived(thread);
+      if (statusFilter === 'archived') {
+        if (!archived) return false;
+      } else {
+        // Hide archived threads from standard inbox tabs
+        if (archived) return false;
+        if (statusFilter === 'unread' && thread.unreadCount === 0) return false;
+        if (statusFilter === 'needs_reply' && thread.status !== 'needs_reply') return false;
+        if (statusFilter === 'ordered' && thread.status !== 'ordered') return false;
+        if (statusFilter === 'completed' && thread.status !== 'completed') return false;
+        if (statusFilter === 'vip' && !thread.customer.tags.includes('VIP')) return false;
+      }
 
       // Platform filter
       if (platformFilter !== 'all' && thread.customer.platform !== platformFilter) return false;
@@ -94,7 +115,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         const q = searchQuery.toLowerCase();
         const matchName = thread.customer.name.toLowerCase().includes(q);
         const matchPhone = thread.customer.phone.includes(q);
-        const matchTag = thread.customer.tags.some(t => t.toLowerCase().includes(q));
+        const matchTag = thread.customer.tags.some((t) => t.toLowerCase().includes(q));
         const matchMsg = thread.lastMessage.toLowerCase().includes(q);
         if (!matchName && !matchPhone && !matchTag && !matchMsg) return false;
       }
@@ -112,6 +133,78 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     }
     return matching;
   }, [threads, statusFilter, platformFilter, searchQuery, pageScope, selectedPage]);
+
+  // Keep selectedThreadIds pruned to existing threads
+  useEffect(() => {
+    const validIds = new Set(threads.map((t) => t.id));
+    setSelectedThreadIds((prev) => {
+      const next = prev.filter((id) => validIds.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [threads]);
+
+  const visibleThreadIds = useMemo(() => filteredThreads.map((t) => t.id), [filteredThreads]);
+  const allVisibleSelected =
+    visibleThreadIds.length > 0 &&
+    visibleThreadIds.every((id) => selectedThreadIds.includes(id));
+  const someVisibleSelected =
+    visibleThreadIds.some((id) => selectedThreadIds.includes(id)) && !allVisibleSelected;
+
+  const toggleSelectThread = (threadId: string, e: React.MouseEvent | React.ChangeEvent) => {
+    e.stopPropagation();
+    setSelectedThreadIds((prev) =>
+      prev.includes(threadId) ? prev.filter((id) => id !== threadId) : [...prev, threadId]
+    );
+  };
+
+  const toggleSelectAllVisible = () => {
+    if (allVisibleSelected) {
+      const visibleSet = new Set(visibleThreadIds);
+      setSelectedThreadIds((prev) => prev.filter((id) => !visibleSet.has(id)));
+    } else {
+      setSelectedThreadIds((prev) => Array.from(new Set([...prev, ...visibleThreadIds])));
+    }
+  };
+
+  const showTemporaryFeedback = (msg: string) => {
+    setBulkFeedback(msg);
+    setTimeout(() => {
+      setBulkFeedback((current) => (current === msg ? null : current));
+    }, 2800);
+  };
+
+  const handleBulkMarkReadClick = () => {
+    if (selectedThreadIds.length === 0) return;
+    const count = selectedThreadIds.length;
+    if (onBulkMarkAsRead) {
+      onBulkMarkAsRead(selectedThreadIds);
+    }
+    setSelectedThreadIds([]);
+    showTemporaryFeedback(
+      language === 'kh'
+        ? `បានដាក់សម្គាល់ថាអានរួចចំនួន ${count} ការជជែក`
+        : `Marked ${count} thread${count > 1 ? 's' : ''} as read`
+    );
+  };
+
+  const handleBulkArchiveClick = () => {
+    if (selectedThreadIds.length === 0) return;
+    const count = selectedThreadIds.length;
+    const shouldArchive = statusFilter !== 'archived';
+    if (onBulkArchive) {
+      onBulkArchive(selectedThreadIds, shouldArchive);
+    }
+    setSelectedThreadIds([]);
+    showTemporaryFeedback(
+      shouldArchive
+        ? language === 'kh'
+          ? `បានទុកក្នុងបណ្ណសារចំនួន ${count} ការជជែក`
+          : `Archived ${count} thread${count > 1 ? 's' : ''}`
+        : language === 'kh'
+        ? `បានស្ដារចេញពីបណ្ណសារចំនួន ${count} ការជជែក`
+        : `Unarchived ${count} thread${count > 1 ? 's' : ''}`
+    );
+  };
 
   const getPlatformBadge = (platform: PlatformType) => {
     switch (platform) {
@@ -246,7 +339,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               <button
                 key={tab.id}
                 onClick={() => setStatusFilter(tab.id)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md whitespace-nowrap transition-colors font-medium ${
+                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md whitespace-nowrap transition-colors font-medium cursor-pointer ${
                   isActive
                     ? 'bg-slate-900 text-white shadow-xs'
                     : 'text-slate-600 hover:bg-slate-100'
@@ -274,39 +367,154 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         </div>
       </div>
 
+      {/* Bulk Selection & Action Bar */}
+      {filteredThreads.length > 0 && (
+        <div
+          className={`px-3 py-2 border-b transition-colors flex items-center justify-between gap-2 ${
+            selectedThreadIds.length > 0
+              ? 'bg-blue-50/90 border-blue-200'
+              : 'bg-slate-50/70 border-slate-200/80'
+          }`}
+        >
+          <label className="flex items-center gap-2 text-xs font-medium text-slate-700 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={allVisibleSelected}
+              ref={(el) => {
+                if (el) el.indeterminate = someVisibleSelected;
+              }}
+              onChange={toggleSelectAllVisible}
+              className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer accent-blue-600"
+            />
+            <span>
+              {selectedThreadIds.length > 0
+                ? language === 'kh'
+                  ? `បានជ្រើសរើស ${selectedThreadIds.length}`
+                  : `${selectedThreadIds.length} selected`
+                : language === 'kh'
+                ? 'ជ្រើសរើសទាំងអស់'
+                : 'Select all'}
+            </span>
+          </label>
+
+          {selectedThreadIds.length > 0 ? (
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={handleBulkMarkReadClick}
+                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-blue-700 bg-white hover:bg-blue-100 border border-blue-200 rounded-md shadow-2xs transition-colors cursor-pointer"
+                title={language === 'kh' ? 'ដាក់សម្គាល់ថាអានរួច' : 'Mark selected as read'}
+              >
+                <CheckCheck className="w-3.5 h-3.5" />
+                <span>{language === 'kh' ? 'អានរួច' : 'Mark Read'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleBulkArchiveClick}
+                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded-md shadow-2xs transition-colors cursor-pointer"
+                title={
+                  statusFilter === 'archived'
+                    ? language === 'kh'
+                      ? 'ស្ដារចេញពីបណ្ណសារ'
+                      : 'Unarchive selected'
+                    : language === 'kh'
+                    ? 'ទុកក្នុងបណ្ណសារ'
+                    : 'Archive selected'
+                }
+              >
+                {statusFilter === 'archived' ? (
+                  <>
+                    <ArchiveRestore className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>{language === 'kh' ? 'ស្ដារវិញ' : 'Unarchive'}</span>
+                  </>
+                ) : (
+                  <>
+                    <Archive className="w-3.5 h-3.5 text-amber-600" />
+                    <span>{language === 'kh' ? 'ទុកបណ្ណសារ' : 'Archive'}</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSelectedThreadIds([])}
+                className="p-1 text-slate-400 hover:text-slate-600 hover:bg-white rounded-md transition-colors cursor-pointer"
+                title={language === 'kh' ? 'បោះបង់ការជ្រើសរើស' : 'Clear selection'}
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : (
+            bulkFeedback && (
+              <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md truncate">
+                {bulkFeedback}
+              </span>
+            )
+          )}
+        </div>
+      )}
+
       {/* Conversation Item List */}
       <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
         {filteredThreads.length === 0 ? (
           <div className="p-8 text-center text-slate-400">
             <MessageCircle className="w-10 h-10 mx-auto text-slate-300 mb-2 stroke-[1.5]" />
             <p className="text-sm font-medium text-slate-600">
-              {language === 'kh' ? 'មិនមានសារជជែកក្នុងតម្រងនេះទេ' : 'No conversations found'}
+              {statusFilter === 'archived'
+                ? language === 'kh'
+                  ? 'មិនមានការជជែកក្នុងបណ្ណសារទេ'
+                  : 'No archived conversations'
+                : language === 'kh'
+                ? 'មិនមានសារជជែកក្នុងតម្រងនេះទេ'
+                : 'No conversations found'}
             </p>
-            <button
-              type="button"
-              onClick={() => {
-                setStatusFilter('all');
-                setSearchQuery('');
-                onSimulateCustomerChat();
-              }}
-              className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
-            >
-              <span>+ {language === 'kh' ? 'ទទួលសារ Messenger Live ថ្មី' : 'New Messenger Live Chat'}</span>
-            </button>
+            {statusFilter !== 'archived' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setStatusFilter('all');
+                  setSearchQuery('');
+                  onSimulateCustomerChat();
+                }}
+                className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
+              >
+                <span>+ {language === 'kh' ? 'ទទួលសារ Messenger Live ថ្មី' : 'New Messenger Live Chat'}</span>
+              </button>
+            )}
           </div>
         ) : (
           filteredThreads.map((thread) => {
             const isSelected = thread.id === selectedThreadId;
+            const isChecked = selectedThreadIds.includes(thread.id);
+            const archived = isThreadArchived(thread);
             return (
               <div
                 key={thread.id}
                 onClick={() => onSelectThread(thread.id)}
-                className={`p-3 cursor-pointer transition-colors relative flex items-start gap-3 ${
-                  isSelected
-                    ? 'bg-blue-50/80 border-l-3 border-blue-600'
+                className={`p-3 cursor-pointer transition-colors relative flex items-start gap-2.5 ${
+                  isChecked
+                    ? 'bg-blue-50/90 border-l-3 border-blue-600'
+                    : isSelected
+                    ? 'bg-blue-50/60 border-l-3 border-blue-600'
                     : 'hover:bg-slate-50'
                 }`}
               >
+                {/* Bulk Action Checkbox */}
+                <div
+                  onClick={(e) => toggleSelectThread(thread.id, e)}
+                  className="pt-2.5 shrink-0 flex items-center justify-center"
+                >
+                  <input
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={(e) => toggleSelectThread(thread.id, e)}
+                    onClick={(e) => e.stopPropagation()}
+                    aria-label={`Select conversation with ${thread.customer.name}`}
+                    className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer accent-blue-600"
+                  />
+                </div>
+
                 {/* Customer Avatar & Platform badge */}
                 <div className="relative shrink-0">
                   <img
@@ -347,6 +555,11 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                           {pages.find(p => p.id === thread.pageId)?.name.split(' - ')[0] || 'Page'}
                         </span>
                       </>
+                    )}
+                    {archived && (
+                      <span className="text-[10px] bg-amber-50 text-amber-700 border border-amber-200 px-1.5 py-0.2 rounded font-medium">
+                        {language === 'kh' ? 'បណ្ណសារ' : 'Archived'}
+                      </span>
                     )}
                   </div>
 

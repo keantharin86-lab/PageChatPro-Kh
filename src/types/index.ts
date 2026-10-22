@@ -1,5 +1,5 @@
 export type PlatformType = 'messenger' | 'telegram' | 'tiktok' | 'instagram';
-export type ThreadStatus = 'all' | 'unread' | 'needs_reply' | 'ordered' | 'completed' | 'vip';
+export type ThreadStatus = 'all' | 'unread' | 'needs_reply' | 'ordered' | 'completed' | 'vip' | 'archived';
 export type OrderStatus = 'pending' | 'confirmed' | 'packaging' | 'shipping' | 'shipped' | 'delivered' | 'cancelled';
 
 export interface ProductItem {
@@ -86,7 +86,8 @@ export interface ChatThread {
   pageId: string;
   customer: Customer;
   unreadCount: number;
-  status: 'unread' | 'needs_reply' | 'ordered' | 'completed';
+  status: 'unread' | 'needs_reply' | 'ordered' | 'completed' | 'archived';
+  archived?: boolean;
   lastMessage: string;
   lastMessageTime: string;
   messages: ChatMessage[];

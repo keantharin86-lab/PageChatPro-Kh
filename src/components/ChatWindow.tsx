@@ -38,7 +38,11 @@ import {
   Volume2,
   Play,
   Pause,
-  Square
+  Square,
+  Search,
+  ChevronUp,
+  ChevronDown,
+  Filter
 } from 'lucide-react';
 import { ChatThread, ChatMessage, QuickReplyTemplate, AutoReplyRule, ProductItem, Order, PageAccount } from '../types';
 import { useKhqrConfig, DEFAULT_KHQR_IMAGE, FALLBACK_KHQR_IMAGE } from '../utils/khqrSettings';
@@ -201,6 +205,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const [transcribingMsgIds, setTranscribingMsgIds] = useState<Record<string, boolean>>({});
   const [voiceTranscriptsByMsgId, setVoiceTranscriptsByMsgId] = useState<Record<string, string>>({});
   const audioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
+
+  // Local Conversation Search state
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [chatSearchQuery, setChatSearchQuery] = useState('');
+  const [activeMatchIndex, setActiveMatchIndex] = useState(0);
+  const [filterMatchedOnly, setFilterMatchedOnly] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   // Helper to compress an image File or DataURL and optionally persist it on the server so it never breaks
   const processAndSendOrStageImage = (fileOrDataUrl: File | string, defaultName = 'រូបភាពឆាត', sendImmediately = true) => {
@@ -629,8 +641,114 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   };
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!chatSearchQuery.trim()) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [thread.messages]);
+
+  // Reset search state when switching conversation threads
+  useEffect(() => {
+    setChatSearchQuery('');
+    setActiveMatchIndex(0);
+    setFilterMatchedOnly(false);
+  }, [thread.id]);
+
+  // Helper to check if a message matches the search query
+  const doesMessageMatchQuery = React.useCallback(
+    (msg: ChatMessage, rawQuery: string): boolean => {
+      const q = rawQuery.trim().toLowerCase();
+      if (!q) return false;
+      if (msg.text && msg.text.toLowerCase().includes(q)) return true;
+      if (msg.senderName && msg.senderName.toLowerCase().includes(q)) return true;
+      const customVoiceTranscript = voiceTranscriptsByMsgId[msg.id];
+      if (customVoiceTranscript && customVoiceTranscript.toLowerCase().includes(q)) return true;
+      if (msg.attachments && msg.attachments.length > 0) {
+        for (const att of msg.attachments) {
+          const d = att.data || {};
+          if (typeof d.transcript === 'string' && d.transcript.toLowerCase().includes(q)) return true;
+          if (typeof d.caption === 'string' && d.caption.toLowerCase().includes(q)) return true;
+          if (typeof d.nameKh === 'string' && d.nameKh.toLowerCase().includes(q)) return true;
+          if (typeof d.name === 'string' && d.name.toLowerCase().includes(q)) return true;
+          if (typeof d.orderNumber === 'string' && d.orderNumber.toLowerCase().includes(q)) return true;
+          if (typeof d.customerPhone === 'string' && d.customerPhone.toLowerCase().includes(q)) return true;
+        }
+      }
+      return false;
+    },
+    [voiceTranscriptsByMsgId]
+  );
+
+  const matchedMessageIds = React.useMemo(() => {
+    const q = chatSearchQuery.trim();
+    if (!q) return [];
+    return thread.messages.filter((m) => doesMessageMatchQuery(m, q)).map((m) => m.id);
+  }, [thread.messages, chatSearchQuery, doesMessageMatchQuery]);
+
+  const currentMatchedMsgId =
+    matchedMessageIds.length > 0
+      ? matchedMessageIds[Math.min(activeMatchIndex, matchedMessageIds.length - 1)]
+      : null;
+
+  // Reset activeMatchIndex when search query changes
+  useEffect(() => {
+    setActiveMatchIndex(0);
+  }, [chatSearchQuery]);
+
+  // Scroll the currently active matched message into view
+  useEffect(() => {
+    if (currentMatchedMsgId && messageRowRefs.current[currentMatchedMsgId]) {
+      messageRowRefs.current[currentMatchedMsgId]?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+    }
+  }, [currentMatchedMsgId, activeMatchIndex]);
+
+  const handleNextSearchMatch = () => {
+    if (matchedMessageIds.length === 0) return;
+    setActiveMatchIndex((prev) => (prev + 1) % matchedMessageIds.length);
+  };
+
+  const handlePrevSearchMatch = () => {
+    if (matchedMessageIds.length === 0) return;
+    setActiveMatchIndex((prev) => (prev - 1 + matchedMessageIds.length) % matchedMessageIds.length);
+  };
+
+  const renderHighlightedText = (text: string, query: string, isCurrentFocusedMsg: boolean) => {
+    const trimmed = query.trim();
+    if (!trimmed || !text) return text;
+    try {
+      const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const parts = text.split(new RegExp(`(${escaped})`, 'gi'));
+      if (parts.length <= 1) return text;
+      return parts.map((part, idx) =>
+        part.toLowerCase() === trimmed.toLowerCase() ? (
+          <mark
+            key={idx}
+            className={`px-1 py-0.2 rounded font-bold transition-colors ${
+              isCurrentFocusedMsg
+                ? 'bg-amber-400 text-slate-950 ring-2 ring-amber-300 shadow-2xs'
+                : 'bg-yellow-200 text-slate-900'
+            }`}
+          >
+            {part}
+          </mark>
+        ) : (
+          <React.Fragment key={idx}>{part}</React.Fragment>
+        )
+      );
+    } catch {
+      return text;
+    }
+  };
+
+  const displayedMessages = React.useMemo(() => {
+    if (filterMatchedOnly && chatSearchQuery.trim()) {
+      const matchedSet = new Set(matchedMessageIds);
+      return thread.messages.filter((m) => matchedSet.has(m.id));
+    }
+    return thread.messages;
+  }, [thread.messages, filterMatchedOnly, chatSearchQuery, matchedMessageIds]);
 
   // Find the latest message sent by the customer to generate contextual 1-click smart chips
   const lastCustomerMessage = [...thread.messages].reverse().find((m) => m.sender === 'customer');
@@ -1031,6 +1149,36 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             </button>
           )}
 
+          {/* Search in Conversation Toggle Button */}
+          <button
+            type="button"
+            onClick={() => {
+              setIsSearchOpen((prev) => {
+                const next = !prev;
+                if (next) {
+                  setTimeout(() => searchInputRef.current?.focus(), 50);
+                } else {
+                  setChatSearchQuery('');
+                  setFilterMatchedOnly(false);
+                }
+                return next;
+              });
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors shadow-2xs cursor-pointer ${
+              isSearchOpen || chatSearchQuery.trim()
+                ? 'bg-blue-50 text-blue-700 border-blue-300'
+                : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-300'
+            }`}
+            title={
+              language === 'kh'
+                ? 'ស្វែងរកពាក្យគន្លឹះក្នុងការសន្ទនានេះ (Search in conversation)'
+                : 'Search keywords in this conversation'
+            }
+          >
+            <Search className="w-3.5 h-3.5 text-blue-600" />
+            <span className="hidden lg:inline">{language === 'kh' ? 'ស្វែងរក' : 'Search'}</span>
+          </button>
+
           {/* Export Conversation History as PDF Button */}
           {onExportConversationPdf && (
             <button
@@ -1059,6 +1207,124 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Local Thread Keyword Search Bar */}
+      {isSearchOpen && (
+        <div className="px-4 py-2 bg-white border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 shrink-0 shadow-2xs animate-in fade-in slide-in-from-top-1 duration-150">
+          <div className="relative flex-1 min-w-[200px]">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={chatSearchQuery}
+              onChange={(e) => setChatSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  if (e.shiftKey) {
+                    handlePrevSearchMatch();
+                  } else {
+                    handleNextSearchMatch();
+                  }
+                } else if (e.key === 'Escape') {
+                  setIsSearchOpen(false);
+                  setChatSearchQuery('');
+                  setFilterMatchedOnly(false);
+                }
+              }}
+              placeholder={
+                language === 'kh'
+                  ? 'វាយពាក្យគន្លឹះដើម្បីស្វែងរកសារក្នុងការសន្ទនានេះ...'
+                  : 'Search keywords in this conversation...'
+              }
+              className="w-full pl-8 pr-20 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all placeholder:text-slate-400"
+            />
+            {chatSearchQuery && (
+              <button
+                type="button"
+                onClick={() => setChatSearchQuery('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-slate-400 hover:text-slate-600 cursor-pointer"
+                title={language === 'kh' ? 'សម្អាតពាក្យស្វែងរក' : 'Clear search'}
+              >
+                ✕
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {chatSearchQuery.trim() && (
+              <span
+                className={`text-xs font-semibold px-2 py-1 rounded-md tabular-nums ${
+                  matchedMessageIds.length > 0
+                    ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                    : 'bg-rose-50 text-rose-700 border border-rose-200'
+                }`}
+              >
+                {matchedMessageIds.length > 0
+                  ? `${Math.min(activeMatchIndex + 1, matchedMessageIds.length)} / ${matchedMessageIds.length}`
+                  : language === 'kh'
+                  ? '០ លទ្ធផល'
+                  : '0 matches'}
+              </span>
+            )}
+
+            <div className="flex items-center border border-slate-200 rounded-lg overflow-hidden bg-slate-50">
+              <button
+                type="button"
+                onClick={handlePrevSearchMatch}
+                disabled={matchedMessageIds.length === 0}
+                className="p-1.5 text-slate-600 hover:bg-slate-200/70 disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer"
+                title={language === 'kh' ? 'លទ្ធផលមុន (Shift+Enter)' : 'Previous match (Shift+Enter)'}
+              >
+                <ChevronUp className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={handleNextSearchMatch}
+                disabled={matchedMessageIds.length === 0}
+                className="p-1.5 text-slate-600 hover:bg-slate-200/70 border-l border-slate-200 disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer"
+                title={language === 'kh' ? 'លទ្ធផលបន្ទាប់ (Enter)' : 'Next match (Enter)'}
+              >
+                <ChevronDown className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setFilterMatchedOnly((prev) => !prev)}
+              disabled={!chatSearchQuery.trim()}
+              className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
+                filterMatchedOnly
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+              }`}
+              title={
+                language === 'kh'
+                  ? 'បង្ហាញតែសារដែលត្រូវនឹងពាក្យស្វែងរក'
+                  : 'Show only matching messages'
+              }
+            >
+              <Filter className="w-3 h-3" />
+              <span className="hidden sm:inline">
+                {language === 'kh' ? 'បង្ហាញតែសារត្រូវ' : 'Filter Matches'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setIsSearchOpen(false);
+                setChatSearchQuery('');
+                setFilterMatchedOnly(false);
+              }}
+              className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+              title={language === 'kh' ? 'បិទការស្វែងរក (Esc)' : 'Close search (Esc)'}
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Auto-Pilot Active Notification Banner */}
       {isAutoPilot && (
@@ -1116,14 +1382,36 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
       {/* Messages Feed */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {thread.messages.map((msg) => {
+        {displayedMessages.length === 0 && chatSearchQuery.trim() ? (
+          <div className="py-12 text-center text-slate-400">
+            <Search className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+            <p className="text-sm font-semibold text-slate-600">
+              {language === 'kh'
+                ? `មិនพบសារដែលត្រូវនឹង "${chatSearchQuery}" ទេ`
+                : `No messages matching "${chatSearchQuery}"`}
+            </p>
+            <button
+              type="button"
+              onClick={() => setFilterMatchedOnly(false)}
+              className="mt-2 text-xs font-semibold text-blue-600 hover:underline cursor-pointer"
+            >
+              {language === 'kh' ? 'បង្ហាញសារទាំងអស់វិញ' : 'Show all messages'}
+            </button>
+          </div>
+        ) : null}
+        {displayedMessages.map((msg) => {
           const isMe = msg.sender === 'admin' || msg.sender === 'bot';
           const isBot = msg.sender === 'bot';
+          const isMatched = matchedMessageIds.includes(msg.id);
+          const isCurrentMatch = currentMatchedMsgId === msg.id;
 
           return (
             <div
               key={msg.id}
-              className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
+              ref={(el) => {
+                messageRowRefs.current[msg.id] = el;
+              }}
+              className={`flex flex-col transition-all ${isMe ? 'items-end' : 'items-start'}`}
             >
               <div className="flex items-center gap-1.5 mb-1 px-1 text-[11px] text-slate-400">
                 {isBot && (
@@ -1132,18 +1420,28 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     <span>AI Auto-Pilot</span>
                   </span>
                 )}
-                <span className="font-medium text-slate-600">{msg.senderName}</span>
+                <span className="font-medium text-slate-600">
+                  {chatSearchQuery.trim()
+                    ? renderHighlightedText(msg.senderName, chatSearchQuery, isCurrentMatch)
+                    : msg.senderName}
+                </span>
                 <span>•</span>
                 <span>{msg.timestamp}</span>
               </div>
 
               <div
-                className={`max-w-[85%] sm:max-w-[70%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-xs relative group ${
+                className={`max-w-[85%] sm:max-w-[70%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-xs relative group transition-all ${
                   isMe
                     ? isBot
                       ? 'bg-gradient-to-r from-purple-700 to-indigo-700 text-white rounded-br-xs'
                       : 'bg-blue-600 text-white rounded-br-xs'
                     : 'bg-white text-slate-800 border border-slate-200/80 rounded-bl-xs'
+                } ${
+                  isCurrentMatch
+                    ? 'ring-3 ring-amber-400 shadow-md'
+                    : isMatched
+                    ? 'ring-2 ring-amber-300/70'
+                    : ''
                 }`}
               >
                 {editingMessageId === msg.id ? (
@@ -1204,7 +1502,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 ) : (
                   <>
                     <div className="flex items-start justify-between gap-2.5">
-                      <p className="whitespace-pre-wrap flex-1 leading-relaxed">{msg.text}</p>
+                      <p className="whitespace-pre-wrap flex-1 leading-relaxed">
+                        {chatSearchQuery.trim()
+                          ? renderHighlightedText(msg.text, chatSearchQuery, isCurrentMatch)
+                          : msg.text}
+                      </p>
                       <button
                         type="button"
                         onClick={() => {
@@ -1256,7 +1558,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                               className="w-12 h-12 rounded-lg object-cover border border-slate-100"
                             />
                             <div className="min-w-0 flex-1">
-                              <p className="text-xs font-semibold truncate">{prod.nameKh}</p>
+                              <p className="text-xs font-semibold truncate">
+                                {chatSearchQuery.trim()
+                                  ? renderHighlightedText(prod.nameKh, chatSearchQuery, isCurrentMatch)
+                                  : prod.nameKh}
+                              </p>
                               <p className="text-[11px] text-blue-600 font-bold tabular-nums">
                                 ${prod.price.toFixed(2)} ({prod.priceKhr.toLocaleString()} រៀល)
                               </p>
@@ -1394,7 +1700,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                               </div>
                             </div>
                             <div className="px-3 py-1.5 bg-white text-xs text-slate-700 font-medium flex items-center justify-between gap-2 border-t border-slate-100">
-                              <span className="truncate">{imgCaption || '📷 រូបភាពក្នុងឆាត'}</span>
+                              <span className="truncate">
+                                {chatSearchQuery.trim()
+                                  ? renderHighlightedText(imgCaption || '📷 រូបភាពក្នុងឆាត', chatSearchQuery, isCurrentMatch)
+                                  : imgCaption || '📷 រូបភាពក្នុងឆាត'}
+                              </span>
                               <div className="flex items-center gap-2 shrink-0">
                                 <button
                                   type="button"
@@ -1539,7 +1849,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                     </button>
                                   )}
                                 </div>
-                                <p className="italic font-medium">"{recognizedText}"</p>
+                                <p className="italic font-medium">
+                                  "
+                                  {chatSearchQuery.trim()
+                                    ? renderHighlightedText(recognizedText, chatSearchQuery, isCurrentMatch)
+                                    : recognizedText}
+                                  "
+                                </p>
                               </div>
                             )}
                           </div>
@@ -1568,7 +1884,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                 <div>
                                   <div className="flex items-center gap-1.5">
                                     <p className="text-xs font-bold text-white">
-                                      វិក្កយបត្រ #{displayOrd.orderNumber || 'ORD'}
+                                      វិក្កយបត្រ #
+                                      {chatSearchQuery.trim()
+                                        ? renderHighlightedText(displayOrd.orderNumber || 'ORD', chatSearchQuery, isCurrentMatch)
+                                        : displayOrd.orderNumber || 'ORD'}
                                     </p>
                                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold">
                                       {displayOrd.status === 'confirmed' ? 'បានបញ្ជាក់' : displayOrd.status === 'paid' ? 'បានទូទាត់' : 'កុម្ម៉ង់ថ្មី'}

@@ -943,10 +943,19 @@ export default function App() {
               createdAt: existingThread?.customer.createdAt || new Date().toISOString().split('T')[0],
               isRealFacebookUser: true,
             },
-            unreadCount: latestMsg?.sender === 'customer' ? c.unread_count || 1 : 0,
+            archived: existingThread?.archived || false,
+            unreadCount: existingThread
+              ? newlyArrivedCustomerMessages.some((m) => m.threadId === resolvedThreadId)
+                ? (existingThread.unreadCount || 0) + 1
+                : existingThread.unreadCount
+              : latestMsg?.sender === 'customer'
+              ? c.unread_count || 1
+              : 0,
             status:
               existingThread?.status === 'ordered'
                 ? 'ordered'
+                : existingThread?.archived
+                ? existingThread.status
                 : latestMsg?.sender === 'customer'
                 ? 'needs_reply'
                 : 'completed',
@@ -1551,11 +1560,12 @@ export default function App() {
     return false;
   };
 
-  const currentPageThreads = threads.filter((t) => t.pageId === selectedPage.id);
+  const currentPageThreads = threads.filter((t) => t.pageId === selectedPage.id && !t.archived && t.status !== 'archived');
   const selectedThread =
     threads.find((t) => t.id === selectedThreadId && t.pageId === selectedPage.id) ||
     currentPageThreads[0] ||
     threads.find((t) => t.id === selectedThreadId) ||
+    threads.find((t) => !t.archived && t.status !== 'archived') ||
     threads[0];
 
   const handleSelectThread = (threadId: string) => {
@@ -1576,6 +1586,59 @@ export default function App() {
         t.id === threadId ? { ...t, unreadCount: 0 } : t
       )
     );
+  };
+
+  const handleBulkMarkAsRead = (threadIds: string[]) => {
+    if (!threadIds || threadIds.length === 0) return;
+    const idSet = new Set(threadIds);
+    setThreads((prev) => {
+      const next = prev.map((t) => {
+        if (!idSet.has(t.id)) return t;
+        return {
+          ...t,
+          unreadCount: 0,
+          status: t.status === 'unread' ? ('needs_reply' as const) : t.status,
+          messages: t.messages.map((m) => ({ ...m, isRead: true })),
+        };
+      });
+      threadsRef.current = next;
+      return next;
+    });
+  };
+
+  const handleBulkArchive = (threadIds: string[], archive: boolean = true) => {
+    if (!threadIds || threadIds.length === 0) return;
+    const idSet = new Set(threadIds);
+    setThreads((prev) => {
+      const next = prev.map((t) => {
+        if (!idSet.has(t.id)) return t;
+        const restoredStatus =
+          t.status === 'archived'
+            ? t.orderIds && t.orderIds.length > 0
+              ? ('ordered' as const)
+              : ('completed' as const)
+            : t.status;
+        return {
+          ...t,
+          archived: archive,
+          unreadCount: archive ? 0 : t.unreadCount,
+          status: archive ? t.status : restoredStatus,
+        };
+      });
+      threadsRef.current = next;
+
+      if (archive && selectedThreadId && idSet.has(selectedThreadId)) {
+        const nextActiveForPage = next.find(
+          (t) => t.pageId === selectedPage.id && !t.archived && t.status !== 'archived'
+        );
+        const nextActiveAny = next.find((t) => !t.archived && t.status !== 'archived');
+        const fallback = nextActiveForPage || nextActiveAny;
+        if (fallback) {
+          setSelectedThreadId(fallback.id);
+        }
+      }
+      return next;
+    });
   };
 
   const deliverContextualCustomerReply = (targetThreadId: string, customerName: string, replyText: string) => {
@@ -2596,6 +2659,8 @@ export default function App() {
                 pages={pages}
                 onOpenMobileMenu={() => setIsMobileNavOpen(true)}
                 onOpenLiveOnlineModal={() => setIsFacebookLiveModalOpen(true)}
+                onBulkMarkAsRead={handleBulkMarkAsRead}
+                onBulkArchive={handleBulkArchive}
               />
             </div>
 
