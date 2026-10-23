@@ -670,27 +670,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
   };
 
-  // Automatically transcribe any incoming customer voice message (🎤 [សារសម្លេងពីអតិថិជន / Voice Message]) into text
+  // Voice messages are only transcribed when the user explicitly clicks the transcribe button
   const autoTranscribedIdsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    for (const msg of thread.messages) {
-      if (msg.sender !== 'customer') continue;
-      const audioAtt = msg.attachments?.find((a) => a.type === 'audio');
-      const isVoicePlaceholder =
-        msg.text.includes('[សារសម្លេងពីអតិថិជន') ||
-        msg.text.includes('[សារសម្លេង / Voice Message]') ||
-        Boolean(audioAtt);
-      if (!isVoicePlaceholder) continue;
-
-      const existingTranscript =
-        voiceTranscriptsByMsgId[msg.id] || audioAtt?.data?.transcript || '';
-      if (!existingTranscript && !autoTranscribedIdsRef.current.has(msg.id)) {
-        autoTranscribedIdsRef.current.add(msg.id);
-        const audioUrl = audioAtt?.data?.url || createPlayableWavDataUrl(4);
-        handleTranscribeVoiceMessage(msg.id, audioUrl, undefined, false);
-      }
-    }
-  }, [thread.messages]);
 
   const handleKhqrImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

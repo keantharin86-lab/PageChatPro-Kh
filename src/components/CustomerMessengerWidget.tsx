@@ -15,8 +15,53 @@ import {
   Volume2,
   Play,
   Pause,
+  Move,
+  GripVertical,
 } from 'lucide-react';
 import { ChatThread, PageAccount } from '../types';
+
+type WidgetPositionZone =
+  | 'bottom-right'
+  | 'bottom-left'
+  | 'top-left'
+  | 'top-right'
+  | 'middle-right'
+  | 'middle-left'
+  | 'bottom-center'
+  | 'top-center';
+
+const POSITION_ZONE_ORDER: WidgetPositionZone[] = [
+  'bottom-right',
+  'bottom-left',
+  'middle-left',
+  'top-left',
+  'top-right',
+  'middle-right',
+  'bottom-center',
+  'top-center',
+];
+
+const POSITION_ZONE_CLASSES: Record<WidgetPositionZone, string> = {
+  'bottom-right': 'bottom-4 right-4',
+  'bottom-left': 'bottom-4 left-4',
+  'top-left': 'top-16 left-4',
+  'top-right': 'top-16 right-4',
+  'middle-right': 'top-1/2 -translate-y-1/2 right-3',
+  'middle-left': 'top-1/2 -translate-y-1/2 left-3',
+  'bottom-center': 'bottom-4 left-1/2 -translate-x-1/2',
+  'top-center': 'top-16 left-1/2 -translate-x-1/2',
+};
+
+const POSITION_ZONE_LABELS_KH: Record<WidgetPositionZone, string> = {
+  'bottom-right': 'ក្រោមស្តាំ ↘',
+  'bottom-left': 'ក្រោមឆ្វេង ↙',
+  'top-left': 'លើឆ្វេង ↖',
+  'top-right': 'លើស្តាំ ↗',
+  'middle-right': 'កណ្តាលស្តាំ ➡',
+  'middle-left': 'កណ្តាលឆ្វេង ⬅',
+  'bottom-center': 'ក្រោមកណ្តាល ⬇',
+  'top-center': 'លើកណ្តាល ⬆',
+};
 
 const WIDGET_FALLBACK_IMAGE_SVG =
   'data:image/svg+xml;utf8,' +
@@ -105,9 +150,158 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
   const [isConnectingToken, setIsConnectingToken] = useState<boolean>(false);
   const [tokenSuccess, setTokenSuccess] = useState<boolean>(false);
   const [playingWidgetAudioId, setPlayingWidgetAudioId] = useState<string | null>(null);
+  const [positionZone, setPositionZone] = useState<WidgetPositionZone>(() => {
+    try {
+      const saved = localStorage.getItem('pagechat_widget_zone_v1') as WidgetPositionZone | null;
+      if (saved && POSITION_ZONE_CLASSES[saved]) return saved;
+    } catch {}
+    return 'bottom-right';
+  });
+  const [customCoords, setCustomCoords] = useState<{ x: number; y: number } | null>(() => {
+    try {
+      const raw = localStorage.getItem('pagechat_widget_coords_v1');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.x === 'number' && typeof parsed?.y === 'number') {
+          const maxX = Math.max(40, (window.innerWidth || 1200) - 100);
+          const maxY = Math.max(40, (window.innerHeight || 800) - 60);
+          return {
+            x: Math.max(4, Math.min(maxX, parsed.x)),
+            y: Math.max(4, Math.min(maxY, parsed.y)),
+          };
+        }
+      }
+    } catch {}
+    return null;
+  });
+  const [isCompactWhenClosed, setIsCompactWhenClosed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('pagechat_widget_compact_v1') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+  const dragStartRef = useRef<{
+    startClientX: number;
+    startClientY: number;
+    startLeft: number;
+    startTop: number;
+    elWidth: number;
+    elHeight: number;
+    moved: boolean;
+  } | null>(null);
 
+  const widgetContainerRef = useRef<HTMLDivElement>(null);
+  const closedButtonRef = useRef<HTMLButtonElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const widgetImageInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setCustomCoords((prev) => {
+        if (!prev) return null;
+        const maxX = Math.max(40, window.innerWidth - 100);
+        const maxY = Math.max(40, window.innerHeight - 60);
+        return {
+          x: Math.max(4, Math.min(maxX, prev.x)),
+          y: Math.max(4, Math.min(maxY, prev.y)),
+        };
+      });
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const updateZone = (nextZone: WidgetPositionZone) => {
+    setCustomCoords(null);
+    setPositionZone(nextZone);
+    try {
+      localStorage.removeItem('pagechat_widget_coords_v1');
+      localStorage.setItem('pagechat_widget_zone_v1', nextZone);
+    } catch {}
+  };
+
+  const handleCyclePosition = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const currentIndex = POSITION_ZONE_ORDER.indexOf(positionZone);
+    const nextZone = POSITION_ZONE_ORDER[(currentIndex + 1) % POSITION_ZONE_ORDER.length];
+    updateZone(nextZone);
+  };
+
+  const handleToggleCompact = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsCompactWhenClosed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('pagechat_widget_compact_v1', String(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLElement>) => {
+    const targetEl = e.target as HTMLElement | null;
+    if (
+      targetEl &&
+      targetEl !== e.currentTarget &&
+      targetEl.closest('button, [role="button"], input, a')
+    ) {
+      return;
+    }
+
+    const activeWrapper = isOpen ? widgetContainerRef.current : closedButtonRef.current;
+    const rect = (activeWrapper || e.currentTarget).getBoundingClientRect();
+
+    dragStartRef.current = {
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      startLeft: rect.left,
+      startTop: rect.top,
+      elWidth: rect.width || 320,
+      elHeight: rect.height || 56,
+      moved: false,
+    };
+
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {}
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLElement>) => {
+    if (!dragStartRef.current) return;
+    const dx = e.clientX - dragStartRef.current.startClientX;
+    const dy = e.clientY - dragStartRef.current.startClientY;
+
+    if (!dragStartRef.current.moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) {
+      return;
+    }
+
+    dragStartRef.current.moved = true;
+    if (!isDragging) setIsDragging(true);
+
+    const vw = window.innerWidth || 1200;
+    const vh = window.innerHeight || 800;
+    const maxX = Math.max(4, vw - Math.min(dragStartRef.current.elWidth, vw - 8) - 4);
+    const maxY = Math.max(4, vh - Math.min(dragStartRef.current.elHeight, vh - 8) - 4);
+
+    const nextX = Math.round(Math.max(4, Math.min(maxX, dragStartRef.current.startLeft + dx)));
+    const nextY = Math.round(Math.max(4, Math.min(maxY, dragStartRef.current.startTop + dy)));
+
+    setCustomCoords({ x: nextX, y: nextY });
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLElement>) => {
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {}
+    if (dragStartRef.current?.moved && customCoords) {
+      try {
+        localStorage.setItem('pagechat_widget_coords_v1', JSON.stringify(customCoords));
+      } catch {}
+    }
+    setIsDragging(false);
+  };
 
   const isRealGraphToken = Boolean(
     selectedPage.accessToken &&
@@ -234,28 +428,117 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
     }
   };
 
+  useEffect(() => {
+    const el = isOpen ? widgetContainerRef.current : closedButtonRef.current;
+    if (!el) return;
+    if (customCoords) {
+      el.style.left = `${customCoords.x}px`;
+      el.style.top = `${customCoords.y}px`;
+      el.style.right = 'auto';
+      el.style.bottom = 'auto';
+      el.style.transform = 'none';
+    } else {
+      el.style.left = '';
+      el.style.top = '';
+      el.style.right = '';
+      el.style.bottom = '';
+      el.style.transform = '';
+    }
+  }, [customCoords, isOpen, isMinimized]);
+
   if (!isOpen) {
     return (
       <button
+        ref={closedButtonRef}
         type="button"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
         onClick={() => {
+          if (dragStartRef.current?.moved) {
+            dragStartRef.current = null;
+            return;
+          }
+          dragStartRef.current = null;
           setIsOpen(true);
           setIsMinimized(false);
         }}
-        className="fixed bottom-4 right-4 z-40 px-4 py-2.5 rounded-full bg-gradient-to-r from-[#0084FF] to-[#00C6FF] hover:from-[#0073E6] hover:to-[#00B2E6] text-white font-bold text-xs shadow-xl flex items-center gap-2 cursor-pointer border-2 border-white transition-transform hover:scale-105"
+        title={
+          language === 'kh'
+            ? `ទាញដូរទីតាំងបានគ្រប់កន្លែងក្នុងកម្មវិធី ឬចុចដើម្បីបើក`
+            : 'Drag anywhere in the app to reposition or click to open'
+        }
+        className={`fixed ${customCoords ? '' : POSITION_ZONE_CLASSES[positionZone]} z-40 px-3 py-2 rounded-full bg-gradient-to-r from-[#0084FF] to-[#00C6FF] hover:from-[#0073E6] hover:to-[#00B2E6] text-white font-bold text-xs shadow-xl flex items-center gap-2 cursor-grab active:cursor-grabbing border-2 border-white select-none touch-none ${
+          isDragging ? 'ring-4 ring-blue-300/60 opacity-95' : 'transition-all hover:scale-102'
+        }`}
       >
-        <MessageCircle className="w-4 h-4 fill-white" />
-        <span>📱 បើកផ្ទាំងភ្ញៀវឆាតចូលផេក Messenger ({selectedPage.name.split(' - ')[0]})</span>
-        <span className="w-2 h-2 rounded-full bg-emerald-300 animate-ping" />
+        <GripVertical className="w-3.5 h-3.5 text-white/80 shrink-0 -ml-0.5" />
+        <MessageCircle className="w-4 h-4 fill-white shrink-0" />
+        <span className={isCompactWhenClosed ? 'max-w-[115px] truncate' : ''}>
+          {isCompactWhenClosed
+            ? `📱 ${selectedPage.name.split(' - ')[0]}`
+            : `📱 បើកផ្ទាំងភ្ញៀវឆាតចូលផេក Messenger (${selectedPage.name.split(' - ')[0]})`}
+        </span>
+        <span className="w-2 h-2 rounded-full bg-emerald-300 animate-ping shrink-0" />
+
+        {/* One-click Position Switcher when not in use */}
+        <span
+          role="button"
+          tabIndex={0}
+          onClick={handleCyclePosition}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') handleCyclePosition(e as any);
+          }}
+          title={
+            language === 'kh'
+              ? `ចុចដូរទីតាំង (${customCoords ? 'ទីតាំងសេរី' : POSITION_ZONE_LABELS_KH[positionZone]})`
+              : 'Click to switch screen position'
+          }
+          className="ml-0.5 px-2 py-0.5 rounded-full bg-white/20 hover:bg-white/35 text-[10px] font-extrabold flex items-center gap-1 transition-colors cursor-pointer shrink-0 border border-white/30"
+        >
+          <Move className="w-3 h-3" />
+          <span>
+            {language === 'kh'
+              ? customCoords
+                ? 'ដូរជ្រុង'
+                : POSITION_ZONE_LABELS_KH[positionZone]
+              : 'Move'}
+          </span>
+        </span>
+
+        {/* Compact / Expand label toggle when not in use */}
+        <span
+          role="button"
+          tabIndex={0}
+          onClick={handleToggleCompact}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') handleToggleCompact(e as any);
+          }}
+          title={
+            language === 'kh'
+              ? isCompactWhenClosed
+                ? 'ពង្រីកអក្សរ'
+                : 'បង្រួមតូចពេលមិនប្រើ'
+              : 'Toggle compact size'
+          }
+          className="p-1 rounded-full bg-white/15 hover:bg-white/30 text-white transition-colors cursor-pointer shrink-0"
+        >
+          {isCompactWhenClosed ? (
+            <Maximize2 className="w-3 h-3" />
+          ) : (
+            <Minimize2 className="w-3 h-3" />
+          )}
+        </span>
       </button>
     );
   }
 
   return (
     <div
-      className={`fixed right-3 bottom-3 z-40 bg-white rounded-2xl shadow-2xl border-2 border-[#0084FF]/40 flex flex-col overflow-hidden transition-all duration-200 ${
-        isMinimized ? 'w-80 h-14' : 'w-84 sm:w-92 h-[490px] max-h-[84vh]'
-      }`}
+      ref={widgetContainerRef}
+      className={`fixed ${customCoords ? '' : POSITION_ZONE_CLASSES[positionZone]} z-40 bg-white rounded-2xl shadow-2xl border-2 border-[#0084FF]/40 flex flex-col overflow-hidden ${
+        isDragging ? 'ring-4 ring-blue-400/50 shadow-blue-500/20' : 'transition-all duration-150'
+      } ${isMinimized ? 'w-80 h-14' : 'w-84 sm:w-92 h-[490px] max-h-[84vh]'}`}
     >
       {/* Hidden Image Input for Customer Messenger Widget */}
       <input
@@ -266,9 +549,20 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
         className="hidden"
       />
 
-      {/* Messenger Blue Header */}
-      <div className="bg-gradient-to-r from-[#0084FF] to-[#0099FF] text-white px-3.5 py-2.5 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-2.5 min-w-0">
+      {/* Messenger Blue Header (Freely Draggable Anywhere in the App + Position Switchable) */}
+      <div
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        title={
+          language === 'kh'
+            ? 'ចុចឱ្យជាប់ហើយទាញដើម្បីដូរទីតាំងទៅគ្រប់កន្លែងក្នុងកម្មវិធី'
+            : 'Hold and drag to move anywhere in the app'
+        }
+        className="bg-gradient-to-r from-[#0084FF] to-[#0099FF] text-white px-3 py-2.5 flex items-center justify-between shrink-0 cursor-grab active:cursor-grabbing select-none touch-none"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <GripVertical className="w-4 h-4 text-white/80 shrink-0 -ml-1" />
           <div className="relative shrink-0">
             <img
               src={
@@ -277,7 +571,7 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
               }
               alt={selectedPage.name}
               referrerPolicy="no-referrer"
-              className="w-8 h-8 rounded-full object-cover border-2 border-white"
+              className="w-8 h-8 rounded-full object-cover border-2 border-white pointer-events-none"
             />
             <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-400 border-2 border-[#0084FF]" />
           </div>
@@ -292,13 +586,26 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
             </div>
             <p className="text-[10px] text-blue-100 truncate">
               {language === 'kh'
-                ? 'គាំទ្រសារអក្សរ, រូបភាព និងសារសម្លេង (Voice Sound)'
-                : 'Supports Text, Photos & Voice Sound'}
+                ? 'ទាញក្បាលផ្ទាំងនេះដូរទីតាំងបានគ្រប់កន្លែង'
+                : 'Drag header to move anywhere'}
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={handleCyclePosition}
+            className="px-2 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-white transition-colors cursor-pointer flex items-center gap-1 text-[10px] font-bold"
+            title={
+              language === 'kh'
+                ? `ចុចដូរជ្រុង (${POSITION_ZONE_LABELS_KH[positionZone]})`
+                : 'Cycle corner position'
+            }
+          >
+            <Move className="w-3 h-3" />
+            <span>{language === 'kh' ? 'ដូរទីតាំង' : 'Move'}</span>
+          </button>
           <button
             type="button"
             onClick={() => setIsMinimized(!isMinimized)}

@@ -282,20 +282,59 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
     }
   };
 
-  // File upload reader
+  // File upload reader with automatic image compression so large photos never exceed storage limits on reload
   const handleImageFileChange = (e: React.ChangeEvent<HTMLInputElement>, isEditMode: boolean) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (event) => {
-      const base64 = event.target?.result as string;
-      if (base64) {
+      const rawBase64 = event.target?.result as string;
+      if (!rawBase64) return;
+
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const maxDim = 900;
+          let width = img.width;
+          let height = img.height;
+          if (width > maxDim || height > maxDim) {
+            if (width > height) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            } else {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, width, height);
+            const compressed = canvas.toDataURL('image/jpeg', 0.85);
+            if (isEditMode) {
+              setEditImageUrl(compressed);
+            } else {
+              setImageUrl(compressed);
+            }
+            return;
+          }
+        } catch {}
         if (isEditMode) {
-          setEditImageUrl(base64);
+          setEditImageUrl(rawBase64);
         } else {
-          setImageUrl(base64);
+          setImageUrl(rawBase64);
         }
-      }
+      };
+      img.onerror = () => {
+        if (isEditMode) {
+          setEditImageUrl(rawBase64);
+        } else {
+          setImageUrl(rawBase64);
+        }
+      };
+      img.src = rawBase64;
     };
     reader.readAsDataURL(file);
     e.target.value = '';

@@ -44,7 +44,8 @@ import {
   AutoReplyRule, 
   Order, 
   Customer,
-  ChatMessage
+  ChatMessage,
+  BatchAutoPilotProgress
 } from './types';
 import { soundNotifier } from './utils/audio';
 
@@ -60,6 +61,77 @@ const REMOVED_DEMO_PRODUCT_IDS = new Set([
   'prod_3',
   'prod_4',
 ]);
+
+const getDeletedProductIds = (): Set<string> => {
+  try {
+    const raw = localStorage.getItem('pagechat_deleted_product_ids');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return new Set(parsed);
+    }
+  } catch {}
+  return new Set();
+};
+
+const addDeletedProductId = (id: string) => {
+  try {
+    const set = getDeletedProductIds();
+    set.add(id);
+    localStorage.setItem('pagechat_deleted_product_ids', JSON.stringify(Array.from(set)));
+  } catch {}
+};
+
+const saveProductsToLocalStorageSafely = (list: ProductItem[]) => {
+  try {
+    localStorage.setItem('pagechat_products', JSON.stringify(list));
+  } catch {
+    try {
+      // Fallback if base64 image exceeds localStorage quota: keep metadata in localStorage while full image is saved in IndexedDB & server
+      const compact = list.map((p) => ({
+        ...p,
+        imageUrl:
+          p.imageUrl && p.imageUrl.length > 250000
+            ? p.imageUrl.slice(0, 250000)
+            : p.imageUrl,
+      }));
+      localStorage.setItem('pagechat_products', JSON.stringify(compact));
+    } catch {}
+  }
+};
+
+const mergeProductCatalogs = (
+  primaryList: ProductItem[],
+  secondaryList: ProductItem[]
+): ProductItem[] => {
+  const deletedIds = getDeletedProductIds();
+  const map = new Map<string, ProductItem>();
+
+  for (const p of primaryList) {
+    if (!p || !p.id || REMOVED_DEMO_PRODUCT_IDS.has(p.id) || deletedIds.has(p.id)) continue;
+    map.set(p.id, p);
+  }
+
+  for (const p of secondaryList) {
+    if (!p || !p.id || REMOVED_DEMO_PRODUCT_IDS.has(p.id) || deletedIds.has(p.id)) continue;
+    const existing = map.get(p.id);
+    if (!existing) {
+      map.set(p.id, p);
+    } else {
+      // Prefer whichever copy has a richer imageUrl (e.g. full base64 from IndexedDB/Server)
+      const richerImage =
+        p.imageUrl && (!existing.imageUrl || p.imageUrl.length > existing.imageUrl.length)
+          ? p.imageUrl
+          : existing.imageUrl;
+      map.set(p.id, {
+        ...p,
+        ...existing,
+        imageUrl: richerImage,
+      });
+    }
+  }
+
+  return Array.from(map.values());
+};
 
 const DEFAULT_FALLBACK_PAGE: PageAccount = {
   id: 'page_default',
@@ -353,24 +425,28 @@ export default function App() {
   const [isGlobalMobileFrame, setIsGlobalMobileFrame] = useState(false);
   const [isMobileCustomerSheetOpen, setIsMobileCustomerSheetOpen] = useState(false);
 
-  const [isAutoPilot, setIsAutoPilot] = useState<boolean>(() => {
-    try {
-      const stored = localStorage.getItem('pagechat_gemini_autopilot_v3');
-      if (stored !== null) return stored === 'true';
-      return true; // Default enabled for automatic Gemini AI response
-    } catch {
-      return true;
-    }
-  });
+  // Always default Auto-Pilot to false (OFF) on page load/reload so reloading NEVER sends messages to customers
+  const [isAutoPilot, setIsAutoPilot] = useState<boolean>(false);
 
   const isAutoPilotRef = useRef(isAutoPilot);
-  const lastPolledTimeRef = useRef<number>(Date.now() - 3600000);
+  const appMountTimeRef = useRef<number>(Date.now());
+  const lastPolledTimeRef = useRef<number>(Date.now());
   const processedWebhookEventIdsRef = useRef<Set<string>>(new Set());
+  const hasCompletedInitialGraphSyncRef = useRef<Set<string>>(new Set());
   const [isHydrated, setIsHydrated] = useState<boolean>(false);
   const [aiTypingThreadIds, setAiTypingThreadIds] = useState<string[]>([]);
+  const [batchAutoPilotProgress, setBatchAutoPilotProgress] = useState<BatchAutoPilotProgress>({
+    isRunning: false,
+    completed: 0,
+    total: 0,
+    currentCustomerName: undefined,
+    currentThreadId: undefined,
+    finishedMessage: null,
+  });
   const [isConversationPdfModalOpen, setIsConversationPdfModalOpen] = useState<boolean>(false);
   const autoRepliedMsgIdsRef = useRef<Set<string>>(new Set());
   const inFlightAutoReplyThreadsRef = useRef<Set<string>>(new Set());
+  const cancelBatchAutoPilotRef = useRef<boolean>(false);
 
   const threadsRef = useRef<ChatThread[]>(threads);
   threadsRef.current = threads;
@@ -402,19 +478,20 @@ export default function App() {
 
   useEffect(() => {
     isAutoPilotRef.current = isAutoPilot;
-    try {
-      localStorage.setItem('pagechat_gemini_autopilot_v3', String(isAutoPilot));
-    } catch (e) {
-      // ignore
-    }
   }, [isAutoPilot]);
 
   const handleToggleAutoPilot = () => {
     setIsAutoPilot((prev) => {
       const next = !prev;
       isAutoPilotRef.current = next;
+      if (!next) {
+        cancelBatchAutoPilotRef.current = true;
+        setBatchAutoPilotProgress((bp) =>
+          bp.isRunning ? { ...bp, isRunning: false, finishedMessage: null } : bp
+        );
+      }
       try {
-        localStorage.setItem('pagechat_gemini_autopilot_v3', String(next));
+        localStorage.setItem('pagechat_gemini_autopilot_v4', String(next));
       } catch {}
       return next;
     });
@@ -475,6 +552,11 @@ export default function App() {
   // Sync all computer offline data back to server when connection returns or manual Sync is clicked
   const handleSyncOfflineDataNow = async () => {
     await Promise.all([
+      fetch('/api/products/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ products: productsRef.current }),
+      }).catch(() => null),
       fetch('/api/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -488,6 +570,25 @@ export default function App() {
     ]);
     setPendingOfflineEditsCount(0);
     setLastSavedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+  };
+
+  const handleSyncAllProducts = async (): Promise<boolean> => {
+    setIsProductsSyncing(true);
+    try {
+      saveToDesktopIndexedDB('pagechat_products', productsRef.current);
+      saveProductsToLocalStorageSafely(productsRef.current);
+      const res = await fetch('/api/products/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ products: productsRef.current }),
+      });
+      const data = await res.json();
+      return Boolean(data && data.success);
+    } catch {
+      return false;
+    } finally {
+      setIsProductsSyncing(false);
+    }
   };
 
   useEffect(() => {
@@ -505,8 +606,11 @@ export default function App() {
   }, [pages]);
 
   useEffect(() => {
+    // Only write products to IndexedDB & localStorage after initial hydration or when products array is non-empty
+    if (!isHydrated && products.length === 0) return;
     saveToDesktopIndexedDB('pagechat_products', products);
-  }, [products]);
+    saveProductsToLocalStorageSafely(products);
+  }, [products, isHydrated]);
 
   useEffect(() => {
     saveToDesktopIndexedDB('pagechat_quick_replies', quickReplies);
@@ -587,32 +691,9 @@ export default function App() {
         setThreads([]);
       } else if (Array.isArray(idbThreads) && idbThreads.length > 0) {
         setThreads((prev) => {
-          const map = new Map<string, ChatThread>();
-          idbThreads.forEach((t) => map.set(t.id, normalizeThreadLive(t)));
-          prev.forEach((lt) => {
-            const existing = map.get(lt.id);
-            if (!existing) {
-              map.set(lt.id, normalizeThreadLive(lt));
-            } else {
-              const msgMap = new Map<string, ChatMessage>();
-              existing.messages.forEach((m) => msgMap.set(m.id, m));
-              lt.messages.forEach((m) => {
-                if (!msgMap.has(m.id)) msgMap.set(m.id, m);
-              });
-              const combinedMessages = Array.from(msgMap.values());
-              const lastM = combinedMessages[combinedMessages.length - 1];
-              map.set(
-                lt.id,
-                normalizeThreadLive({
-                  ...existing,
-                  ...lt,
-                  lastMessage: lastM ? lastM.text : existing.lastMessage,
-                  messages: combinedMessages,
-                })
-              );
-            }
-          });
-          return ensureAllPagesHaveLiveThreads(Array.from(map.values()), resolvedPages);
+          if (prev.length > 0) return ensureAllPagesHaveLiveThreads(prev, resolvedPages);
+          const restored = idbThreads.map((t) => normalizeThreadLive(t));
+          return ensureAllPagesHaveLiveThreads(restored, resolvedPages);
         });
       } else {
         setThreads((prev) => ensureAllPagesHaveLiveThreads(prev, resolvedPages));
@@ -621,11 +702,21 @@ export default function App() {
       if (Array.isArray(idbOrders) && idbOrders.length > 0) {
         setOrders(idbOrders);
       }
-      if (Array.isArray(idbProducts)) {
-        const filteredIdbProducts = idbProducts.filter(
-          (p) => p && p.id && !REMOVED_DEMO_PRODUCT_IDS.has(p.id)
-        );
-        setProducts(filteredIdbProducts);
+      if (Array.isArray(idbProducts) && idbProducts.length > 0) {
+        setProducts((prev) => {
+          const merged = mergeProductCatalogs(prev, idbProducts);
+          productsRef.current = merged;
+          saveProductsToLocalStorageSafely(merged);
+          saveToDesktopIndexedDB('pagechat_products', merged);
+          if (merged.length > 0) {
+            fetch('/api/products/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ products: merged }),
+            }).catch(() => {});
+          }
+          return merged;
+        });
       }
       setIsHydrated(true);
     };
@@ -635,7 +726,7 @@ export default function App() {
     };
   }, []);
 
-  // Fetch persistent online products, orders, and threads from server on startup & reconcile order invoices in threads
+  // Fetch persistent online products, orders, and threads from server on startup
   useEffect(() => {
     let isMounted = true;
     const fetchInitialOnlineData = async () => {
@@ -650,13 +741,22 @@ export default function App() {
         if (prodRes && isMounted) {
           const prodJson = await prodRes.json();
           if (prodJson.success && Array.isArray(prodJson.data)) {
-            const filteredServerProducts = prodJson.data.filter(
-              (p: ProductItem) => p && p.id && !REMOVED_DEMO_PRODUCT_IDS.has(p.id)
-            );
-            setProducts(filteredServerProducts);
-            try {
-              localStorage.setItem('pagechat_products', JSON.stringify(filteredServerProducts));
-            } catch {}
+            const serverProducts: ProductItem[] = prodJson.data;
+            setProducts((prev) => {
+              // Merge local/IndexedDB products with server products so neither ever wipes out the other on reload!
+              const merged = mergeProductCatalogs(prev, serverProducts);
+              productsRef.current = merged;
+              saveProductsToLocalStorageSafely(merged);
+              saveToDesktopIndexedDB('pagechat_products', merged);
+              if (merged.length > serverProducts.length) {
+                fetch('/api/products/sync', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ products: merged }),
+                }).catch(() => {});
+              }
+              return merged;
+            });
           }
         }
 
@@ -681,108 +781,14 @@ export default function App() {
           const thJson = await thRes.json();
           if (thJson.success && Array.isArray(thJson.data) && thJson.data.length > 0) {
             setThreads((localThreads) => {
+              if (localThreads.length > 0) {
+                return ensureAllPagesHaveLiveThreads(localThreads, pages);
+              }
               const serverThreads: ChatThread[] = thJson.data;
-              // Merge server threads and local threads so no messages, images, or order invoices are ever lost
-              const threadMap = new Map<string, ChatThread>();
-              serverThreads.forEach((st) => threadMap.set(st.id, st));
-              localThreads.forEach((lt) => {
-                const existing = threadMap.get(lt.id);
-                if (!existing) {
-                  threadMap.set(lt.id, lt);
-                } else {
-                  const msgMap = new Map<string, ChatMessage>();
-                  existing.messages.forEach((m) => msgMap.set(m.id, m));
-                  lt.messages.forEach((m) => {
-                    if (!msgMap.has(m.id)) msgMap.set(m.id, m);
-                  });
-                  const combinedMessages = Array.from(msgMap.values());
-                  const lastM = combinedMessages[combinedMessages.length - 1];
-                  threadMap.set(lt.id, {
-                    ...existing,
-                    ...lt,
-                    orderIds: Array.from(new Set([...(existing.orderIds || []), ...(lt.orderIds || [])])),
-                    lastMessage: lastM ? lastM.text : existing.lastMessage,
-                    messages: combinedMessages,
-                  });
-                }
-              });
-              return ensureAllPagesHaveLiveThreads(Array.from(threadMap.values()), pages);
+              return ensureAllPagesHaveLiveThreads(serverThreads, pages);
             });
           }
         }
-
-        // Reconcile: Ensure every order in orders has its order_invoice message inside its corresponding Messenger thread
-        setThreads((currentThreads) => {
-          const activeOrders = loadedOrders || orders;
-          let changed = false;
-          const reconciled: ChatThread[] = currentThreads.map((t) => {
-            const matchingOrders = activeOrders.filter(
-              (o) =>
-                o.threadId === t.id ||
-                o.customerName === t.customer.name ||
-                (t.orderIds && t.orderIds.includes(o.id))
-            );
-            if (matchingOrders.length === 0) return t;
-
-            let updatedMsgs = [...t.messages];
-            let updatedOrderIds = [...(t.orderIds || [])];
-            let threadModified = false;
-
-            matchingOrders.forEach((ord) => {
-              if (!updatedOrderIds.includes(ord.id)) {
-                updatedOrderIds.push(ord.id);
-                threadModified = true;
-              }
-              const hasInvoiceMsg = updatedMsgs.some((m) =>
-                m.attachments?.some(
-                  (att) =>
-                    att.type === 'order_invoice' &&
-                    (att.data?.id === ord.id || att.data?.orderNumber === ord.orderNumber)
-                )
-              );
-              if (!hasInvoiceMsg) {
-                const deliveryName =
-                  ord.deliveryProvider === 'jt'
-                    ? 'J&T Express'
-                    : ord.deliveryProvider === 'virak_buntham'
-                    ? 'វីរៈប៊ុនថាំ'
-                    : 'ដឹកជញ្ជូនរហ័ស';
-                const restoredMsg: ChatMessage = {
-                  id: `msg_inv_${ord.id}`,
-                  sender: 'admin',
-                  senderName: 'សុខា',
-                  text: `វិក្កយបត្របញ្ជាទិញ #${ord.orderNumber} សរុប: $${Number(ord.total).toFixed(2)} (${Number(ord.totalKhr || ord.total * 4100).toLocaleString()} រៀល) សេវាដឹក: ${deliveryName}`,
-                  timestamp: ord.createdAt || 'ថ្មីៗនេះ',
-                  attachments: [
-                    {
-                      type: 'order_invoice',
-                      data: ord,
-                    },
-                  ],
-                  isRead: true,
-                  deliveryStatus: 'sent_meta',
-                };
-                updatedMsgs.push(restoredMsg);
-                threadModified = true;
-              }
-            });
-
-            if (threadModified) {
-              changed = true;
-              const lastM = updatedMsgs[updatedMsgs.length - 1];
-              return {
-                ...t,
-                status: 'ordered' as const,
-                orderIds: updatedOrderIds,
-                lastMessage: lastM ? lastM.text : t.lastMessage,
-                messages: updatedMsgs,
-              };
-            }
-            return t;
-          });
-
-          return ensureAllPagesHaveLiveThreads(changed ? reconciled : currentThreads, pages);
-        });
       } catch (err) {
         console.warn('Could not fetch initial online data, using local store:', err);
       } finally {
@@ -836,10 +842,13 @@ export default function App() {
       );
       const json = await res.json();
       if (json.success && Array.isArray(json.data) && json.data.length > 0) {
+        const isInitialPageSync = !hasCompletedInitialGraphSyncRef.current.has(targetPage.id);
+        hasCompletedInitialGraphSyncRef.current.add(targetPage.id);
+
         const currentThreadsSnapshot = threadsRef.current;
         let firstSyncedThreadId: string | null = null;
         let hasNewIncomingCustomerMessage = false;
-        let stateChanged = !isSilentBackgroundPoll;
+        let stateChanged = !isSilentBackgroundPoll || isInitialPageSync;
         const newlyArrivedCustomerMessages: { threadId: string; text: string; msgId: string }[] = [];
 
         const newThreads: ChatThread[] = json.data.map((c: any) => {
@@ -902,13 +911,19 @@ export default function App() {
             .filter((gm: ChatMessage) => Boolean((gm.text && gm.text.trim()) || (gm.attachments && gm.attachments.length > 0)))
             .reverse();
 
+          // Mark all synced Graph messages as already seen so historical messages never trigger automatic replies
+          graphMessages.forEach((gm) => {
+            if (gm.id) autoRepliedMsgIdsRef.current.add(gm.id);
+          });
+
           // Preserve existing messages first in chronological order, then append any new Graph messages at the end
           const existingMessages = existingThread?.messages || [];
           const mergedMessages = [...existingMessages];
+          let newestAddedCustomerMsg: ChatMessage | null = null;
+
           graphMessages.forEach((gm) => {
             const alreadyExists = mergedMessages.some((em) => {
               if (em.id === gm.id) return true;
-              // Deduplicate admin/bot messages by text or attachment type if local ID was temporary; never drop customer messages
               if (gm.sender === 'admin' && (em.sender === 'admin' || em.sender === 'bot')) {
                 if (em.text.trim() === gm.text.trim()) return true;
                 if (
@@ -926,65 +941,81 @@ export default function App() {
             if (!alreadyExists) {
               mergedMessages.push(gm);
               stateChanged = true;
-              if (gm.sender === 'customer') {
-                hasNewIncomingCustomerMessage = true;
-                firstSyncedThreadId = resolvedThreadId;
-                newlyArrivedCustomerMessages.push({
-                  threadId: resolvedThreadId,
-                  text: gm.text,
-                  msgId: gm.id,
-                });
+              if (gm.sender === 'customer' && !isInitialPageSync && existingThread) {
+                newestAddedCustomerMsg = gm;
               }
             }
           });
 
+          // Detect if Meta updated_time changed on an existing conversation (e.g. customer replied in an old thread)
+          const hasMetaUpdatedTimeChange = Boolean(
+            !isInitialPageSync &&
+              c.updated_time &&
+              existingThread?.metaUpdatedTime &&
+              c.updated_time !== existingThread.metaUpdatedTime &&
+              new Date(c.updated_time).getTime() > appMountTimeRef.current
+          );
+
+          if (hasMetaUpdatedTimeChange && c.snippet) {
+            const currentTail = mergedMessages[mergedMessages.length - 1];
+            const snippetClean = String(c.snippet).trim();
+            if (snippetClean && (!currentTail || currentTail.text.trim() !== snippetClean)) {
+              const snippetMsgId = `msg_snip_${c.id}_${c.updated_time || Date.now()}`;
+              const snippetMsg: ChatMessage = {
+                id: snippetMsgId,
+                sender: 'customer',
+                senderName: senderObj.name || existingThread?.customer.name || 'អតិថិជន Facebook',
+                text: snippetClean,
+                timestamp: new Date(c.updated_time).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                }),
+                deliveryStatus: 'sent_meta',
+                isLiveMeta: true,
+              };
+              mergedMessages.push(snippetMsg);
+              stateChanged = true;
+              newestAddedCustomerMsg = snippetMsg;
+            }
+          }
+
           if (!existingThread) {
             stateChanged = true;
-            const lastCustGm = [...graphMessages].reverse().find((gm) => gm.sender === 'customer');
-            if (lastCustGm) {
-              hasNewIncomingCustomerMessage = true;
-              firstSyncedThreadId = resolvedThreadId;
-              if (!newlyArrivedCustomerMessages.some((item) => item.msgId === lastCustGm.id)) {
-                newlyArrivedCustomerMessages.push({
-                  threadId: resolvedThreadId,
-                  text: lastCustGm.text,
-                  msgId: lastCustGm.id,
-                });
+            // Only treat a brand-new conversation as newly arrived if it was updated AFTER the current page session loaded
+            if (!isInitialPageSync && c.updated_time) {
+              const updatedMs = new Date(c.updated_time).getTime();
+              if (updatedMs > appMountTimeRef.current) {
+                const lastGm = graphMessages[graphMessages.length - 1];
+                if (lastGm && lastGm.sender === 'customer') {
+                  newestAddedCustomerMsg = lastGm;
+                }
               }
             }
           }
 
-          // Ensure synced conversation has an active incoming customer message at the bottom ONLY on manual sync button click
-          const currentLast = mergedMessages[mergedMessages.length - 1];
-          if (!isSilentBackgroundPoll && (!currentLast || currentLast.sender !== 'customer')) {
-            const freshMsgId = `msg_sync_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-            const freshText =
-              lastMsg?.message ||
-              c.snippet ||
-              `សួស្តីបង! ខ្ញុំឆាតមកផេក ${targetPage.name.split(' - ')[0]} ចង់សួរតម្លៃ និងស្តុកអីវ៉ាន់មានអត់បង?`;
-            const freshCustomerInquiry: ChatMessage = {
-              id: freshMsgId,
-              sender: 'customer',
-              senderName: senderObj.name || existingThread?.customer.name || 'អតិថិជន Facebook',
-              text: freshText,
-              timestamp: 'ឥឡូវនេះ',
-              deliveryStatus: 'sent_meta',
-              isLiveMeta: true,
-            };
-            mergedMessages.push(freshCustomerInquiry);
+          const latestMsg = mergedMessages[mergedMessages.length - 1];
+          if (newestAddedCustomerMsg && latestMsg && latestMsg.sender === 'customer') {
             hasNewIncomingCustomerMessage = true;
             firstSyncedThreadId = resolvedThreadId;
             newlyArrivedCustomerMessages.push({
               threadId: resolvedThreadId,
-              text: freshText,
-              msgId: freshMsgId,
+              text: (newestAddedCustomerMsg as ChatMessage).text,
+              msgId: (newestAddedCustomerMsg as ChatMessage).id,
             });
           }
 
-          const latestMsg = mergedMessages[mergedMessages.length - 1];
           if (!firstSyncedThreadId && !isSilentBackgroundPoll) {
             firstSyncedThreadId = resolvedThreadId;
           }
+
+          const hasNewMsgForThisThread =
+            newlyArrivedCustomerMessages.some((m) => m.threadId === resolvedThreadId) ||
+            hasMetaUpdatedTimeChange;
+
+          const parsedMetaTime = c.updated_time ? new Date(c.updated_time).getTime() : 0;
+          const resolvedLastActivityAt = hasNewMsgForThisThread
+            ? Date.now()
+            : existingThread?.lastActivityAt || parsedMetaTime || Date.now();
 
           return {
             id: resolvedThreadId,
@@ -1008,24 +1039,27 @@ export default function App() {
               createdAt: existingThread?.customer.createdAt || new Date().toISOString().split('T')[0],
               isRealFacebookUser: true,
             },
-            archived: existingThread?.archived || false,
+            archived: hasNewMsgForThisThread ? false : existingThread?.archived || false,
             unreadCount: existingThread
-              ? newlyArrivedCustomerMessages.some((m) => m.threadId === resolvedThreadId)
+              ? hasNewMsgForThisThread
                 ? (existingThread.unreadCount || 0) + 1
                 : existingThread.unreadCount
               : latestMsg?.sender === 'customer'
               ? c.unread_count || 1
               : 0,
-            status:
-              existingThread?.status === 'ordered'
-                ? 'ordered'
-                : existingThread?.archived
-                ? existingThread.status
-                : latestMsg?.sender === 'customer'
-                ? 'needs_reply'
-                : 'completed',
+            status: hasNewMsgForThisThread
+              ? 'needs_reply'
+              : existingThread?.status === 'ordered'
+              ? 'ordered'
+              : existingThread?.archived
+              ? existingThread.status
+              : latestMsg?.sender === 'customer'
+              ? 'needs_reply'
+              : 'completed',
             lastMessage: latestMsg?.text || lastMsg?.message || c.snippet || 'សារថ្មីពីផេក',
             lastMessageTime: latestMsg?.timestamp || 'ឥឡូវនេះ',
+            lastActivityAt: resolvedLastActivityAt,
+            metaUpdatedTime: c.updated_time || existingThread?.metaUpdatedTime,
             orderIds: existingThread?.orderIds || [],
             messages: mergedMessages,
           };
@@ -1033,32 +1067,57 @@ export default function App() {
 
         if (stateChanged) {
           const activeNewIds = new Set(newlyArrivedCustomerMessages.map((m) => m.threadId));
-          const sortedNewThreads = [...newThreads].sort((a, b) => {
-            const aHasNew = activeNewIds.has(a.id) ? 1 : 0;
-            const bHasNew = activeNewIds.has(b.id) ? 1 : 0;
-            return bHasNew - aHasNew;
-          });
           setThreads((prev) => {
-            const syncedIds = new Set(sortedNewThreads.map((nt) => nt.id));
-            const updatedList = [...sortedNewThreads, ...prev.filter((t) => !syncedIds.has(t.id))];
-            threadsRef.current = updatedList;
-            return updatedList;
+            const syncedMap = new Map(newThreads.map((nt) => [nt.id, nt]));
+            const combined: ChatThread[] = [];
+            const seen = new Set<string>();
+
+            // 1. Put any newly active synced threads at the very top first
+            for (const nt of newThreads) {
+              if (activeNewIds.has(nt.id)) {
+                combined.push(nt);
+                seen.add(nt.id);
+              }
+            }
+
+            // 2. Preserve existing order of prev threads (updating any synced ones in place)
+            for (const pt of prev) {
+              if (seen.has(pt.id)) continue;
+              const syncedVersion = syncedMap.get(pt.id);
+              if (syncedVersion) {
+                combined.push(syncedVersion);
+                seen.add(pt.id);
+              } else {
+                combined.push(pt);
+                seen.add(pt.id);
+              }
+            }
+
+            // 3. Append any remaining newly discovered synced threads
+            for (const nt of newThreads) {
+              if (!seen.has(nt.id)) {
+                combined.push(nt);
+                seen.add(nt.id);
+              }
+            }
+
+            // 4. Sort by lastActivityAt descending so the newest message (new or old customer) is always at the top
+            combined.sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
+
+            threadsRef.current = combined;
+            return combined;
           });
         }
 
-        if (firstSyncedThreadId && (!isSilentBackgroundPoll || hasNewIncomingCustomerMessage)) {
+        if (firstSyncedThreadId && !isSilentBackgroundPoll) {
           setSelectedThreadId(firstSyncedThreadId);
         }
-        if (!isSilentBackgroundPoll || hasNewIncomingCustomerMessage) {
+        if (!isSilentBackgroundPoll) {
           soundNotifier.playMessageChime();
         }
-        if (isAutoPilotRef.current && newlyArrivedCustomerMessages.length > 0) {
-          newlyArrivedCustomerMessages.forEach((item, idx) => {
-            setTimeout(() => {
-              triggerAutoPilotResponse(item.threadId, item.text, item.msgId);
-            }, 450 + idx * 300);
-          });
-        }
+        // NOTE: Never trigger automatic AI messages to Facebook customers during Graph API sync/reload
+      } else if (!isSilentBackgroundPoll) {
+        // Manual sync fallback when no real Graph API token is present
       }
     } catch (e) {
       if (!isSilentBackgroundPoll) {
@@ -1303,27 +1362,109 @@ export default function App() {
     }
   };
 
-  // Manual 1-click handler to force AI Gemini Auto-Chat on all pending customer messages
-  const handleAutoReplyAllPending = async () => {
-    if (isAutoPilotRef.current) return;
-    const pending = threadsRef.current.filter((t) => {
+  // Manual 1-click handler to process all pending customer threads (or selected threads) with a batch progress indicator
+  const handleAutoReplyAllPending = async (targetThreadIds?: string[]) => {
+    if (batchAutoPilotProgress.isRunning) return;
+
+    const idFilterSet =
+      Array.isArray(targetThreadIds) && targetThreadIds.length > 0
+        ? new Set(targetThreadIds)
+        : null;
+
+    let targets = threadsRef.current.filter((t) => {
+      if (t.archived || t.status === 'archived') return false;
+      if (idFilterSet) return idFilterSet.has(t.id);
       const last = t.messages?.[t.messages.length - 1];
-      return last && last.sender === 'customer';
+      return (last && last.sender === 'customer') || t.status === 'needs_reply' || t.unreadCount > 0;
     });
-    if (pending.length > 0) {
-      for (const t of pending) {
-        const last = t.messages[t.messages.length - 1];
-        await triggerAutoPilotResponse(t.id, last.text, last.id, true);
-      }
-    } else if (selectedThread) {
-      const lastCust = [...selectedThread.messages].reverse().find((m) => m.sender === 'customer');
-      await triggerAutoPilotResponse(
-        selectedThread.id,
-        lastCust?.text || selectedThread.lastMessage,
-        lastCust?.id,
-        true
-      );
+
+    if (targets.length === 0 && !idFilterSet && selectedThread) {
+      targets = [selectedThread];
     }
+
+    if (targets.length === 0) {
+      setBatchAutoPilotProgress({
+        isRunning: false,
+        completed: 0,
+        total: 0,
+        currentCustomerName: undefined,
+        currentThreadId: undefined,
+        finishedMessage:
+          language === 'kh'
+            ? 'មិនមានសាររង់ចាំឆ្លើយតបទេ (0 សារ)'
+            : 'No pending threads to process (0 threads)',
+      });
+      setTimeout(() => {
+        setBatchAutoPilotProgress((prev) =>
+          prev.isRunning ? prev : { ...prev, finishedMessage: null }
+        );
+      }, 3500);
+      return;
+    }
+
+    cancelBatchAutoPilotRef.current = false;
+    setBatchAutoPilotProgress({
+      isRunning: true,
+      completed: 0,
+      total: targets.length,
+      currentCustomerName: targets[0]?.customer?.name,
+      currentThreadId: targets[0]?.id,
+      finishedMessage: null,
+    });
+
+    for (let i = 0; i < targets.length; i++) {
+      if (cancelBatchAutoPilotRef.current) {
+        return;
+      }
+      const t = targets[i];
+      setBatchAutoPilotProgress({
+        isRunning: true,
+        completed: i,
+        total: targets.length,
+        currentCustomerName: t.customer.name,
+        currentThreadId: t.id,
+        finishedMessage: null,
+      });
+
+      const lastCust =
+        [...(t.messages || [])].reverse().find((m) => m.sender === 'customer') ||
+        t.messages?.[t.messages.length - 1];
+
+      await triggerAutoPilotResponse(t.id, lastCust?.text || t.lastMessage, lastCust?.id, true);
+      if (cancelBatchAutoPilotRef.current) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      setBatchAutoPilotProgress({
+        isRunning: true,
+        completed: i + 1,
+        total: targets.length,
+        currentCustomerName: t.customer.name,
+        currentThreadId: t.id,
+        finishedMessage: null,
+      });
+    }
+
+    const doneText =
+      language === 'kh'
+        ? `បានឆ្លើយតបអូតូដោយ AI Gemini ចំនួន ${targets.length}/${targets.length} ការជជែករួចរាល់!`
+        : `Processed ${targets.length}/${targets.length} pending threads with AI Gemini Auto-Pilot!`;
+
+    setBatchAutoPilotProgress({
+      isRunning: false,
+      completed: targets.length,
+      total: targets.length,
+      currentCustomerName: undefined,
+      currentThreadId: undefined,
+      finishedMessage: doneText,
+    });
+
+    setTimeout(() => {
+      setBatchAutoPilotProgress((prev) =>
+        prev.isRunning ? prev : { ...prev, finishedMessage: null }
+      );
+    }, 5000);
   };
 
   // Synchronous, deterministic ingestion of real-time Meta Webhook events (called by both SSE stream and polling)
@@ -1398,10 +1539,12 @@ export default function App() {
           const updatedThread: ChatThread = {
             ...target,
             pageId: activePage.id,
+            archived: false,
             status: isBotReply ? 'completed' : 'needs_reply',
             unreadCount: isBotReply ? target.unreadCount : target.unreadCount + 1,
             lastMessage: evt.text,
             lastMessageTime: newMsg.timestamp,
+            lastActivityAt: Date.now(),
             messages: [...target.messages, newMsg],
           };
           // Move updated thread to the very top of the thread list so it is immediately visible
@@ -1445,6 +1588,7 @@ export default function App() {
           status: isBotReply ? 'completed' : 'needs_reply',
           lastMessage: evt.text,
           lastMessageTime: newMsg.timestamp,
+          lastActivityAt: Date.now(),
           orderIds: [],
           messages: [newMsg],
         };
@@ -1472,7 +1616,7 @@ export default function App() {
       setSelectedThreadId(latestTargetThreadId);
     }
 
-    if (isAutoPilotRef.current && autoReplyQueue.length > 0) {
+    if (isAutoPilotRef.current && autoReplyQueue.length > 0 && Date.now() - appMountTimeRef.current > 5000) {
       autoReplyQueue.forEach((item, index) => {
         setTimeout(() => {
           triggerAutoPilotResponse(item.threadId, item.text, item.msgId);
@@ -1602,6 +1746,7 @@ export default function App() {
         status: 'needs_reply',
         lastMessage: text,
         lastMessageTime: timeStr,
+        lastActivityAt: Date.now(),
         orderIds: [],
         messages: [newMsg],
       };
@@ -1612,9 +1757,11 @@ export default function App() {
       soundNotifier.playMessageChime();
 
       const voiceTranscript = attachments?.find((a) => a.type === 'audio')?.data?.transcript;
-      setTimeout(() => {
-        triggerAutoPilotResponse(newThreadId, voiceTranscript || text, msgId);
-      }, 450);
+      if (isAutoPilotRef.current) {
+        setTimeout(() => {
+          triggerAutoPilotResponse(newThreadId, voiceTranscript || text, msgId);
+        }, 450);
+      }
     } else {
       handleSimulateCustomerReply(selectedThread.id, text, attachments);
     }
@@ -1782,18 +1929,25 @@ export default function App() {
         isLiveMeta: true,
       };
       setThreads((prev) => {
-        const next = prev.map((t) => {
+        let updatedTarget: ChatThread | null = null;
+        const others: ChatThread[] = [];
+        for (const t of prev) {
           if (t.id === targetThreadId) {
-            return {
+            updatedTarget = {
               ...t,
+              archived: false,
+              unreadCount: (t.unreadCount || 0) + 1,
               lastMessage: replyText,
               lastMessageTime: replyTimeStr,
+              lastActivityAt: Date.now(),
               status: 'needs_reply' as const,
               messages: [...t.messages, customerReplyMsg],
             };
+          } else {
+            others.push(t);
           }
-          return t;
-        });
+        }
+        const next = updatedTarget ? [updatedTarget, ...others] : prev;
         threadsRef.current = next;
         return next;
       });
@@ -1830,18 +1984,24 @@ export default function App() {
     };
 
     setThreads((prev) => {
-      const next = prev.map((t) => {
+      let updatedTarget: ChatThread | null = null;
+      const others: ChatThread[] = [];
+      for (const t of prev) {
         if (t.id === targetThreadId) {
-          return {
+          updatedTarget = {
             ...t,
+            archived: false,
             lastMessage: text,
             lastMessageTime: timeStr,
+            lastActivityAt: Date.now(),
             status: 'completed' as const,
             messages: [...t.messages, newMsg],
           };
+        } else {
+          others.push(t);
         }
-        return t;
-      });
+      }
+      const next = updatedTarget ? [updatedTarget, ...others] : prev;
       threadsRef.current = next;
       return next;
     });
@@ -1885,11 +2045,6 @@ export default function App() {
           threadsRef.current = next;
           return next;
         });
-
-        // Automatically deliver an interactive customer reply from the connected Facebook Page Messenger
-        if (data.customerReplyText) {
-          deliverContextualCustomerReply(targetThreadId, customerName, data.customerReplyText);
-        }
       } catch (err: any) {
         setThreads((prev) => {
           const next = prev.map((t) => {
@@ -1998,6 +2153,7 @@ export default function App() {
       status: 'needs_reply',
       lastMessage: randomPick.text,
       lastMessageTime: timeStr,
+      lastActivityAt: Date.now(),
       orderIds: [],
       messages: [newChatMessage],
     };
@@ -2045,9 +2201,11 @@ export default function App() {
       if (t.id === threadId) {
         matchedThread = {
           ...t,
-          unreadCount: t.unreadCount + 1,
+          archived: false,
+          unreadCount: (t.unreadCount || 0) + 1,
           lastMessage: text,
           lastMessageTime: timeStr,
+          lastActivityAt: Date.now(),
           status: 'needs_reply',
           messages: [...t.messages, newMsg],
         };
@@ -2064,10 +2222,12 @@ export default function App() {
     // If customer sent a voice message with a transcript, pass the transcript to AI Gemini Auto-Reply
     const voiceTranscript = attachments?.find((a) => a.type === 'audio')?.data?.transcript;
 
-    // Always trigger the Page AI / Auto-Reply when customer sends a message into the page
-    setTimeout(() => {
-      triggerAutoPilotResponse(threadId, voiceTranscript || text, msgId);
-    }, 500);
+    // Trigger the Page AI / Auto-Reply when Auto-Pilot is active
+    if (isAutoPilotRef.current) {
+      setTimeout(() => {
+        triggerAutoPilotResponse(threadId, voiceTranscript || text, msgId);
+      }, 500);
+    }
   };
 
   const handleUpdateCustomer = (updated: Partial<Customer>) => {
@@ -2129,13 +2289,17 @@ export default function App() {
     const targetThreadId = newOrder.threadId || selectedThread?.id;
 
     setThreads((prev) => {
-      const next = prev.map((t) => {
+      let updatedTarget: ChatThread | null = null;
+      const others: ChatThread[] = [];
+      for (const t of prev) {
         if (t.id === targetThreadId) {
-          return {
+          updatedTarget = {
             ...t,
+            archived: false,
             status: 'ordered' as const,
             lastMessage: invoiceText,
             lastMessageTime: timeStr,
+            lastActivityAt: Date.now(),
             orderIds: Array.from(new Set([...(t.orderIds || []), newOrder.id])),
             customer: {
               ...t.customer,
@@ -2148,9 +2312,12 @@ export default function App() {
             },
             messages: [...t.messages, invoiceMsg],
           };
+        } else {
+          others.push(t);
         }
-        return t;
-      });
+      }
+      const next = updatedTarget ? [updatedTarget, ...others] : prev;
+      threadsRef.current = next;
       persistThreadsToStorageAndServer(next);
       return next;
     });
@@ -2330,14 +2497,12 @@ export default function App() {
       id: tempId,
       priceKhr: prod.priceKhr || Math.round(prod.price * 4100),
     };
-    
-    setProducts((prev) => {
-      const updated = [newProduct, ...prev.filter((p) => p.id !== tempId)];
-      try {
-        localStorage.setItem('pagechat_products', JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
+
+    const nextProducts = [newProduct, ...productsRef.current.filter((p) => p.id !== tempId)];
+    productsRef.current = nextProducts;
+    setProducts(nextProducts);
+    saveProductsToLocalStorageSafely(nextProducts);
+    saveToDesktopIndexedDB('pagechat_products', nextProducts);
 
     setIsProductsSyncing(true);
     try {
@@ -2350,9 +2515,9 @@ export default function App() {
       if (data.success && data.product) {
         setProducts((prev) => {
           const final = prev.map((p) => (p.id === tempId ? data.product : p));
-          try {
-            localStorage.setItem('pagechat_products', JSON.stringify(final));
-          } catch {}
+          productsRef.current = final;
+          saveProductsToLocalStorageSafely(final);
+          saveToDesktopIndexedDB('pagechat_products', final);
           return final;
         });
       }
@@ -2364,14 +2529,14 @@ export default function App() {
   };
 
   const handleEditProduct = async (prod: ProductItem) => {
-    setProducts((prev) => {
-      const exists = prev.some((p) => p.id === prod.id);
-      const updated = exists ? prev.map((p) => (p.id === prod.id ? prod : p)) : [prod, ...prev];
-      try {
-        localStorage.setItem('pagechat_products', JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
+    const exists = productsRef.current.some((p) => p.id === prod.id);
+    const updatedList = exists
+      ? productsRef.current.map((p) => (p.id === prod.id ? prod : p))
+      : [prod, ...productsRef.current];
+    productsRef.current = updatedList;
+    setProducts(updatedList);
+    saveProductsToLocalStorageSafely(updatedList);
+    saveToDesktopIndexedDB('pagechat_products', updatedList);
 
     setIsProductsSyncing(true);
     try {
@@ -2384,9 +2549,9 @@ export default function App() {
       if (data.success && data.product) {
         setProducts((prev) => {
           const next = prev.map((p) => (p.id === prod.id ? data.product : p));
-          try {
-            localStorage.setItem('pagechat_products', JSON.stringify(next));
-          } catch {}
+          productsRef.current = next;
+          saveProductsToLocalStorageSafely(next);
+          saveToDesktopIndexedDB('pagechat_products', next);
           return next;
         });
       }
@@ -2398,13 +2563,12 @@ export default function App() {
   };
 
   const handleDeleteProduct = async (id: string) => {
-    setProducts((prev) => {
-      const updated = prev.filter((p) => p.id !== id);
-      try {
-        localStorage.setItem('pagechat_products', JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
+    addDeletedProductId(id);
+    const updated = productsRef.current.filter((p) => p.id !== id);
+    productsRef.current = updated;
+    setProducts(updated);
+    saveProductsToLocalStorageSafely(updated);
+    saveToDesktopIndexedDB('pagechat_products', updated);
 
     setIsProductsSyncing(true);
     try {
@@ -2441,7 +2605,7 @@ export default function App() {
       imageUrl: newProd.imageUrl || 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=600&q=80',
       description: newProd.description || 'Generated by gemini-nano-banana-2.1',
     };
-    setProducts((prev) => [fullProd, ...prev]);
+    handleAddProduct(fullProd);
     setActiveView('products');
   };
 
@@ -2738,6 +2902,10 @@ export default function App() {
                 onBulkArchive={handleBulkArchive}
                 onBulkDelete={handleBulkDeleteThreads}
                 onDeleteAllThreads={handleDeleteAllThreads}
+                onBulkAutoReply={handleAutoReplyAllPending}
+                batchAutoPilotProgress={batchAutoPilotProgress}
+                isAutoPilot={isAutoPilot}
+                onToggleAutoPilot={handleToggleAutoPilot}
               />
             </div>
 
@@ -2884,7 +3052,8 @@ export default function App() {
               const lastCust = target ? [...target.messages].reverse().find((m) => m.sender === 'customer') : undefined;
               triggerAutoPilotResponse(threadId, lastCust?.text || target?.lastMessage, lastCust?.id, true);
             }}
-            onAutoReplyAllPending={handleAutoReplyAllPending}
+            onAutoReplyAllPending={() => handleAutoReplyAllPending()}
+            batchAutoPilotProgress={batchAutoPilotProgress}
             onSimulateIncomingMessage={() => {
               handleSimulateCustomerChat(selectedPage);
             }}
@@ -2955,6 +3124,7 @@ export default function App() {
             onEditProduct={handleEditProduct}
             onDeleteProduct={handleDeleteProduct}
             onSendProductToChat={handleSendProductToChat}
+            onSyncAllProducts={handleSyncAllProducts}
             language={language}
             isSyncing={isProductsSyncing}
           />

@@ -983,35 +983,6 @@ const handleMetaWebhookPost = async (req: Request, res: Response) => {
       console.log(
         `[Meta Webhook] Incoming chat from ${storedEvent.senderName} (${detectedLang.nameEn}): "${storedEvent.text}"`
       );
-
-      // If no browser UI client is currently connected via SSE and we have a real Meta token, auto-reply from server
-      if (webhookSseClients.size === 0 && token && token.startsWith('EAA') && !token.startsWith('EAABw_')) {
-        generateAIAutoReply({
-          incomingText: item.text,
-          customerName: storedEvent.senderName,
-          pageName: 'Malis Boutique - Cambodia',
-          audioUrl: item.attachmentUrl,
-          voiceTranscript: item.voiceTranscript,
-        })
-          .then(async (aiResult) => {
-            try {
-              await fetch(
-                `https://graph.facebook.com/v21.0/me/messages?access_token=${encodeURIComponent(token)}`,
-                {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    recipient: { id: item.senderId },
-                    message: { text: aiResult.replyText },
-                  }),
-                }
-              );
-            } catch (sendErr) {
-              console.warn('[Meta AI Auto-Reply] Graph API send error:', sendErr);
-            }
-          })
-          .catch((e) => console.error('[Meta AI Auto-Reply] Error generating reply:', e));
-      }
     }
   } catch (err) {
     console.error('[Meta Webhook] Error processing event:', err);
@@ -1544,22 +1515,31 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
               })
               .filter((m: any) => Boolean((m.message && m.message.trim()) || (m.parsedAttachments && m.parsedAttachments.length > 0)));
 
-            // Ensure conversation-level snippet (text message) is always included even if unread_count is 0
+            // Ensure conversation-level snippet (newest text message) is always included even if unread_count is 0
             if (snippetText) {
-              const alreadyInEnriched = enrichedMessages.some(
-                (em: any) => em.message && em.message.trim() === snippetText
-              );
+              const newestEnriched = enrichedMessages[0];
+              const alreadyNewestInEnriched =
+                newestEnriched && newestEnriched.message && newestEnriched.message.trim() === snippetText;
               const rawNewest = messagesList[0];
               const newestIsFromPage = rawNewest ? isPageActor(rawNewest.from) : false;
               const newestHasAttachments =
                 Array.isArray(rawNewest?.attachments?.data) && rawNewest.attachments.data.length > 0;
 
-              if (enrichedMessages.length === 0 || (!alreadyInEnriched && !newestIsFromPage && !newestHasAttachments)) {
+              if (
+                enrichedMessages.length === 0 ||
+                (!alreadyNewestInEnriched && !newestIsFromPage && !newestHasAttachments)
+              ) {
+                const rawNewestIdUsed =
+                  rawNewest?.id && enrichedMessages.some((em: any) => em.id === rawNewest.id);
+                const snippetId =
+                  !rawNewestIdUsed && rawNewest?.id
+                    ? rawNewest.id
+                    : `snip_${c.id}_${c.updated_time || Date.now()}_${Buffer.from(snippetText).toString('base64').slice(0, 8)}`;
                 enrichedMessages.unshift({
-                  id: rawNewest?.id || `snip_${c.id}_${c.updated_time || Date.now()}`,
+                  id: snippetId,
                   message: snippetText,
-                  created_time: rawNewest?.created_time || c.updated_time || new Date().toISOString(),
-                  from: rawNewest?.from || customerParticipant || {
+                  created_time: c.updated_time || rawNewest?.created_time || new Date().toISOString(),
+                  from: customerParticipant || rawNewest?.from || {
                     id: `cust_${c.id}`,
                     name: 'អតិថិជន Facebook Messenger',
                   },
@@ -1654,10 +1634,6 @@ app.post('/api/auth/facebook/auto-connect', async (req: Request, res: Response) 
       },
     ];
 
-    for (const evt of autoSeedEvents) {
-      pushLiveIncomingEvent(evt);
-    }
-
     return res.json({
       success: true,
       message: 'ការតភ្ជាប់ Continue with Facebook (Auto) បានជោគជ័យ ១០០%! ឥឡូវនេះទំព័រស្ថិតក្នុងស្ថានភាព Live Online លើ Messenger',
@@ -1673,10 +1649,10 @@ app.post('/api/auth/facebook/auto-connect', async (req: Request, res: Response) 
         webhookStatus: 'connected',
         isLiveOnline: true,
         accessToken: autoToken,
-        unreadCount: 2,
+        unreadCount: 0,
         connectedAt: new Date().toISOString().split('T')[0],
       },
-      seededEvents: autoSeedEvents,
+      seededEvents: [],
     });
   } catch (err: any) {
     console.error('Error in Facebook auto-connect:', err);
@@ -2432,6 +2408,48 @@ app.delete('/api/products/:id', (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('[Products API] Error deleting product:', err);
     return res.status(500).json({ error: err.message || 'Failed to delete product online' });
+  }
+});
+
+app.post('/api/products/sync', (req: Request, res: Response) => {
+  try {
+    const { products } = req.body;
+    if (!Array.isArray(products)) {
+      return res.status(400).json({ error: 'products array is required' });
+    }
+    const sanitized = products
+      .filter((p: any) => p && p.id && !REMOVED_DEMO_PRODUCT_IDS.has(p.id))
+      .map((p: any) => {
+        const price = typeof p.price === 'number' ? p.price : parseFloat(p.price) || 0;
+        const priceKhr = p.priceKhr || Math.round(price * 4100);
+        const stock = typeof p.stock === 'number' ? p.stock : parseInt(p.stock, 10) || 0;
+        return {
+          ...p,
+          id: String(p.id),
+          name: p.name || p.nameKh || 'ផលិតផល',
+          nameKh: p.nameKh || p.name || 'ផលិតផល',
+          price,
+          priceKhr,
+          stock,
+          sku: p.sku || `PRD-${Date.now().toString().slice(-4)}`,
+          category: p.category || 'Fashion',
+          imageUrl:
+            p.imageUrl ||
+            'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=600&q=80',
+          description: p.description || '',
+          updatedAt: p.updatedAt || new Date().toISOString(),
+        };
+      });
+    saveOnlineProducts(sanitized);
+    return res.json({
+      success: true,
+      data: sanitized,
+      count: sanitized.length,
+      syncedAt: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    console.error('[Products API] Error syncing products:', err);
+    return res.status(500).json({ error: err.message || 'Failed to sync products online' });
   }
 });
 

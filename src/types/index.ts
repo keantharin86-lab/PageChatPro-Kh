@@ -90,6 +90,8 @@ export interface ChatThread {
   archived?: boolean;
   lastMessage: string;
   lastMessageTime: string;
+  lastActivityAt?: number;
+  metaUpdatedTime?: string;
   messages: ChatMessage[];
   assignedAdmin?: string;
   orderIds: string[];
@@ -130,3 +132,13 @@ export interface PageAccount {
   description?: string;
   phone?: string;
 }
+
+export interface BatchAutoPilotProgress {
+  isRunning: boolean;
+  completed: number;
+  total: number;
+  currentCustomerName?: string;
+  currentThreadId?: string;
+  finishedMessage?: string | null;
+}
+

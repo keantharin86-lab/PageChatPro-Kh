@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
   Search, 
   MessageCircle, 
@@ -8,9 +8,10 @@ import {
   Archive,
   ArchiveRestore,
   Trash2,
+  Bot,
   X
 } from 'lucide-react';
-import { ChatThread, ThreadStatus, PlatformType, PageAccount } from '../types';
+import { ChatThread, ThreadStatus, PlatformType, PageAccount, BatchAutoPilotProgress } from '../types';
 
 interface ConversationListProps {
   threads: ChatThread[];
@@ -27,6 +28,10 @@ interface ConversationListProps {
   onBulkArchive?: (threadIds: string[], archive?: boolean) => void;
   onBulkDelete?: (threadIds: string[]) => void;
   onDeleteAllThreads?: () => void;
+  onBulkAutoReply?: (threadIds?: string[]) => void;
+  batchAutoPilotProgress?: BatchAutoPilotProgress;
+  isAutoPilot?: boolean;
+  onToggleAutoPilot?: () => void;
 }
 
 export const ConversationList: React.FC<ConversationListProps> = ({
@@ -44,6 +49,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   onBulkArchive,
   onBulkDelete,
   onDeleteAllThreads,
+  onBulkAutoReply,
+  batchAutoPilotProgress,
+  isAutoPilot = false,
+  onToggleAutoPilot,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<ThreadStatus>('all');
@@ -52,6 +61,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   const [isSyncingPage, setIsSyncingPage] = useState(false);
   const [selectedThreadIds, setSelectedThreadIds] = useState<string[]>([]);
   const [bulkFeedback, setBulkFeedback] = useState<string | null>(null);
+  const listContainerRef = useRef<HTMLDivElement>(null);
+  const prevTopThreadKeyRef = useRef<string>('');
 
   const handleSyncClick = () => {
     setIsSyncingPage(true);
@@ -128,16 +139,29 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       return true;
     });
 
-    // Prioritize threads belonging to the currently selected page so newly connected pages appear at the top
-    if (selectedPage) {
-      return [...matching].sort((a, b) => {
-        const aIsCurrent = a.pageId === selectedPage.id ? 1 : 0;
-        const bIsCurrent = b.pageId === selectedPage.id ? 1 : 0;
-        return bIsCurrent - aIsCurrent;
-      });
-    }
-    return matching;
+    // Always sort threads so the most recently active conversation (new chat or newly active old chat) is at the very top
+    return [...matching].sort((a, b) => {
+      const timeA = a.lastActivityAt || 0;
+      const timeB = b.lastActivityAt || 0;
+      if (timeB !== timeA) {
+        return timeB - timeA;
+      }
+      return 0;
+    });
   }, [threads, statusFilter, platformFilter, searchQuery, pageScope, selectedPage]);
+
+  // Automatically scroll the conversation list to the top whenever a new or updated thread jumps to position 0
+  useEffect(() => {
+    const topThread = filteredThreads[0];
+    if (!topThread) return;
+    const topKey = `${topThread.id}_${topThread.lastActivityAt || 0}_${topThread.messages?.length || 0}`;
+    if (prevTopThreadKeyRef.current && prevTopThreadKeyRef.current !== topKey) {
+      if (listContainerRef.current) {
+        listContainerRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    }
+    prevTopThreadKeyRef.current = topKey;
+  }, [filteredThreads]);
 
   // Keep selectedThreadIds pruned to existing threads
   useEffect(() => {
@@ -411,108 +435,267 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         </div>
       </div>
 
-      {/* Bulk Selection & Action Bar */}
-      {filteredThreads.length > 0 && (
-        <div
-          className={`px-3 py-2 border-b transition-colors flex items-center justify-between gap-2 ${
-            selectedThreadIds.length > 0
-              ? 'bg-blue-50/90 border-blue-200'
-              : 'bg-slate-50/70 border-slate-200/80'
+      {/* Bulk Selection & Auto-Chat Toggle Bar */}
+      <div
+        className={`px-3 py-2 border-b transition-colors flex items-center justify-between gap-2 ${
+          selectedThreadIds.length > 0
+            ? 'bg-blue-50/90 border-blue-200'
+            : 'bg-slate-50/70 border-slate-200/80'
+        }`}
+      >
+        <label
+          className={`flex items-center gap-2 text-xs font-medium text-slate-700 select-none ${
+            filteredThreads.length > 0 ? 'cursor-pointer' : 'opacity-50 cursor-default'
           }`}
         >
-          <label className="flex items-center gap-2 text-xs font-medium text-slate-700 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={allVisibleSelected}
-              ref={(el) => {
-                if (el) el.indeterminate = someVisibleSelected;
-              }}
-              onChange={toggleSelectAllVisible}
-              className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer accent-blue-600"
-            />
-            <span>
-              {selectedThreadIds.length > 0
-                ? language === 'kh'
-                  ? `បានជ្រើសរើស ${selectedThreadIds.length}`
-                  : `${selectedThreadIds.length} selected`
-                : language === 'kh'
-                ? 'ជ្រើសរើសទាំងអស់'
-                : 'Select all'}
-            </span>
-          </label>
+          <input
+            type="checkbox"
+            disabled={filteredThreads.length === 0}
+            checked={allVisibleSelected}
+            ref={(el) => {
+              if (el) el.indeterminate = someVisibleSelected;
+            }}
+            onChange={toggleSelectAllVisible}
+            className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer accent-blue-600 disabled:cursor-default"
+          />
+          <span>
+            {selectedThreadIds.length > 0
+              ? language === 'kh'
+                ? `បានជ្រើសរើស ${selectedThreadIds.length}`
+                : `${selectedThreadIds.length} selected`
+              : language === 'kh'
+              ? 'ជ្រើសរើសទាំងអស់'
+              : 'Select all'}
+          </span>
+        </label>
 
-          {selectedThreadIds.length > 0 ? (
-            <div className="flex items-center gap-1.5">
+        {selectedThreadIds.length > 0 ? (
+          <div className="flex items-center gap-1 flex-wrap justify-end">
+            {onBulkAutoReply && isAutoPilot && (
               <button
                 type="button"
-                onClick={handleBulkMarkReadClick}
-                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-blue-700 bg-white hover:bg-blue-100 border border-blue-200 rounded-md shadow-2xs transition-colors cursor-pointer"
-                title={language === 'kh' ? 'ដាក់សម្គាល់ថាអានរួច' : 'Mark selected as read'}
+                onClick={() => {
+                  const ids = [...selectedThreadIds];
+                  setSelectedThreadIds([]);
+                  onBulkAutoReply(ids);
+                }}
+                disabled={batchAutoPilotProgress?.isRunning}
+                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                title={language === 'kh' ? 'ឱ្យ AI Gemini ឆាត Auto លើសារដែលបានជ្រើសរើស' : 'AI Auto-Reply selected threads'}
               >
-                <CheckCheck className="w-3.5 h-3.5" />
-                <span>{language === 'kh' ? 'អានរួច' : 'Mark Read'}</span>
+                <Bot className="w-3.5 h-3.5 text-indigo-600" />
+                <span>{language === 'kh' ? 'AI Auto' : 'AI Reply'}</span>
               </button>
+            )}
 
-              <button
-                type="button"
-                onClick={handleBulkArchiveClick}
-                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded-md shadow-2xs transition-colors cursor-pointer"
-                title={
-                  statusFilter === 'archived'
-                    ? language === 'kh'
-                      ? 'ស្ដារចេញពីបណ្ណសារ'
-                      : 'Unarchive selected'
-                    : language === 'kh'
-                    ? 'ទុកក្នុងបណ្ណសារ'
-                    : 'Archive selected'
-                }
-              >
-                {statusFilter === 'archived' ? (
-                  <>
-                    <ArchiveRestore className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>{language === 'kh' ? 'ស្ដារវិញ' : 'Unarchive'}</span>
-                  </>
-                ) : (
-                  <>
-                    <Archive className="w-3.5 h-3.5 text-amber-600" />
-                    <span>{language === 'kh' ? 'ទុកបណ្ណសារ' : 'Archive'}</span>
-                  </>
-                )}
-              </button>
+            <button
+              type="button"
+              onClick={handleBulkMarkReadClick}
+              className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-blue-700 bg-white hover:bg-blue-100 border border-blue-200 rounded-md shadow-2xs transition-colors cursor-pointer"
+              title={language === 'kh' ? 'ដាក់សម្គាល់ថាអានរួច' : 'Mark selected as read'}
+            >
+              <CheckCheck className="w-3.5 h-3.5" />
+              <span>{language === 'kh' ? 'អានរួច' : 'Mark Read'}</span>
+            </button>
 
-              {onBulkDelete && (
-                <button
-                  type="button"
-                  onClick={handleBulkDeleteClick}
-                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-md shadow-2xs transition-colors cursor-pointer"
-                  title={language === 'kh' ? 'លុបសារដែលបានជ្រើសរើស' : 'Delete selected'}
-                >
-                  <Trash2 className="w-3.5 h-3.5 text-rose-600" />
-                  <span>{language === 'kh' ? 'លុប' : 'Delete'}</span>
-                </button>
+            <button
+              type="button"
+              onClick={handleBulkArchiveClick}
+              className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded-md shadow-2xs transition-colors cursor-pointer"
+              title={
+                statusFilter === 'archived'
+                  ? language === 'kh'
+                    ? 'ស្ដារចេញពីបណ្ណសារ'
+                    : 'Unarchive selected'
+                  : language === 'kh'
+                  ? 'ទុកក្នុងបណ្ណសារ'
+                  : 'Archive selected'
+              }
+            >
+              {statusFilter === 'archived' ? (
+                <>
+                  <ArchiveRestore className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>{language === 'kh' ? 'ស្ដារវិញ' : 'Unarchive'}</span>
+                </>
+              ) : (
+                <>
+                  <Archive className="w-3.5 h-3.5 text-amber-600" />
+                  <span>{language === 'kh' ? 'ទុកបណ្ណសារ' : 'Archive'}</span>
+                </>
               )}
+            </button>
 
+            {onBulkDelete && (
               <button
                 type="button"
-                onClick={() => setSelectedThreadIds([])}
-                className="p-1 text-slate-400 hover:text-slate-600 hover:bg-white rounded-md transition-colors cursor-pointer"
-                title={language === 'kh' ? 'បោះបង់ការជ្រើសរើស' : 'Clear selection'}
+                onClick={handleBulkDeleteClick}
+                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-md shadow-2xs transition-colors cursor-pointer"
+                title={language === 'kh' ? 'លុបសារដែលបានជ្រើសរើស' : 'Delete selected'}
               >
-                <X className="w-3.5 h-3.5" />
+                <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                <span>{language === 'kh' ? 'លុប' : 'Delete'}</span>
               </button>
-            </div>
-          ) : (
-            bulkFeedback && (
-              <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md truncate">
+            )}
+
+            <button
+              type="button"
+              onClick={() => setSelectedThreadIds([])}
+              className="p-1 text-slate-400 hover:text-slate-600 hover:bg-white rounded-md transition-colors cursor-pointer"
+              title={language === 'kh' ? 'បោះបង់ការជ្រើសរើស' : 'Clear selection'}
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5">
+            {bulkFeedback && (
+              <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md truncate max-w-[140px]">
                 {bulkFeedback}
               </span>
-            )
+            )}
+
+            {/* Toggle ON/OFF Button for ឆាត Auto គ្រប់សារ */}
+            <button
+              type="button"
+              onClick={() => {
+                const nextState = !isAutoPilot;
+                if (onToggleAutoPilot) {
+                  onToggleAutoPilot();
+                }
+                showTemporaryFeedback(
+                  nextState
+                    ? language === 'kh'
+                      ? 'បានបើក ឆាត Auto គ្រប់សារ (ON)'
+                      : 'Auto Chat All: ON'
+                    : language === 'kh'
+                    ? 'បានបិទ ឆាត Auto គ្រប់សារ (OFF)'
+                    : 'Auto Chat All: OFF'
+                );
+              }}
+              aria-pressed={isAutoPilot}
+              className={`inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-bold rounded-md border shadow-2xs transition-all cursor-pointer select-none ${
+                isAutoPilot
+                  ? 'text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border-emerald-300'
+                  : 'text-slate-600 bg-slate-100 hover:bg-slate-200 border-slate-300'
+              }`}
+              title={
+                isAutoPilot
+                  ? language === 'kh'
+                    ? 'កំពុងបើក ឆាត Auto គ្រប់សារ (ចុចដើម្បីបិទ OFF)'
+                    : 'Auto Chat All is ON (Click to turn OFF)'
+                  : language === 'kh'
+                  ? 'កំពុងបិទ ឆាត Auto គ្រប់សារ (ចុចដើម្បីបើក ON)'
+                  : 'Auto Chat All is OFF (Click to turn ON)'
+              }
+            >
+              <Bot
+                className={`w-3.5 h-3.5 shrink-0 ${
+                  isAutoPilot ? 'text-emerald-600' : 'text-slate-400'
+                } ${batchAutoPilotProgress?.isRunning ? 'animate-spin' : ''}`}
+              />
+              <span>
+                {language === 'kh' ? 'ឆាត Auto គ្រប់សារ' : 'Auto Chat All'}
+              </span>
+              <span
+                className={`px-1.5 py-0.2 rounded text-[10px] font-extrabold ${
+                  isAutoPilot
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-slate-400 text-white'
+                }`}
+              >
+                {isAutoPilot
+                  ? language === 'kh'
+                    ? 'បើក'
+                    : 'ON'
+                  : language === 'kh'
+                  ? 'បិទ'
+                  : 'OFF'}
+              </span>
+              <span
+                className={`relative inline-flex h-3.5 w-6 shrink-0 items-center rounded-full transition-colors ${
+                  isAutoPilot ? 'bg-emerald-600' : 'bg-slate-300'
+                }`}
+              >
+                <span
+                  className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform shadow-2xs ${
+                    isAutoPilot ? 'translate-x-3' : 'translate-x-0.5'
+                  }`}
+                />
+              </span>
+            </button>
+
+            {/* Quick Run Batch button when ឆាត Auto គ្រប់សារ is ON and threads exist */}
+            {onBulkAutoReply && isAutoPilot && filteredThreads.length > 0 && (
+              <button
+                type="button"
+                onClick={() => onBulkAutoReply()}
+                disabled={batchAutoPilotProgress?.isRunning}
+                className="inline-flex items-center justify-center px-1.5 py-1 text-[11px] font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                title={
+                  language === 'kh'
+                    ? 'ឱ្យ AI Gemini ឆ្លើយតបគ្រប់សាររង់ចាំទាំងអស់ឥឡូវនេះ'
+                    : 'Run batch AI reply on all pending messages now'
+                }
+              >
+                <span>⚡</span>
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Batch AI Auto-Pilot Progress Indicator */}
+      {(batchAutoPilotProgress?.isRunning || batchAutoPilotProgress?.finishedMessage) && (
+        <div className="px-3 py-2.5 bg-indigo-50/90 border-b border-indigo-200 space-y-1.5">
+          {batchAutoPilotProgress.isRunning ? (
+            <>
+              <div className="flex items-center justify-between text-[11px] font-bold text-indigo-900">
+                <span className="flex items-center gap-1.5 truncate">
+                  <RefreshCw className="w-3.5 h-3.5 text-indigo-600 animate-spin shrink-0" />
+                  <span className="truncate">
+                    {language === 'kh'
+                      ? `កំពុងឆាត Auto: ${batchAutoPilotProgress.currentCustomerName || '...'}`
+                      : `Auto-Replying: ${batchAutoPilotProgress.currentCustomerName || '...'}`}
+                  </span>
+                </span>
+                <span className="tabular-nums text-indigo-700 shrink-0 ml-2">
+                  {batchAutoPilotProgress.completed} / {batchAutoPilotProgress.total} (
+                  {Math.round(
+                    (batchAutoPilotProgress.completed / Math.max(1, batchAutoPilotProgress.total)) * 100
+                  )}
+                  %)
+                </span>
+              </div>
+              <div className="w-full h-2 bg-indigo-200/70 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-indigo-600 to-purple-600 transition-all duration-300 rounded-full"
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      Math.max(
+                        8,
+                        Math.round(
+                          (batchAutoPilotProgress.completed / Math.max(1, batchAutoPilotProgress.total)) * 100
+                        )
+                      )
+                    )}%`,
+                  }}
+                />
+              </div>
+            </>
+          ) : (
+            <div className="flex items-center justify-between text-[11px] font-bold text-emerald-800">
+              <span className="flex items-center gap-1.5">
+                <CheckCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>{batchAutoPilotProgress.finishedMessage}</span>
+              </span>
+            </div>
           )}
         </div>
       )}
 
       {/* Conversation Item List */}
-      <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
+      <div ref={listContainerRef} className="flex-1 overflow-y-auto divide-y divide-slate-100">
         {filteredThreads.length === 0 ? (
           <div className="p-8 text-center text-slate-400">
             <MessageCircle className="w-10 h-10 mx-auto text-slate-300 mb-2 stroke-[1.5]" />

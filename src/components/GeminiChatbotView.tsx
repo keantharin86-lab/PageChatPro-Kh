@@ -18,7 +18,7 @@ import {
   ArrowRight,
   Database
 } from 'lucide-react';
-import { ChatThread, ProductItem, QuickReplyTemplate, AutoReplyRule, Order, Customer } from '../types';
+import { ChatThread, ProductItem, QuickReplyTemplate, AutoReplyRule, Order, Customer, BatchAutoPilotProgress } from '../types';
 
 interface GeminiChatbotViewProps {
   language?: 'kh' | 'en';
@@ -35,6 +35,7 @@ interface GeminiChatbotViewProps {
   aiTypingThreadIds?: string[];
   onTriggerAutoReplyThread?: (threadId: string) => void;
   onAutoReplyAllPending?: () => void;
+  batchAutoPilotProgress?: BatchAutoPilotProgress;
   onSimulateIncomingMessage?: () => void;
   onOpenThreadInInbox?: (threadId: string) => void;
   onSendToChat?: (text: string) => void;
@@ -63,6 +64,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
   aiTypingThreadIds = [],
   onTriggerAutoReplyThread,
   onAutoReplyAllPending,
+  batchAutoPilotProgress,
   onSimulateIncomingMessage,
   onOpenThreadInInbox,
   onSendToChat,
@@ -521,32 +523,28 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                 {onAutoReplyAllPending && (
                   <button
                     type="button"
-                    onClick={() => {
-                      if (!isAutoPilot) {
-                        onAutoReplyAllPending();
-                      }
-                    }}
-                    disabled={isAutoPilot}
+                    onClick={() => onAutoReplyAllPending()}
+                    disabled={batchAutoPilotProgress?.isRunning}
                     className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${
-                      isAutoPilot
-                        ? 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60 pointer-events-none'
+                      batchAutoPilotProgress?.isRunning
+                        ? 'bg-indigo-400 text-white cursor-wait'
                         : 'bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer'
                     }`}
                     title={
-                      isAutoPilot
-                        ? language === 'kh'
-                          ? 'បិទ ឆាត Auto (ON) សិន ប្រសិនបើចង់ចុចឆាត Auto គ្រប់សារដោយដៃ'
-                          : 'Turn off Auto-Chat (ON) to manually trigger Auto-Reply All Now'
-                        : language === 'kh'
-                        ? 'ចុចដើម្បីឆាត Auto គ្រប់សារឥឡូវនេះ'
-                        : 'Click to Auto-Reply All Now'
+                      language === 'kh'
+                        ? 'ចុចដើម្បីដំណើរការឆាត Auto លើគ្រប់សាររង់ចាំទាំងអស់ក្នុងពេលតែមួយ'
+                        : 'Click to process all pending threads in a single click'
                     }
                   >
                     <RefreshCw
-                      className={`w-3.5 h-3.5 ${!isAutoPilot && aiTypingThreadIds.length > 0 ? 'animate-spin' : ''}`}
+                      className={`w-3.5 h-3.5 ${batchAutoPilotProgress?.isRunning ? 'animate-spin' : ''}`}
                     />
                     <span>
-                      {language === 'kh'
+                      {batchAutoPilotProgress?.isRunning
+                        ? language === 'kh'
+                          ? `កំពុងដំណើរការ (${batchAutoPilotProgress.completed}/${batchAutoPilotProgress.total})...`
+                          : `Processing (${batchAutoPilotProgress.completed}/${batchAutoPilotProgress.total})...`
+                        : language === 'kh'
                         ? '⚡ ឆាត Auto គ្រប់សារឥឡូវនេះ'
                         : '⚡ Auto-Reply All Now'}
                     </span>
@@ -568,6 +566,61 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                 )}
               </div>
             </div>
+
+            {/* Batch Auto-Pilot Operation Progress Indicator */}
+            {(batchAutoPilotProgress?.isRunning || batchAutoPilotProgress?.finishedMessage) && (
+              <div className="p-3.5 rounded-xl bg-gradient-to-r from-indigo-50 via-purple-50 to-blue-50 border border-indigo-200 space-y-2">
+                {batchAutoPilotProgress.isRunning ? (
+                  <>
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-2 font-bold text-indigo-950 min-w-0">
+                        <RefreshCw className="w-4 h-4 text-indigo-600 animate-spin shrink-0" />
+                        <span className="truncate">
+                          {language === 'kh'
+                            ? `កំពុងដំណើរការឆាត Auto ជាក្រុម — ឆ្លើយតបទៅ៖ ${batchAutoPilotProgress.currentCustomerName || 'អតិថិជន'}`
+                            : `Batch Auto-Pilot Running — Replying to: ${batchAutoPilotProgress.currentCustomerName || 'Customer'}`}
+                        </span>
+                      </div>
+                      <span className="text-xs font-extrabold text-indigo-700 bg-white px-2.5 py-0.5 rounded-full border border-indigo-200 tabular-nums shrink-0">
+                        {batchAutoPilotProgress.completed} / {batchAutoPilotProgress.total} (
+                        {Math.round(
+                          (batchAutoPilotProgress.completed / Math.max(1, batchAutoPilotProgress.total)) * 100
+                        )}
+                        %)
+                      </span>
+                    </div>
+                    <div className="w-full h-2.5 bg-indigo-200/70 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-indigo-600 via-purple-600 to-blue-600 transition-all duration-300 rounded-full"
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            Math.max(
+                              8,
+                              Math.round(
+                                (batchAutoPilotProgress.completed / Math.max(1, batchAutoPilotProgress.total)) * 100
+                              )
+                            )
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex items-center justify-between gap-2 text-xs font-bold text-emerald-800">
+                    <div className="flex items-center gap-2">
+                      <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>{batchAutoPilotProgress.finishedMessage}</span>
+                    </div>
+                    {batchAutoPilotProgress.total > 0 && (
+                      <span className="text-[11px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full tabular-nums">
+                        100% ({batchAutoPilotProgress.completed}/{batchAutoPilotProgress.total})
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Live Incoming Threads & AI Auto-Reply Status List */}
             {threads.length > 0 && (
