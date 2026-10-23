@@ -16,6 +16,9 @@ import {
 import {
   BarChart,
   Bar,
+  Cell,
+  PieChart,
+  Pie,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -380,6 +383,106 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
       .sort((a, b) => b.month.localeCompare(a.month));
   }, [normalizedOrders, currentMonthStr]);
 
+  // LAST 30 DAYS ORDER STATUS DISTRIBUTION (Pending, Shipped, Delivered, Cancelled)
+  const last30DaysStatusSummary = useMemo(() => {
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setDate(endDate.getDate() - 29);
+    const startStr = getLocalDateStr(startDate);
+    const endStr = getLocalDateStr(endDate);
+
+    const ordersIn30Days = normalizedOrders.filter(
+      (o) => o.resolvedDate >= startStr && o.resolvedDate <= endStr
+    );
+
+    const buckets = {
+      pending: { count: 0, revenueUsd: 0, revenueKhr: 0 },
+      shipped: { count: 0, revenueUsd: 0, revenueKhr: 0 },
+      delivered: { count: 0, revenueUsd: 0, revenueKhr: 0 },
+      cancelled: { count: 0, revenueUsd: 0, revenueKhr: 0 },
+    };
+
+    ordersIn30Days.forEach((o) => {
+      let key: 'pending' | 'shipped' | 'delivered' | 'cancelled' = 'pending';
+      if (o.status === 'pending' || o.status === 'confirmed') {
+        key = 'pending';
+      } else if (
+        o.status === 'shipped' ||
+        o.status === 'shipping' ||
+        o.status === 'packaging'
+      ) {
+        key = 'shipped';
+      } else if (o.status === 'delivered') {
+        key = 'delivered';
+      } else if (o.status === 'cancelled') {
+        key = 'cancelled';
+      }
+      buckets[key].count += 1;
+      buckets[key].revenueUsd += o.total || 0;
+      buckets[key].revenueKhr += o.totalKhr || 0;
+    });
+
+    const total = ordersIn30Days.length;
+    const statusItems = [
+      {
+        key: 'pending' as const,
+        status: 'Pending',
+        label: language === 'kh' ? 'រង់ចាំ (Pending)' : 'Pending',
+        shortLabel: language === 'kh' ? 'រង់ចាំ' : 'Pending',
+        count: buckets.pending.count,
+        percentage: total > 0 ? Number(((buckets.pending.count / total) * 100).toFixed(1)) : 0,
+        revenueUsd: buckets.pending.revenueUsd,
+        revenueKhr: buckets.pending.revenueKhr,
+        color: '#f59e0b',
+        bgClass: 'bg-amber-50 border-amber-200/80 text-amber-800',
+      },
+      {
+        key: 'shipped' as const,
+        status: 'Shipped',
+        label: language === 'kh' ? 'បានផ្ញើ (Shipped)' : 'Shipped',
+        shortLabel: language === 'kh' ? 'បានផ្ញើ' : 'Shipped',
+        count: buckets.shipped.count,
+        percentage: total > 0 ? Number(((buckets.shipped.count / total) * 100).toFixed(1)) : 0,
+        revenueUsd: buckets.shipped.revenueUsd,
+        revenueKhr: buckets.shipped.revenueKhr,
+        color: '#3b82f6',
+        bgClass: 'bg-blue-50 border-blue-200/80 text-blue-800',
+      },
+      {
+        key: 'delivered' as const,
+        status: 'Delivered',
+        label: language === 'kh' ? 'ដឹកជោគជ័យ (Delivered)' : 'Delivered',
+        shortLabel: language === 'kh' ? 'ដឹកជោគជ័យ' : 'Delivered',
+        count: buckets.delivered.count,
+        percentage: total > 0 ? Number(((buckets.delivered.count / total) * 100).toFixed(1)) : 0,
+        revenueUsd: buckets.delivered.revenueUsd,
+        revenueKhr: buckets.delivered.revenueKhr,
+        color: '#10b981',
+        bgClass: 'bg-emerald-50 border-emerald-200/80 text-emerald-800',
+      },
+      {
+        key: 'cancelled' as const,
+        status: 'Cancelled',
+        label: language === 'kh' ? 'បានបោះបង់ (Cancelled)' : 'Cancelled',
+        shortLabel: language === 'kh' ? 'បានបោះបង់' : 'Cancelled',
+        count: buckets.cancelled.count,
+        percentage: total > 0 ? Number(((buckets.cancelled.count / total) * 100).toFixed(1)) : 0,
+        revenueUsd: buckets.cancelled.revenueUsd,
+        revenueKhr: buckets.cancelled.revenueKhr,
+        color: '#ef4444',
+        bgClass: 'bg-rose-50 border-rose-200/80 text-rose-800',
+      },
+    ];
+
+    return {
+      startStr,
+      endStr,
+      total,
+      statusItems,
+      nonZeroPieItems: statusItems.filter((item) => item.count > 0),
+    };
+  }, [normalizedOrders, language]);
+
   return (
     <div className="flex-1 bg-slate-50 flex flex-col h-full overflow-y-auto">
       {/* Header */}
@@ -679,6 +782,175 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                   {monthlySummary.activeSellingDays} {language === 'kh' ? 'ថ្ងៃ' : 'days'}
                 </p>
               </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ============================================================ */}
+        {/* SMALL SUMMARY CHART: LAST 30 DAYS ORDER STATUS DISTRIBUTION  */}
+        {/* ============================================================ */}
+        <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-slate-100">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 bg-indigo-50 text-indigo-700 rounded-md">
+                  {language === 'kh' ? '៣០ ថ្ងៃចុងក្រោយ' : 'Last 30 Days'}
+                </span>
+                <h3 className="text-sm font-bold text-slate-900">
+                  {language === 'kh'
+                    ? 'ក្រាហ្វសង្ខេបស្ថានភាពកុម្ម៉ង់រយៈពេល ៣០ ថ្ងៃចុងក្រោយ (Pending, Shipped, Delivered, Cancelled)'
+                    : 'Order Status Distribution Summary (Last 30 Days)'}
+                </h3>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {language === 'kh'
+                  ? `ចន្លោះថ្ងៃទី ${last30DaysStatusSummary.startStr} ដល់ ${last30DaysStatusSummary.endStr}`
+                  : `From ${last30DaysStatusSummary.startStr} to ${last30DaysStatusSummary.endStr}`}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-700 bg-slate-50 border border-slate-200/80 px-3 py-1.5 rounded-xl self-start sm:self-auto tabular-nums">
+              <ShoppingBag className="w-3.5 h-3.5 text-indigo-600" />
+              <span>
+                {language === 'kh' ? 'សរុប ៣០ ថ្ងៃ៖ ' : '30-Day Orders: '}
+                <strong className="text-slate-900">{last30DaysStatusSummary.total}</strong>
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-center mt-4">
+            {/* Compact Recharts BarChart */}
+            <div className="lg:col-span-5 h-44 bg-slate-50/70 border border-slate-200/70 rounded-xl p-3">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart
+                  data={last30DaysStatusSummary.statusItems}
+                  margin={{ top: 8, right: 12, left: -16, bottom: 0 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                  <XAxis
+                    dataKey="shortLabel"
+                    tick={{ fontSize: 11, fill: '#475569', fontWeight: 600 }}
+                    axisLine={{ stroke: '#cbd5e1' }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    allowDecimals={false}
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <Tooltip
+                    cursor={{ fill: '#f1f5f9' }}
+                    content={({ active, payload }) => {
+                      if (!active || !payload || !payload.length) return null;
+                      const item = payload[0].payload;
+                      return (
+                        <div className="bg-slate-900 text-white px-3 py-2 rounded-xl text-xs shadow-lg border border-slate-700">
+                          <div className="flex items-center gap-1.5 font-bold mb-1">
+                            <span
+                              className="w-2.5 h-2.5 rounded-full shrink-0"
+                              style={{ backgroundColor: item.color }}
+                            />
+                            <span>{item.label}</span>
+                          </div>
+                          <p className="text-slate-200 tabular-nums">
+                            {language === 'kh' ? 'ចំនួនបុង៖ ' : 'Orders: '}
+                            <strong className="text-white">
+                              {item.count} ({item.percentage}%)
+                            </strong>
+                          </p>
+                          <p className="text-emerald-400 font-semibold tabular-nums mt-0.5">
+                            ${item.revenueUsd.toFixed(2)} ({item.revenueKhr.toLocaleString()} ៛)
+                          </p>
+                        </div>
+                      );
+                    }}
+                  />
+                  <Bar dataKey="count" radius={[6, 6, 0, 0]} maxBarSize={42}>
+                    {last30DaysStatusSummary.statusItems.map((entry) => (
+                      <Cell key={entry.key} fill={entry.color} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Mini Donut Chart */}
+            <div className="lg:col-span-3 h-44 relative flex items-center justify-center bg-slate-50/70 border border-slate-200/70 rounded-xl p-2">
+              {last30DaysStatusSummary.total === 0 ? (
+                <span className="text-xs text-slate-400">
+                  {language === 'kh' ? 'មិនមានទិន្នន័យ' : 'No data'}
+                </span>
+              ) : (
+                <>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={last30DaysStatusSummary.nonZeroPieItems}
+                        dataKey="count"
+                        nameKey="label"
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={38}
+                        outerRadius={60}
+                        paddingAngle={3}
+                        stroke="#ffffff"
+                        strokeWidth={2}
+                      >
+                        {last30DaysStatusSummary.nonZeroPieItems.map((entry) => (
+                          <Cell key={entry.key} fill={entry.color} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        content={({ active, payload }) => {
+                          if (!active || !payload || !payload.length) return null;
+                          const item = payload[0].payload;
+                          return (
+                            <div className="bg-slate-900 text-white px-2.5 py-1.5 rounded-lg text-[11px] shadow-md">
+                              <span className="font-bold">{item.status}: </span>
+                              <span>
+                                {item.count} ({item.percentage}%)
+                              </span>
+                            </div>
+                          );
+                        }}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                    <span className="text-[10px] text-slate-400 font-medium">30d</span>
+                    <span className="text-base font-extrabold text-slate-800 tabular-nums">
+                      {last30DaysStatusSummary.total}
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* 4 Compact Status Cards (Pending, Shipped, Delivered, Cancelled) */}
+            <div className="lg:col-span-4 grid grid-cols-2 gap-2.5">
+              {last30DaysStatusSummary.statusItems.map((item) => (
+                <div
+                  key={item.key}
+                  className={`p-3 rounded-xl border ${item.bgClass} flex flex-col justify-between`}
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="text-xs font-bold truncate">{item.shortLabel}</span>
+                    <span
+                      className="w-2.5 h-2.5 rounded-full shrink-0"
+                      style={{ backgroundColor: item.color }}
+                    />
+                  </div>
+                  <div className="mt-1.5 flex items-baseline justify-between gap-1">
+                    <span className="text-xl font-extrabold tabular-nums">{item.count}</span>
+                    <span className="text-[11px] font-semibold opacity-80 tabular-nums">
+                      {item.percentage}%
+                    </span>
+                  </div>
+                  <span className="text-[10px] opacity-75 tabular-nums truncate mt-0.5">
+                    ${item.revenueUsd.toFixed(2)}
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
         </div>

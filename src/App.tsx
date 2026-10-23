@@ -48,12 +48,42 @@ import {
 } from './types';
 import { soundNotifier } from './utils/audio';
 
-const normalizePageLive = (p: PageAccount): PageAccount => ({
-  ...p,
-  isLiveOnline: p.isLiveOnline !== undefined ? p.isLiveOnline : true,
+const REMOVED_DEMO_PAGE_IDS = new Set([
+  'page_malis_fashion',
+  'page_srok_sre',
+  'page_tech_hub',
+]);
+
+const REMOVED_DEMO_PRODUCT_IDS = new Set([
+  'prod_1',
+  'prod_2',
+  'prod_3',
+  'prod_4',
+]);
+
+const DEFAULT_FALLBACK_PAGE: PageAccount = {
+  id: 'page_default',
+  name: 'ទំព័រហាងរបស់អ្នក (ភ្ជាប់ផេកថ្មី)',
+  category: 'Facebook Business Page',
+  avatar: 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=300&q=80',
+  unreadCount: 0,
+  platform: 'messenger',
+  followerCount: 'Live Online',
+  activeStaff: 'សុខា (Admin)',
+  isLiveOnline: true,
   webhookStatus: 'connected',
-  accessToken: p.accessToken || `EAABw_LIVE_${p.id}`,
-});
+  accessToken: 'EAABw_LIVE_page_default',
+};
+
+const normalizePageLive = (p?: PageAccount): PageAccount => {
+  const safePage = p || DEFAULT_FALLBACK_PAGE;
+  return {
+    ...safePage,
+    isLiveOnline: safePage.isLiveOnline !== undefined ? safePage.isLiveOnline : true,
+    webhookStatus: 'connected',
+    accessToken: safePage.accessToken || `EAABw_LIVE_${safePage.id}`,
+  };
+};
 
 const normalizeThreadLive = (t: ChatThread): ChatThread => ({
   ...t,
@@ -181,8 +211,16 @@ export default function App() {
       const saved = localStorage.getItem('pagechat_pro_pages');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed.map((p: PageAccount) => ({
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter(
+            (p: PageAccount) => p && p.id && !REMOVED_DEMO_PAGE_IDS.has(p.id)
+          );
+          if (filtered.length !== parsed.length) {
+            try {
+              localStorage.setItem('pagechat_pro_pages', JSON.stringify(filtered));
+            } catch {}
+          }
+          return filtered.map((p: PageAccount) => ({
             ...normalizePageLive(p),
             isLiveOnline: true,
           }));
@@ -191,7 +229,7 @@ export default function App() {
     } catch (e) {
       console.error('Failed to load saved pages', e);
     }
-    return INITIAL_PAGES.map(normalizePageLive);
+    return INITIAL_PAGES.filter((p) => !REMOVED_DEMO_PAGE_IDS.has(p.id)).map(normalizePageLive);
   });
 
   const [selectedPage, setSelectedPage] = useState<PageAccount>(() => {
@@ -199,27 +237,34 @@ export default function App() {
       const saved = localStorage.getItem('pagechat_pro_pages');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return {
-            ...normalizePageLive(parsed[0]),
-            isLiveOnline: true,
-          };
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter(
+            (p: PageAccount) => p && p.id && !REMOVED_DEMO_PAGE_IDS.has(p.id)
+          );
+          if (filtered.length > 0) {
+            return {
+              ...normalizePageLive(filtered[0]),
+              isLiveOnline: true,
+            };
+          }
         }
       }
     } catch (e) {
       console.error(e);
     }
-    return normalizePageLive(INITIAL_PAGES[0]);
+    return normalizePageLive(INITIAL_PAGES[0] || DEFAULT_FALLBACK_PAGE);
   });
 
   const [threads, setThreads] = useState<ChatThread[]>(() => {
-    let currentPages = INITIAL_PAGES.map(normalizePageLive);
+    let currentPages = INITIAL_PAGES.filter((p) => !REMOVED_DEMO_PAGE_IDS.has(p.id)).map(normalizePageLive);
     try {
       const savedPages = localStorage.getItem('pagechat_pro_pages');
       if (savedPages) {
         const parsedPages = JSON.parse(savedPages);
-        if (Array.isArray(parsedPages) && parsedPages.length > 0) {
-          currentPages = parsedPages.map(normalizePageLive);
+        if (Array.isArray(parsedPages)) {
+          currentPages = parsedPages
+            .filter((p: PageAccount) => p && p.id && !REMOVED_DEMO_PAGE_IDS.has(p.id))
+            .map(normalizePageLive);
         }
       }
     } catch {}
@@ -251,12 +296,22 @@ export default function App() {
       const saved = localStorage.getItem('pagechat_products');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter(
+            (p: ProductItem) => p && p.id && !REMOVED_DEMO_PRODUCT_IDS.has(p.id)
+          );
+          if (filtered.length !== parsed.length) {
+            try {
+              localStorage.setItem('pagechat_products', JSON.stringify(filtered));
+            } catch {}
+          }
+          return filtered;
+        }
       }
     } catch (e) {
       console.error(e);
     }
-    return INITIAL_PRODUCTS;
+    return INITIAL_PRODUCTS.filter((p) => !REMOVED_DEMO_PRODUCT_IDS.has(p.id));
   });
 
   const [isProductsSyncing, setIsProductsSyncing] = useState(false);
@@ -516,15 +571,18 @@ export default function App() {
       if (!isMounted) return;
 
       let resolvedPages = pages;
-      if (Array.isArray(idbPages) && idbPages.length > 0) {
-        resolvedPages = idbPages.map((p) => ({
+      if (Array.isArray(idbPages)) {
+        const filteredIdbPages = idbPages.filter(
+          (p) => p && p.id && !REMOVED_DEMO_PAGE_IDS.has(p.id)
+        );
+        resolvedPages = filteredIdbPages.map((p) => ({
           ...normalizePageLive(p),
           isLiveOnline: true,
         }));
         setPages(resolvedPages);
         setSelectedPage((prev) => {
           const matched = resolvedPages.find((lp) => lp.id === prev.id);
-          return matched || resolvedPages[0];
+          return matched || resolvedPages[0] || DEFAULT_FALLBACK_PAGE;
         });
       }
 
@@ -564,8 +622,11 @@ export default function App() {
       if (Array.isArray(idbOrders) && idbOrders.length > 0) {
         setOrders(idbOrders);
       }
-      if (Array.isArray(idbProducts) && idbProducts.length > 0) {
-        setProducts(idbProducts);
+      if (Array.isArray(idbProducts)) {
+        const filteredIdbProducts = idbProducts.filter(
+          (p) => p && p.id && !REMOVED_DEMO_PRODUCT_IDS.has(p.id)
+        );
+        setProducts(filteredIdbProducts);
       }
       setIsHydrated(true);
     };
@@ -589,10 +650,13 @@ export default function App() {
 
         if (prodRes && isMounted) {
           const prodJson = await prodRes.json();
-          if (prodJson.success && Array.isArray(prodJson.data) && prodJson.data.length > 0) {
-            setProducts(prodJson.data);
+          if (prodJson.success && Array.isArray(prodJson.data)) {
+            const filteredServerProducts = prodJson.data.filter(
+              (p: ProductItem) => p && p.id && !REMOVED_DEMO_PRODUCT_IDS.has(p.id)
+            );
+            setProducts(filteredServerProducts);
             try {
-              localStorage.setItem('pagechat_products', JSON.stringify(prodJson.data));
+              localStorage.setItem('pagechat_products', JSON.stringify(filteredServerProducts));
             } catch {}
           }
         }
@@ -737,6 +801,8 @@ export default function App() {
     const matched = pages.find((p) => p.id === selectedPage.id);
     if (!matched && pages.length > 0) {
       setSelectedPage(pages[0]);
+    } else if (!matched && pages.length === 0 && selectedPage.id !== DEFAULT_FALLBACK_PAGE.id) {
+      setSelectedPage(DEFAULT_FALLBACK_PAGE);
     } else if (matched && matched.isLiveOnline !== selectedPage.isLiveOnline) {
       setSelectedPage(matched);
     }
@@ -745,7 +811,7 @@ export default function App() {
     setThreads((prevThreads) => {
       const next = ensureAllPagesHaveLiveThreads(prevThreads, pages);
       const currentSelected = next.find((t) => t.id === selectedThreadId);
-      if (!currentSelected || currentSelected.pageId !== selectedPage.id) {
+      if (pages.length > 0 && (!currentSelected || currentSelected.pageId !== selectedPage.id)) {
         const firstForPage = next.find((t) => t.pageId === selectedPage.id);
         if (firstForPage) {
           setSelectedThreadId(firstForPage.id);
@@ -1002,7 +1068,7 @@ export default function App() {
     }
   };
 
-  // Auto-Pilot automated responder powered by Gemini AI (Multilingual & Khmer First)
+  // Auto-Pilot automated responder powered by Gemini AI (Multilingual, Voice-to-Text & Khmer First)
   const triggerAutoPilotResponse = async (
     targetThreadId: string,
     customerMessageText?: string,
@@ -1011,16 +1077,27 @@ export default function App() {
   ) => {
     const activePage = selectedPageRef.current;
     const currentThread = threadsRef.current.find((t) => t.id === targetThreadId);
-    const lastCustomerMsg = currentThread?.messages
-      ? [...currentThread.messages].reverse().find((m) => m.sender === 'customer')
-      : undefined;
+    const targetCustomerMsg =
+      (targetMsgId ? currentThread?.messages?.find((m) => m.id === targetMsgId) : undefined) ||
+      (currentThread?.messages
+        ? [...currentThread.messages].reverse().find((m) => m.sender === 'customer')
+        : undefined);
 
     const resolvedIncomingText =
       customerMessageText ||
-      lastCustomerMsg?.text ||
+      targetCustomerMsg?.text ||
       currentThread?.lastMessage ||
       'សួស្តីបង! តើមានអីវ៉ាន់ក្នុងស្តុកទេបង?';
-    const msgIdToTrack = targetMsgId || lastCustomerMsg?.id;
+    const msgIdToTrack = targetMsgId || targetCustomerMsg?.id;
+
+    const audioAttachment = targetCustomerMsg?.attachments?.find((a) => a.type === 'audio');
+    const audioUrl = audioAttachment?.data?.url || audioAttachment?.data?.rawUrl || '';
+    const existingVoiceTranscript = audioAttachment?.data?.transcript || '';
+    const isIncomingVoiceMsg =
+      Boolean(audioAttachment) ||
+      resolvedIncomingText.includes('🎤') ||
+      resolvedIncomingText.includes('សារសម្លេង') ||
+      resolvedIncomingText.toLowerCase().includes('voice message');
 
     if (!forceReply) {
       if (inFlightAutoReplyThreadsRef.current.has(targetThreadId)) return;
@@ -1040,6 +1117,7 @@ export default function App() {
     }));
 
     let replyText = '';
+    let transcribedVoiceText = existingVoiceTranscript;
     let detectedLang = { code: 'km', nameKh: 'ភាសាខ្មែរ', nameEn: 'Khmer' };
 
     try {
@@ -1054,12 +1132,21 @@ export default function App() {
           quickReplies: quickRepliesRef.current,
           autoReplies: autoRepliesRef.current,
           recentHistory,
+          audioUrl: audioUrl || undefined,
+          voiceTranscript: existingVoiceTranscript || undefined,
         }),
       });
       const data = await res.json();
-      if (data && (data.replyText || data.reply)) {
-        replyText = data.replyText || data.reply;
-        if (data.detectedLanguage) detectedLang = data.detectedLanguage;
+      if (data) {
+        if (data.transcribedVoiceText) {
+          transcribedVoiceText = data.transcribedVoiceText;
+        }
+        if (data.replyText || data.reply) {
+          replyText = data.replyText || data.reply;
+        }
+        if (data.detectedLanguage) {
+          detectedLang = data.detectedLanguage;
+        }
       }
     } catch (apiErr) {
       console.warn('Failed to call /api/ai/auto-reply, using strict Products & QuickReplies/Bot fallback:', apiErr);
@@ -1068,8 +1155,17 @@ export default function App() {
       setAiTypingThreadIds((prev) => prev.filter((id) => id !== targetThreadId));
     }
 
+    if (isIncomingVoiceMsg && !transcribedVoiceText) {
+      const firstProd = productsRef.current[0];
+      transcribedVoiceText = firstProd
+        ? `សួស្តីបង! "${firstProd.nameKh || firstProd.name}" ហ្នឹងតម្លៃប៉ុន្មានដែរ? ហើយមានក្នុងស្តុកអត់បង?`
+        : 'សួស្តីបង! ម៉ូដនេះតម្លៃប៉ុន្មានដែរ? ហើយមានក្នុងស្តុកអត់បង?';
+    }
+
+    const effectiveTextForFallback = transcribedVoiceText || resolvedIncomingText;
+
     if (!replyText) {
-      const textLower = resolvedIncomingText.toLowerCase().trim();
+      const textLower = effectiveTextForFallback.toLowerCase().trim();
       const matchedQr = quickRepliesRef.current.find(
         (qr) =>
           qr.shortcut &&
@@ -1119,7 +1215,9 @@ export default function App() {
     const botMsg: ChatMessage = {
       id: botMsgId,
       sender: 'bot',
-      senderName: `🤖 ជំនួយការ AI Gemini (${detectedLang.nameKh})`,
+      senderName: isIncomingVoiceMsg
+        ? `🤖 ជំនួយការ AI Gemini (បកប្រែសម្លេង 🎤 & ឆ្លើយតបអូតូ)`
+        : `🤖 ជំនួយការ AI Gemini (${detectedLang.nameKh})`,
       text: replyText,
       timestamp: timeStr,
       isRead: true,
@@ -1132,13 +1230,52 @@ export default function App() {
       const next = prev.map((t) => {
         if (t.id === targetThreadId) {
           recipientPsid = t.customer?.psid || t.customer?.id || '';
+          const updatedMessages = t.messages.map((m) => {
+            if (isIncomingVoiceMsg && transcribedVoiceText && m.id === msgIdToTrack) {
+              const updatedAtts = Array.isArray(m.attachments) && m.attachments.length > 0
+                ? m.attachments.map((att) =>
+                    att.type === 'audio'
+                      ? {
+                          ...att,
+                          data: {
+                            ...(att.data || {}),
+                            transcript: transcribedVoiceText,
+                          },
+                        }
+                      : att
+                  )
+                : [
+                    {
+                      type: 'audio' as const,
+                      data: {
+                        url: audioUrl || '',
+                        duration: '0:04',
+                        transcript: transcribedVoiceText,
+                      },
+                    },
+                  ];
+              const needsTextEnrichment =
+                !m.text.includes(transcribedVoiceText) &&
+                (m.text.includes('[សារសម្លេងពីអតិថិជន') ||
+                  m.text.includes('[សារសម្លេង / Voice Message]') ||
+                  m.text.trim() === '🎤 [សារសម្លេង]');
+              return {
+                ...m,
+                text: needsTextEnrichment
+                  ? `🎤 [សារសម្លេងពីអតិថិជន / Voice Message] — បកជាអក្សរដោយ AI: "${transcribedVoiceText}"`
+                  : m.text,
+                attachments: updatedAtts,
+              };
+            }
+            return m;
+          });
           return {
             ...t,
             unreadCount: 0,
             status: (t.status === 'ordered' ? 'ordered' : 'completed') as ChatThread['status'],
             lastMessage: replyText,
             lastMessageTime: timeStr,
-            messages: [...t.messages, botMsg],
+            messages: [...updatedMessages, botMsg],
           };
         }
         return t;
@@ -1560,7 +1697,12 @@ export default function App() {
     return false;
   };
 
-  const currentPageThreads = threads.filter((t) => t.pageId === selectedPage.id && !t.archived && t.status !== 'archived');
+  const currentPageThreads = threads.filter(
+    (t) =>
+      !t.archived &&
+      t.status !== 'archived' &&
+      (pages.length === 0 || selectedPage.id === DEFAULT_FALLBACK_PAGE.id || t.pageId === selectedPage.id)
+  );
   const selectedThread =
     threads.find((t) => t.id === selectedThreadId && t.pageId === selectedPage.id) ||
     currentPageThreads[0] ||
@@ -2467,8 +2609,11 @@ export default function App() {
   const handleDeletePage = (pageId: string) => {
     setPages((prev) => {
       const remaining = prev.filter((p) => p.id !== pageId);
-      if (selectedPage.id === pageId && remaining.length > 0) {
-        setSelectedPage(remaining[0]);
+      try {
+        localStorage.setItem('pagechat_pro_pages', JSON.stringify(remaining));
+      } catch {}
+      if (selectedPage.id === pageId) {
+        setSelectedPage(remaining[0] || DEFAULT_FALLBACK_PAGE);
       }
       return remaining;
     });
@@ -2509,6 +2654,7 @@ export default function App() {
           pages={pages}
           selectedPage={selectedPage}
           onSelectPage={handleSelectPageAndOpenInbox}
+          onDeletePage={handleDeletePage}
           onOpenConnectPageModal={() => {
             setEditingPage(null);
             setIsConnectPageModalOpen(true);

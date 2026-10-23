@@ -16,7 +16,8 @@ import {
   Layers,
   X,
   Smartphone,
-  HardDrive
+  HardDrive,
+  Trash2
 } from 'lucide-react';
 import { PageAccount } from '../types';
 
@@ -37,6 +38,7 @@ interface SidebarProps {
   pages: PageAccount[];
   selectedPage: PageAccount;
   onSelectPage: (page: PageAccount) => void;
+  onDeletePage?: (pageId: string) => void;
   onOpenConnectPageModal: () => void;
   activeView: ActiveViewType;
   onChangeView: (view: ActiveViewType) => void;
@@ -53,6 +55,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   pages,
   selectedPage,
   onSelectPage,
+  onDeletePage,
   onOpenConnectPageModal,
   activeView,
   onChangeView,
@@ -237,43 +240,66 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
           {showPageMenu && (
             <div className="absolute top-full left-3 right-3 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-50 py-1">
-              <div className="px-3 py-1 text-[11px] font-medium text-slate-400 uppercase tracking-wider">
-                {language === 'kh' ? 'ទំព័រដែលបានភ្ជាប់' : 'Connected Pages'}
-              </div>
-              {pages.map((p) => (
-                <button
-                  key={p.id}
-                  onClick={() => {
-                    onSelectPage(p);
-                    setShowPageMenu(false);
-                  }}
-                  className="w-full px-3 py-2 flex items-center justify-between hover:bg-slate-700/70 text-left transition-colors"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <img
-                      src={p.avatar}
-                      alt={p.name}
-                      referrerPolicy="no-referrer"
-                      className="w-6 h-6 rounded-full object-cover shrink-0"
-                    />
-                    <div className="min-w-0">
-                      <p className="text-xs font-medium text-slate-200 truncate">{p.name}</p>
-                      <p className="text-[10px] text-slate-400 truncate">{p.category}</p>
-                    </div>
+              {pages.length > 0 && (
+                <>
+                  <div className="px-3 py-1 text-[11px] font-medium text-slate-400 uppercase tracking-wider">
+                    {language === 'kh' ? 'ទំព័រដែលបានភ្ជាប់' : 'Connected Pages'}
                   </div>
-                  {p.id === selectedPage.id && (
-                    <Check className="w-4 h-4 text-blue-400 shrink-0 ml-1" />
-                  )}
-                </button>
-              ))}
+                  {pages.map((p) => (
+                    <div
+                      key={p.id}
+                      className="w-full px-3 py-2 flex items-center justify-between hover:bg-slate-700/70 transition-colors group"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onSelectPage(p);
+                          setShowPageMenu(false);
+                        }}
+                        className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
+                      >
+                        <img
+                          src={p.avatar}
+                          alt={p.name}
+                          referrerPolicy="no-referrer"
+                          className="w-6 h-6 rounded-full object-cover shrink-0"
+                        />
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-slate-200 truncate">{p.name}</p>
+                          <p className="text-[10px] text-slate-400 truncate">{p.category}</p>
+                        </div>
+                      </button>
+                      <div className="flex items-center gap-1 shrink-0 ml-1">
+                        {p.id === selectedPage.id && (
+                          <Check className="w-4 h-4 text-blue-400 shrink-0" />
+                        )}
+                        {onDeletePage && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDeletePage(p.id);
+                            }}
+                            className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-700 transition-colors cursor-pointer"
+                            title={language === 'kh' ? 'លុបទំព័រនេះចេញពីកម្មវិធី' : 'Remove page from app'}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  <div className="border-t border-slate-700/80 my-1" />
+                </>
+              )}
 
-              <div className="border-t border-slate-700/80 my-1 pt-1 px-1.5 space-y-1">
+              <div className="px-1.5 py-0.5 space-y-1">
                 <button
                   onClick={() => {
                     setShowPageMenu(false);
                     onOpenConnectPageModal();
                   }}
-                  className="w-full px-2.5 py-1.5 rounded-md text-xs font-semibold text-blue-400 hover:text-white hover:bg-blue-600/30 flex items-center gap-2 transition-colors text-left"
+                  className="w-full px-2.5 py-1.5 rounded-md text-xs font-semibold text-blue-400 hover:text-white hover:bg-blue-600/30 flex items-center gap-2 transition-colors text-left cursor-pointer"
                 >
                   <PlusCircle className="w-3.5 h-3.5" />
                   <span>{language === 'kh' ? '+ ភ្ជាប់ទំព័រថ្មី' : '+ Connect New Page'}</span>
@@ -283,7 +309,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     setShowPageMenu(false);
                     onChangeView('pages');
                   }}
-                  className="w-full px-2.5 py-1.5 rounded-md text-xs text-slate-300 hover:text-white hover:bg-slate-700/70 flex items-center gap-2 transition-colors text-left"
+                  className="w-full px-2.5 py-1.5 rounded-md text-xs text-slate-300 hover:text-white hover:bg-slate-700/70 flex items-center gap-2 transition-colors text-left cursor-pointer"
                 >
                   <Store className="w-3.5 h-3.5 text-slate-400" />
                   <span>{language === 'kh' ? 'គ្រប់គ្រងទំព័រទាំងអស់' : 'Manage Connected Pages'}</span>

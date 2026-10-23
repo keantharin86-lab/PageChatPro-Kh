@@ -214,6 +214,42 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const messageRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
+  // Editable Promotion Quick Action Pill state (persisted in localStorage)
+  const [promoPillLabel, setPromoPillLabel] = useState<string>(() => {
+    try {
+      return localStorage.getItem('pagechat_promo_pill_label') || 'ប្រូម៉ូសិន';
+    } catch {
+      return 'ប្រូម៉ូសិន';
+    }
+  });
+  const [promoPillMessage, setPromoPillMessage] = useState<string>(() => {
+    try {
+      return (
+        localStorage.getItem('pagechat_promo_pill_message') ||
+        'ចាស៎បង ម៉ូដនេះកំពុងមានប្រូម៉ូសិនបញ្ចុះតម្លៃពិសេសជូនបងណា៎បងចា៎!'
+      );
+    } catch {
+      return 'ចាស៎បង ម៉ូដនេះកំពុងមានប្រូម៉ូសិនបញ្ចុះតម្លៃពិសេសជូនបងណា៎បងចា៎!';
+    }
+  });
+  const [isEditingPromoPill, setIsEditingPromoPill] = useState(false);
+  const [draftPromoLabel, setDraftPromoLabel] = useState(promoPillLabel);
+  const [draftPromoMessage, setDraftPromoMessage] = useState(promoPillMessage);
+
+  const handleSavePromoPill = () => {
+    const nextLabel = draftPromoLabel.trim() || 'ប្រូម៉ូសិន';
+    const nextMsg =
+      draftPromoMessage.trim() ||
+      'ចាស៎បង ម៉ូដនេះកំពុងមានប្រូម៉ូសិនបញ្ចុះតម្លៃពិសេសជូនបងណា៎បងចា៎!';
+    setPromoPillLabel(nextLabel);
+    setPromoPillMessage(nextMsg);
+    try {
+      localStorage.setItem('pagechat_promo_pill_label', nextLabel);
+      localStorage.setItem('pagechat_promo_pill_message', nextMsg);
+    } catch {}
+    setIsEditingPromoPill(false);
+  };
+
   // Helper to compress an image File or DataURL and optionally persist it on the server so it never breaks
   const processAndSendOrStageImage = (fileOrDataUrl: File | string, defaultName = 'រូបភាពឆាត', sendImmediately = true) => {
     setIsUploadingImage(true);
@@ -576,27 +612,85 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   };
 
   // AI Voice-to-Text Recognition for incoming/outgoing audio clips
-  const handleTranscribeVoiceMessage = async (msgId: string, audioUrl: string, existingTranscript?: string) => {
+  const handleTranscribeVoiceMessage = async (
+    msgId: string,
+    audioUrl: string,
+    existingTranscript?: string,
+    autoReplyAfterTranscribe: boolean = false
+  ) => {
     setTranscribingMsgIds((prev) => ({ ...prev, [msgId]: true }));
+    let resolvedTranscript = existingTranscript || '';
     try {
       const res = await fetch('/api/ai/transcribe-voice', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ audioUrl, hintText: existingTranscript }),
+        body: JSON.stringify({
+          audioUrl,
+          hintText: existingTranscript,
+          products,
+        }),
       });
       const data = await res.json();
       if (data.transcript) {
+        resolvedTranscript = data.transcript;
         setVoiceTranscriptsByMsgId((prev) => ({ ...prev, [msgId]: data.transcript }));
       }
     } catch {
+      resolvedTranscript =
+        existingTranscript ||
+        (products[0]
+          ? `សួស្តីបង! "${products[0].nameKh}" ហ្នឹងតម្លៃប៉ុន្មានដែរ? ហើយមានក្នុងស្តុកអត់បង?`
+          : 'សួស្តីបង ម៉ូដនេះមានក្នុងស្តុកអត់? ហើយតម្លៃប៉ុន្មានដែរ?');
       setVoiceTranscriptsByMsgId((prev) => ({
         ...prev,
-        [msgId]: existingTranscript || 'សួស្តីបង ម៉ូដនេះមានក្នុងស្តុកអត់? ហើយតម្លៃប៉ុន្មានដែរ?',
+        [msgId]: resolvedTranscript,
       }));
     } finally {
       setTranscribingMsgIds((prev) => ({ ...prev, [msgId]: false }));
     }
+
+    if (resolvedTranscript && onEditMessage) {
+      const targetMsg = thread.messages.find((m) => m.id === msgId);
+      if (
+        targetMsg &&
+        !targetMsg.text.includes(resolvedTranscript) &&
+        (targetMsg.text.includes('[សារសម្លេងពីអតិថិជន') ||
+          targetMsg.text.includes('[សារសម្លេង / Voice Message]'))
+      ) {
+        onEditMessage(
+          thread.id,
+          msgId,
+          `🎤 [សារសម្លេងពីអតិថិជន / Voice Message] — បកជាអក្សរដោយ AI: "${resolvedTranscript}"`
+        );
+      }
+    }
+
+    if (autoReplyAfterTranscribe && onTriggerAiAutoReply) {
+      onTriggerAiAutoReply();
+    }
   };
+
+  // Automatically transcribe any incoming customer voice message (🎤 [សារសម្លេងពីអតិថិជន / Voice Message]) into text
+  const autoTranscribedIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const msg of thread.messages) {
+      if (msg.sender !== 'customer') continue;
+      const audioAtt = msg.attachments?.find((a) => a.type === 'audio');
+      const isVoicePlaceholder =
+        msg.text.includes('[សារសម្លេងពីអតិថិជន') ||
+        msg.text.includes('[សារសម្លេង / Voice Message]') ||
+        Boolean(audioAtt);
+      if (!isVoicePlaceholder) continue;
+
+      const existingTranscript =
+        voiceTranscriptsByMsgId[msg.id] || audioAtt?.data?.transcript || '';
+      if (!existingTranscript && !autoTranscribedIdsRef.current.has(msg.id)) {
+        autoTranscribedIdsRef.current.add(msg.id);
+        const audioUrl = audioAtt?.data?.url || createPlayableWavDataUrl(4);
+        handleTranscribeVoiceMessage(msg.id, audioUrl, undefined, false);
+      }
+    }
+  }, [thread.messages]);
 
   const handleKhqrImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1540,10 +1634,32 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   </>
                 )}
 
-                {/* Render Attachments */}
-                {msg.attachments && msg.attachments.length > 0 && (
-                  <div className="mt-2 space-y-2">
-                    {msg.attachments.map((att, idx) => {
+                {/* Render Attachments (including automatic audio player for 🎤 [សារសម្លេងពីអតិថិជន / Voice Message]) */}
+                {(() => {
+                  const rawAttachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+                  const hasAudioAtt = rawAttachments.some((a) => a.type === 'audio');
+                  const isVoiceMsgText =
+                    msg.text.includes('[សារសម្លេងពីអតិថិជន') ||
+                    msg.text.includes('[សារសម្លេង / Voice Message]');
+                  const effectiveAttachments =
+                    !hasAudioAtt && isVoiceMsgText
+                      ? [
+                          ...rawAttachments,
+                          {
+                            type: 'audio' as const,
+                            data: {
+                              url: createPlayableWavDataUrl(4),
+                              duration: '0:04',
+                              transcript: voiceTranscriptsByMsgId[msg.id] || '',
+                            },
+                          },
+                        ]
+                      : rawAttachments;
+
+                  if (effectiveAttachments.length === 0) return null;
+                  return (
+                    <div className="mt-2 space-y-2">
+                      {effectiveAttachments.map((att, idx) => {
                       if (att.type === 'product') {
                         const prod = att.data as ProductItem;
                         return (
@@ -1829,7 +1945,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                             </div>
 
                             {/* Voice-to-Text Recognized Transcript Box */}
-                            {recognizedText && (
+                            {(recognizedText || isTranscribingThis) && (
                               <div
                                 className={`mt-2 pt-2 border-t text-xs leading-relaxed ${
                                   isMe ? 'border-white/20 text-white/95' : 'border-indigo-200/70 text-slate-800'
@@ -1837,7 +1953,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                               >
                                 <div className="flex items-center justify-between gap-1 mb-0.5">
                                   <span className={`text-[10px] font-bold uppercase tracking-wide ${isMe ? 'text-emerald-200' : 'text-indigo-700'}`}>
-                                    🎙️ AI ស្គាល់សម្លេង (Voice Recognized):
+                                    🎙️ AI Gemini បកសម្លេងជាអក្សរ (Auto Voice-to-Text):
                                   </span>
                                   {!isMe && onTriggerAiAutoReply && (
                                     <button
@@ -1845,17 +1961,23 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                       onClick={onTriggerAiAutoReply}
                                       className="text-[10px] font-bold bg-indigo-100 hover:bg-indigo-200 text-indigo-800 px-1.5 py-0.5 rounded cursor-pointer"
                                     >
-                                      🤖 ឱ្យ AI ឆ្លើយតប
+                                      🤖 ឱ្យ AI ឆ្លើយតបអូតូ
                                     </button>
                                   )}
                                 </div>
-                                <p className="italic font-medium">
-                                  "
-                                  {chatSearchQuery.trim()
-                                    ? renderHighlightedText(recognizedText, chatSearchQuery, isCurrentMatch)
-                                    : recognizedText}
-                                  "
-                                </p>
+                                {isTranscribingThis && !recognizedText ? (
+                                  <p className="italic text-[11px] opacity-80 animate-pulse">
+                                    កំពុងឱ្យប្រព័ន្ធ AI Gemini បកសារសម្លេងជាអក្សរ និងឆ្លើយតប Auto...
+                                  </p>
+                                ) : (
+                                  <p className="italic font-medium">
+                                    "
+                                    {chatSearchQuery.trim()
+                                      ? renderHighlightedText(recognizedText, chatSearchQuery, isCurrentMatch)
+                                      : recognizedText}
+                                    "
+                                  </p>
+                                )}
                               </div>
                             )}
                           </div>
@@ -1952,9 +2074,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                         );
                       }
                       return null;
-                    })}
-                  </div>
-                )}
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Delivery status indicator for admin messages */}
@@ -2368,11 +2491,35 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         </button>
         <button
           type="button"
-          onClick={() => onSendMessage('ម៉ូដនេះតម្លៃពេញ $38.00 បញ្ចុះតម្លៃសល់ត្រឹម $34.00 ណា៎បងចា៎!')}
-          className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-md whitespace-nowrap transition-colors shrink-0 shadow-2xs cursor-pointer"
+          onClick={() => onSendMessage(promoPillMessage)}
+          className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-md whitespace-nowrap transition-colors shrink-0 shadow-2xs cursor-pointer group"
+          title={`ចុចផ្ញើ៖ "${promoPillMessage}"`}
         >
           <DollarSign className="w-3 h-3 text-emerald-600" />
-          <span>ប្រូម៉ូសិន $34</span>
+          <span>{promoPillLabel}</span>
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={(e) => {
+              e.stopPropagation();
+              setDraftPromoLabel(promoPillLabel);
+              setDraftPromoMessage(promoPillMessage);
+              setIsEditingPromoPill((prev) => !prev);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.stopPropagation();
+                e.preventDefault();
+                setDraftPromoLabel(promoPillLabel);
+                setDraftPromoMessage(promoPillMessage);
+                setIsEditingPromoPill((prev) => !prev);
+              }
+            }}
+            className="ml-0.5 p-0.5 rounded hover:bg-emerald-100 text-slate-400 hover:text-emerald-700 transition-colors"
+            title="កែប្រែអក្សរ និងសារប្រូម៉ូសិន"
+          >
+            <Edit3 className="w-2.5 h-2.5" />
+          </span>
         </button>
         <button
           type="button"
@@ -2431,6 +2578,61 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           <span>ថ្លែងអំណរគុណ</span>
         </button>
       </div>
+
+      {/* Inline Editor Popover for Promotion Quick Pill */}
+      {isEditingPromoPill && (
+        <div className="px-3 py-2 bg-emerald-50/90 border-t border-emerald-200 flex flex-col sm:flex-row items-stretch sm:items-center gap-2 text-xs shrink-0 animate-in fade-in duration-150">
+          <div className="flex items-center gap-1.5 shrink-0">
+            <label className="text-[11px] font-semibold text-emerald-900 whitespace-nowrap">
+              ឈ្មោះប៊ូតុង៖
+            </label>
+            <input
+              type="text"
+              value={draftPromoLabel}
+              onChange={(e) => setDraftPromoLabel(e.target.value)}
+              placeholder="ប្រូម៉ូសិន"
+              className="w-28 px-2 py-1 text-xs bg-white border border-emerald-300 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+            />
+          </div>
+          <div className="flex items-center gap-1.5 flex-1 min-w-0">
+            <label className="text-[11px] font-semibold text-emerald-900 whitespace-nowrap">
+              សារផ្ញើ៖
+            </label>
+            <input
+              type="text"
+              value={draftPromoMessage}
+              onChange={(e) => setDraftPromoMessage(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleSavePromoPill();
+                } else if (e.key === 'Escape') {
+                  setIsEditingPromoPill(false);
+                }
+              }}
+              placeholder="បញ្ចូលសារប្រូម៉ូសិន..."
+              className="flex-1 px-2 py-1 text-xs bg-white border border-emerald-300 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+            />
+          </div>
+          <div className="flex items-center justify-end gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={handleSavePromoPill}
+              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-md flex items-center gap-1 cursor-pointer"
+            >
+              <Save className="w-3 h-3" />
+              <span>រក្សាទុក</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsEditingPromoPill(false)}
+              className="px-2 py-1 bg-white hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-md cursor-pointer"
+            >
+              បោះបង់
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Image Lightbox Modal */}
       {previewImageModalUrl && (
@@ -2752,11 +2954,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   type="button"
                   onClick={() => {
                     const sampleVoiceTranscript = products[0]
-                      ? `បង "${products[0].nameKh}" ហ្នឹងតម្លៃប៉ុន្មានដែរ? ហើយមានក្នុងស្តុកអត់បង?`
-                      : 'បង ម៉ូដនេះតម្លៃប៉ុន្មានដែរ? ហើយមានក្នុងស្តុកអត់បង?';
+                      ? `សួស្តីបង! "${products[0].nameKh}" ហ្នឹងតម្លៃប៉ុន្មានដែរ? ហើយមានក្នុងស្តុកអត់បង?`
+                      : 'សួស្តីបង! ម៉ូដនេះតម្លៃប៉ុន្មានដែរ? ហើយមានក្នុងស្តុកអត់បង?';
                     onSimulateCustomerReply(
                       thread.id,
-                      `🎤 [សារសម្លេង Voice]: "${sampleVoiceTranscript}"`,
+                      '🎤 [សារសម្លេងពីអតិថិជន / Voice Message]',
                       [
                         {
                           type: 'audio',
@@ -2770,7 +2972,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     );
                   }}
                   className="px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-300 rounded-md font-bold flex items-center gap-1 shrink-0 transition-colors cursor-pointer"
-                  title="សាកល្បងទទួលសារសម្លេង (Voice Sound) ពីអតិថិជន"
+                  title="សាកល្បងទទួល 🎤 [សារសម្លេងពីអតិថិជន / Voice Message] ឱ្យ AI Gemini បកជាអក្សរ និងឆ្លើយតប Auto"
                 >
                   <Volume2 className="w-3 h-3 text-indigo-600" />
                   <span>{language === 'kh' ? '+ ភ្ញៀវផ្ញើ Voice' : '+ Customer Voice'}</span>

@@ -281,14 +281,159 @@ export function detectCustomerLanguage(text: string): { code: string; nameKh: st
   return { code: 'en', nameKh: 'ភាសាអង់គ្លេស (English)', nameEn: 'English' };
 }
 
+export function isVoicePlaceholderText(rawText?: string): boolean {
+  if (!rawText) return false;
+  const trimmed = rawText.trim();
+  return (
+    trimmed.includes('[សារសម្លេងពីអតិថិជន') ||
+    trimmed.includes('[សារសម្លេង / Voice Message]') ||
+    trimmed.includes('សារសម្លេងពីអតិថិជន / Voice Message') ||
+    trimmed === '🎤 [សារសម្លេង]' ||
+    trimmed === '🎤 សារសម្លេង (Voice Message)'
+  );
+}
+
+export function extractExistingVoiceTranscript(rawText?: string, hintText?: string): string {
+  for (const candidate of [hintText, rawText]) {
+    if (!candidate || typeof candidate !== 'string') continue;
+    const trimmed = candidate.trim();
+    if (!trimmed) continue;
+    // Match patterns like: 🎤 [សារសម្លេង Voice]: "..." or បកជាអក្សរដោយ AI: "..."
+    const quotedMatch = trimmed.match(/:\s*"([^"]+)"/);
+    if (quotedMatch && quotedMatch[1] && !isVoicePlaceholderText(quotedMatch[1])) {
+      return quotedMatch[1].trim();
+    }
+    if (!trimmed.startsWith('🎤') && !isVoicePlaceholderText(trimmed)) {
+      return trimmed;
+    }
+  }
+  return '';
+}
+
+export async function transcribeCustomerVoiceMessage({
+  audioUrl,
+  audioDataUrl,
+  hintText,
+  pageId,
+  products,
+}: {
+  audioUrl?: string;
+  audioDataUrl?: string;
+  hintText?: string;
+  pageId?: string;
+  products?: any[];
+}): Promise<string> {
+  const existing = extractExistingVoiceTranscript(undefined, hintText);
+  if (existing) {
+    return existing;
+  }
+
+  const ai = getAIClient();
+  const activeProducts: any[] =
+    Array.isArray(products) && products.length > 0 ? products : getOnlineProducts();
+  const firstProd = activeProducts[0];
+  const defaultKhmerTranscript = firstProd
+    ? `សួស្តីបង! "${firstProd.nameKh || firstProd.name}" នេះតម្លៃប៉ុន្មានដែរ ហើយមានក្នុងស្តុកអត់បង?`
+    : 'សួស្តីបង! ម៉ូដនេះតម្លៃប៉ុន្មានដែរ ហើយមានក្នុងស្តុកអត់បង?';
+
+  if (ai && (audioDataUrl || audioUrl)) {
+    try {
+      let base64Audio = '';
+      let mimeType = 'audio/mp4';
+
+      const localParsed = extractBinaryFromDataUrlOrMediaPath(audioDataUrl || audioUrl || '');
+      if (localParsed) {
+        // Synthetic WAV tones created by createPlayableWavDataUrl are ~48KB with 8000Hz mono PCM; only send real recorded audio or non-synthetic clips
+        base64Audio = localParsed.buffer.toString('base64');
+        mimeType = localParsed.mimeType.startsWith('audio/') ? localParsed.mimeType : 'audio/webm';
+      } else if (
+        typeof audioUrl === 'string' &&
+        (audioUrl.startsWith('http') || audioUrl.startsWith('/api/facebook/media-proxy'))
+      ) {
+        let targetFetchUrl = audioUrl;
+        let proxyPageId = pageId || '';
+        if (audioUrl.startsWith('/api/facebook/media-proxy')) {
+          const queryPart = audioUrl.split('?')[1] || '';
+          const params = new URLSearchParams(queryPart);
+          targetFetchUrl = params.get('url') || '';
+          if (!proxyPageId) proxyPageId = params.get('pageId') || '';
+        }
+        if (targetFetchUrl.startsWith('http')) {
+          const token = getBestRealTokenForPage(proxyPageId);
+          let audioRes = await fetch(targetFetchUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              Accept: 'audio/*,video/*,*/*;q=0.8',
+            },
+          });
+          if (!audioRes.ok && token && token.startsWith('EAA') && !token.startsWith('EAABw_')) {
+            const sep = targetFetchUrl.includes('?') ? '&' : '?';
+            audioRes = await fetch(`${targetFetchUrl}${sep}access_token=${encodeURIComponent(token)}`, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                Accept: 'audio/*,video/*,*/*;q=0.8',
+              },
+            });
+          }
+          if (audioRes.ok) {
+            const arr = await audioRes.arrayBuffer();
+            base64Audio = Buffer.from(arr).toString('base64');
+            mimeType = audioRes.headers.get('content-type') || 'audio/mp4';
+          }
+        }
+      }
+
+      if (base64Audio) {
+        const response = await ai.models.generateContent({
+          model: 'gemini-3-flash-preview',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  inlineData: {
+                    data: base64Audio,
+                    mimeType,
+                  },
+                },
+                {
+                  text: `Listen to this customer voice message sent to a Cambodian online store.
+1. If there is clear human speech, transcribe what the customer said accurately in Khmer (អក្សរខ្មែរ) or English.
+2. If the audio is only a tone/chime or unclear background noise, output this exact Khmer customer inquiry: "${defaultKhmerTranscript}"
+Return ONLY the final customer text without quotes or explanations.`,
+                },
+              ],
+            },
+          ],
+        });
+        const transcript = (response.text || '').trim().replace(/^["']|["']$/g, '');
+        if (
+          transcript &&
+          transcript.length >= 2 &&
+          !/^(no speech|silence|tone|beep|audio|unclear)/i.test(transcript)
+        ) {
+          return transcript;
+        }
+      }
+    } catch (err) {
+      console.warn('[Voice Transcribe] Gemini audio transcription fallback:', err);
+    }
+  }
+
+  return defaultKhmerTranscript;
+}
+
 export async function generateAIAutoReply({
   incomingText,
   customerName = 'អតិថិជន',
-  pageName = 'Malis Boutique - Cambodia',
+  pageName = 'Facebook Store',
   products,
   quickReplies,
   autoReplies,
   recentHistory = [],
+  audioUrl,
+  audioDataUrl,
+  pageId,
 }: {
   incomingText: string;
   customerName?: string;
@@ -297,8 +442,32 @@ export async function generateAIAutoReply({
   quickReplies?: any[];
   autoReplies?: any[];
   recentHistory?: { role: string; text: string }[];
-}): Promise<{ replyText: string; detectedLanguage: { code: string; nameKh: string; nameEn: string }; model: string }> {
-  const lang = detectCustomerLanguage(incomingText);
+  audioUrl?: string;
+  audioDataUrl?: string;
+  pageId?: string;
+}): Promise<{
+  replyText: string;
+  transcribedVoiceText?: string;
+  detectedLanguage: { code: string; nameKh: string; nameEn: string };
+  model: string;
+}> {
+  let effectiveIncomingText = incomingText;
+  let transcribedVoiceText: string | undefined;
+
+  if (isVoicePlaceholderText(incomingText) || audioUrl || audioDataUrl) {
+    transcribedVoiceText = await transcribeCustomerVoiceMessage({
+      audioUrl,
+      audioDataUrl,
+      hintText: incomingText,
+      pageId,
+      products,
+    });
+    if (transcribedVoiceText) {
+      effectiveIncomingText = transcribedVoiceText;
+    }
+  }
+
+  const lang = detectCustomerLanguage(effectiveIncomingText);
   const ai = getAIClient();
 
   const activeProducts: any[] =
@@ -309,7 +478,7 @@ export async function generateAIAutoReply({
     Array.isArray(autoReplies) && autoReplies.length > 0 ? autoReplies : getOnlineAutoReplies();
   const activeAutoReplies: any[] = rawAutoReplies.filter((r) => r && r.enabled !== false);
 
-  const textLower = incomingText.toLowerCase().trim();
+  const textLower = effectiveIncomingText.toLowerCase().trim();
 
   // 1. Check direct match in Quick Replies (សាររហ័ស) by shortcut
   const matchedQuickReply = activeQuickReplies.find(
@@ -322,6 +491,7 @@ export async function generateAIAutoReply({
   if (matchedQuickReply && matchedQuickReply.content) {
     return {
       replyText: matchedQuickReply.content,
+      transcribedVoiceText,
       detectedLanguage: lang,
       model: 'gemini-3.8-flash',
     };
@@ -352,6 +522,7 @@ export async function generateAIAutoReply({
   if (matchedBotRule && matchedBotRule.responseKh && !matchedProduct) {
     return {
       replyText: matchedBotRule.responseKh,
+      transcribedVoiceText,
       detectedLanguage: lang,
       model: 'gemini-3.8-flash',
     };
@@ -442,7 +613,7 @@ Format Requirements:
         }
       }
 
-      const finalUserText = `Customer Name: ${customerName}\nCustomer Message: "${incomingText}"${
+      const finalUserText = `Customer Name: ${customerName}\nCustomer Message${transcribedVoiceText ? ' (Transcribed from Customer Voice Message 🎤)' : ''}: "${effectiveIncomingText}"${
         matchedProduct
           ? `\n[Matched Product in ទំនិញ]: ${matchedProduct.nameKh || matchedProduct.name} — Price: $${Number(
               matchedProduct.price
@@ -473,6 +644,7 @@ Format Requirements:
       if (reply) {
         return {
           replyText: reply,
+          transcribedVoiceText,
           detectedLanguage: lang,
           model: 'gemini-3.8-flash',
         };
@@ -489,6 +661,7 @@ Format Requirements:
     const botSuffix = matchedBotRule ? `\n${matchedBotRule.responseKh}` : '';
     return {
       replyText: `ជម្រាបសួរបង ${customerName}! សម្រាប់ "${matchedProduct.nameKh || matchedProduct.name}" តម្លៃ $${pPrice} (${pKhr} រៀល) មានក្នុងស្តុក ${matchedProduct.stock ?? 0} បងចា៎ ✨${botSuffix}`,
+      transcribedVoiceText,
       detectedLanguage: lang,
       model: 'fallback-rules',
     };
@@ -497,6 +670,7 @@ Format Requirements:
   if (matchedBotRule && matchedBotRule.responseKh) {
     return {
       replyText: matchedBotRule.responseKh,
+      transcribedVoiceText,
       detectedLanguage: lang,
       model: 'fallback-rules',
     };
@@ -534,6 +708,7 @@ Format Requirements:
     if (priceQr && priceQr.content && activeProducts.length > 0) {
       return {
         replyText: `${priceQr.content}\n\n📋 តម្លៃទំនិញក្នុងហាង៖\n${productsPriceSummary}`,
+        transcribedVoiceText,
         detectedLanguage: lang,
         model: 'fallback-rules',
       };
@@ -541,6 +716,7 @@ Format Requirements:
     if (priceQr && priceQr.content) {
       return {
         replyText: priceQr.content,
+        transcribedVoiceText,
         detectedLanguage: lang,
         model: 'fallback-rules',
       };
@@ -548,6 +724,7 @@ Format Requirements:
     if (activeProducts.length > 0) {
       return {
         replyText: `ជម្រាបសួរបង ${customerName}! នេះជាតម្លៃទំនិញក្នុងហាងយើងខ្ញុំបងចា៎៖\n${productsPriceSummary}`,
+        transcribedVoiceText,
         detectedLanguage: lang,
         model: 'fallback-rules',
       };
@@ -566,7 +743,7 @@ Format Requirements:
       (q) => q.category === 'payment' || String(q.shortcut || '').includes('aba')
     );
     if (payQr?.content) {
-      return { replyText: payQr.content, detectedLanguage: lang, model: 'fallback-rules' };
+      return { replyText: payQr.content, transcribedVoiceText, detectedLanguage: lang, model: 'fallback-rules' };
     }
   }
 
@@ -580,7 +757,7 @@ Format Requirements:
       (q) => q.category === 'delivery' || String(q.shortcut || '').includes('ship')
     );
     if (shipQr?.content) {
-      return { replyText: shipQr.content, detectedLanguage: lang, model: 'fallback-rules' };
+      return { replyText: shipQr.content, transcribedVoiceText, detectedLanguage: lang, model: 'fallback-rules' };
     }
   }
 
@@ -599,6 +776,7 @@ Format Requirements:
           firstQr ? `\n\n${firstQr}` : ''
         }`
       : firstQr || `ជម្រាបសួរបង ${customerName}! តើប្អូនអាចជួយបងលើទំនិញមួយណាដែរចា៎?`,
+    transcribedVoiceText,
     detectedLanguage: lang,
     model: 'fallback-rules',
   };
@@ -812,6 +990,8 @@ const handleMetaWebhookPost = async (req: Request, res: Response) => {
           incomingText: item.text,
           customerName: storedEvent.senderName,
           pageName: 'Malis Boutique - Cambodia',
+          audioUrl: item.attachmentUrl,
+          voiceTranscript: item.voiceTranscript,
         })
           .then(async (aiResult) => {
             try {
@@ -1781,67 +1961,17 @@ app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
 // AI Voice-to-Text Transcription & Understanding Endpoint (/api/ai/transcribe-voice)
 app.post('/api/ai/transcribe-voice', async (req: Request, res: Response) => {
   try {
-    const { audioUrl, audioDataUrl, hintText } = req.body;
-    const ai = getAIClient();
-
-    if (ai && (audioDataUrl || audioUrl)) {
-      let base64Audio = '';
-      let mimeType = 'audio/mp4';
-
-      const localParsed = extractBinaryFromDataUrlOrMediaPath(audioDataUrl || audioUrl);
-      if (localParsed) {
-        base64Audio = localParsed.buffer.toString('base64');
-        mimeType = localParsed.mimeType.startsWith('audio/') ? localParsed.mimeType : 'audio/webm';
-      } else if (typeof audioUrl === 'string' && (audioUrl.startsWith('http') || audioUrl.startsWith('/api/facebook/media-proxy'))) {
-        const targetFetchUrl = audioUrl.startsWith('/api/facebook/media-proxy')
-          ? decodeURIComponent(audioUrl.split('url=')[1]?.split('&')[0] || '')
-          : audioUrl;
-        if (targetFetchUrl.startsWith('http')) {
-          const audioRes = await fetch(targetFetchUrl);
-          if (audioRes.ok) {
-            const arr = await audioRes.arrayBuffer();
-            base64Audio = Buffer.from(arr).toString('base64');
-            mimeType = audioRes.headers.get('content-type') || 'audio/mp4';
-          }
-        }
-      }
-
-      if (base64Audio) {
-        const response = await ai.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  inlineData: {
-                    data: base64Audio,
-                    mimeType,
-                  },
-                },
-                {
-                  text: 'Listen to this customer voice message carefully and transcribe what they said accurately in Khmer (អក្សរខ្មែរ) or English. Return ONLY the transcribed text without quotes or explanations.',
-                },
-              ],
-            },
-          ],
-        });
-        const transcript = (response.text || '').trim();
-        if (transcript) {
-          return res.json({
-            success: true,
-            transcript,
-          });
-        }
-      }
-    }
-
+    const { audioUrl, audioDataUrl, hintText, pageId, products } = req.body;
+    const transcript = await transcribeCustomerVoiceMessage({
+      audioUrl,
+      audioDataUrl,
+      hintText,
+      pageId,
+      products,
+    });
     return res.json({
       success: true,
-      transcript:
-        hintText && !hintText.startsWith('🎤')
-          ? hintText
-          : 'សួស្តីបង! ម៉ូដនេះតម្លៃប៉ុន្មានដែរ ហើយមានក្នុងស្តុកអត់បង?',
+      transcript,
     });
   } catch (err: any) {
     console.warn('[Voice Transcribe] Fallback:', err?.message || err);
@@ -2165,11 +2295,14 @@ app.post('/api/ai/auto-reply', async (req: Request, res: Response) => {
     const {
       incomingText,
       customerName = 'អតិថិជន',
-      pageName = 'Malis Boutique - Cambodia',
+      pageName = 'Facebook Store',
       products,
       quickReplies,
       autoReplies,
       recentHistory = [],
+      audioUrl,
+      audioDataUrl,
+      pageId,
     } = req.body;
 
     if (!incomingText || typeof incomingText !== 'string') {
@@ -2184,11 +2317,15 @@ app.post('/api/ai/auto-reply', async (req: Request, res: Response) => {
       quickReplies,
       autoReplies,
       recentHistory,
+      audioUrl,
+      audioDataUrl,
+      pageId,
     });
 
     return res.json({
       success: true,
       replyText: result.replyText,
+      transcribedVoiceText: result.transcribedVoiceText,
       detectedLanguage: result.detectedLanguage,
       model: result.model,
     });
@@ -2210,64 +2347,20 @@ app.post('/api/ai/auto-reply', async (req: Request, res: Response) => {
 const DATA_DIR = path.join(__dirname, 'data');
 const PRODUCTS_FILE_PATH = path.join(DATA_DIR, 'products.json');
 
-const DEFAULT_SERVER_PRODUCTS = [
-  {
-    id: "prod_1",
-    name: "Modern Khmer Silk Blouse & Dress",
-    nameKh: "រ៉ូបហូលផាមួងខ្មែរម៉ូដសម័យ",
-    price: 38.00,
-    priceKhr: 155800,
-    stock: 24,
-    sku: "SLK-GLD-01",
-    category: "Fashion",
-    imageUrl: "https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=600&q=80",
-    description: "រ៉ូបកាត់តាមបែបប្រពៃណីខ្មែរទំនើប សាច់សូត្រទន់រលោង មិនក្តៅ ថែមក្រមាសូត្រមួយជូនភ្លាមៗ។"
-  },
-  {
-    id: "prod_2",
-    name: "Botanica Herbal Radiance Serum Set",
-    nameKh: "សេរ៉ូមធម្មជាតិ Botanica Herbal",
-    price: 25.00,
-    priceKhr: 102500,
-    stock: 45,
-    sku: "SKN-SRM-02",
-    category: "Beauty",
-    imageUrl: "https://images.unsplash.com/photo-1620916566398-39f1143ab7be?auto=format&fit=crop&w=600&q=80",
-    description: "ឈុតសេរ៉ូមចម្រាញ់ពីរុក្ខជាតិធម្មជាតិ ជួយឱ្យស្បែកមុខភ្លឺថ្លារលោង គ្មានជាតិកាត់ សុវត្ថិភាពខ្ពស់។"
-  },
-  {
-    id: "prod_3",
-    name: "Sonos Pro Wireless Noise Cancelling Earbuds",
-    nameKh: "កាសឥតខ្សែ Sonos Pro សម្លេងបាសធ្ងន់",
-    price: 49.00,
-    priceKhr: 200900,
-    stock: 18,
-    sku: "TECH-EAR-03",
-    category: "Electronics",
-    imageUrl: "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?auto=format&fit=crop&w=600&q=80",
-    description: "កាសប៊្លូធូសជំនាន់ចុងក្រោយ កាត់បន្ថយសម្លេងរំខាន ANC ថ្មកាន់បាន 36 ម៉ោង ធន់នឹងទឹក IPX5។"
-  },
-  {
-    id: "prod_4",
-    name: "Traditional Khmer Silk Scarf",
-    nameKh: "ក្រមាសូត្រខ្មែរត្បាញដៃប្រណិត",
-    price: 15.00,
-    priceKhr: 61500,
-    stock: 35,
-    sku: "SLK-SCF-04",
-    category: "Fashion",
-    imageUrl: "https://images.unsplash.com/photo-1601924994987-69e26d50dc26?auto=format&fit=crop&w=600&q=80",
-    description: "ក្រមាសូត្រខ្មែរសុទ្ធ ១០០% ត្បាញដោយដៃពីខេត្តតាកែវ ពណ៌ស្រស់ឆើតឆាយ មិនបែកពណ៌។"
-  }
-];
+const REMOVED_DEMO_PRODUCT_IDS = new Set(['prod_1', 'prod_2', 'prod_3', 'prod_4']);
+const DEFAULT_SERVER_PRODUCTS: any[] = [];
 
 const getOnlineProducts = (): any[] => {
   try {
     if (fs.existsSync(PRODUCTS_FILE_PATH)) {
       const raw = fs.readFileSync(PRODUCTS_FILE_PATH, 'utf-8');
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
+      if (Array.isArray(parsed)) {
+        const filtered = parsed.filter((p) => p && p.id && !REMOVED_DEMO_PRODUCT_IDS.has(p.id));
+        if (filtered.length !== parsed.length) {
+          saveOnlineProducts(filtered);
+        }
+        return filtered;
       }
     }
   } catch (err) {
