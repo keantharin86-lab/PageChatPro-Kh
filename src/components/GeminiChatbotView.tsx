@@ -521,11 +521,29 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                 {onAutoReplyAllPending && (
                   <button
                     type="button"
-                    onClick={onAutoReplyAllPending}
-                    className="px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white flex items-center gap-1.5 transition-all cursor-pointer shadow-xs"
+                    onClick={() => {
+                      if (!isAutoPilot) {
+                        onAutoReplyAllPending();
+                      }
+                    }}
+                    disabled={isAutoPilot}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${
+                      isAutoPilot
+                        ? 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60 pointer-events-none'
+                        : 'bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer'
+                    }`}
+                    title={
+                      isAutoPilot
+                        ? language === 'kh'
+                          ? 'បិទ ឆាត Auto (ON) សិន ប្រសិនបើចង់ចុចឆាត Auto គ្រប់សារដោយដៃ'
+                          : 'Turn off Auto-Chat (ON) to manually trigger Auto-Reply All Now'
+                        : language === 'kh'
+                        ? 'ចុចដើម្បីឆាត Auto គ្រប់សារឥឡូវនេះ'
+                        : 'Click to Auto-Reply All Now'
+                    }
                   >
                     <RefreshCw
-                      className={`w-3.5 h-3.5 ${aiTypingThreadIds.length > 0 ? 'animate-spin' : ''}`}
+                      className={`w-3.5 h-3.5 ${!isAutoPilot && aiTypingThreadIds.length > 0 ? 'animate-spin' : ''}`}
                     />
                     <span>
                       {language === 'kh'

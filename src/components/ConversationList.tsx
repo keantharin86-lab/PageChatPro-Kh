@@ -7,6 +7,7 @@ import {
   RefreshCw,
   Archive,
   ArchiveRestore,
+  Trash2,
   X
 } from 'lucide-react';
 import { ChatThread, ThreadStatus, PlatformType, PageAccount } from '../types';
@@ -24,6 +25,8 @@ interface ConversationListProps {
   onOpenLiveOnlineModal?: () => void;
   onBulkMarkAsRead?: (threadIds: string[]) => void;
   onBulkArchive?: (threadIds: string[], archive?: boolean) => void;
+  onBulkDelete?: (threadIds: string[]) => void;
+  onDeleteAllThreads?: () => void;
 }
 
 export const ConversationList: React.FC<ConversationListProps> = ({
@@ -39,6 +42,8 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   onOpenLiveOnlineModal,
   onBulkMarkAsRead,
   onBulkArchive,
+  onBulkDelete,
+  onDeleteAllThreads,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<ThreadStatus>('all');
@@ -206,6 +211,33 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     );
   };
 
+  const handleBulkDeleteClick = () => {
+    if (selectedThreadIds.length === 0) return;
+    const count = selectedThreadIds.length;
+    if (onBulkDelete) {
+      onBulkDelete(selectedThreadIds);
+    }
+    setSelectedThreadIds([]);
+    showTemporaryFeedback(
+      language === 'kh'
+        ? `បានលុបសារចំនួន ${count} ចេញពីប្រអប់សារ`
+        : `Deleted ${count} thread${count > 1 ? 's' : ''}`
+    );
+  };
+
+  const handleDeleteAllClick = () => {
+    if (threads.length === 0) return;
+    if (onDeleteAllThreads) {
+      onDeleteAllThreads();
+    }
+    setSelectedThreadIds([]);
+    showTemporaryFeedback(
+      language === 'kh'
+        ? 'បានលុបសារទាំងអស់ក្នុងគ្រប់ទំព័ររួចរាល់'
+        : 'Deleted all messages across all pages'
+    );
+  };
+
   const getPlatformBadge = (platform: PlatformType) => {
     switch (platform) {
       case 'messenger':
@@ -279,6 +311,18 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             >
               <span>+ សារថ្មី</span>
             </button>
+
+            {threads.length > 0 && onDeleteAllThreads && (
+              <button
+                type="button"
+                onClick={handleDeleteAllClick}
+                className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md transition-colors shadow-2xs cursor-pointer"
+                title={language === 'kh' ? 'លុបសារទាំងអស់ក្នុងគ្រប់ទំព័រ' : 'Delete all messages in all pages'}
+              >
+                <Trash2 className="w-3 h-3" />
+                <span>{language === 'kh' ? 'លុបទាំងអស់' : 'Clear All'}</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -436,6 +480,18 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 )}
               </button>
 
+              {onBulkDelete && (
+                <button
+                  type="button"
+                  onClick={handleBulkDeleteClick}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-md shadow-2xs transition-colors cursor-pointer"
+                  title={language === 'kh' ? 'លុបសារដែលបានជ្រើសរើស' : 'Delete selected'}
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                  <span>{language === 'kh' ? 'លុប' : 'Delete'}</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => setSelectedThreadIds([])}
@@ -568,12 +624,26 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     <p className={`text-xs truncate ${thread.unreadCount > 0 ? 'text-slate-900 font-medium' : 'text-slate-500'}`}>
                       {thread.lastMessage}
                     </p>
-                    {/* Unread badge */}
-                    {thread.unreadCount > 0 && (
-                      <span className="shrink-0 w-5 h-5 rounded-full bg-blue-600 text-white text-[11px] font-bold flex items-center justify-center tabular-nums">
-                        {thread.unreadCount}
-                      </span>
-                    )}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {thread.unreadCount > 0 && (
+                        <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[11px] font-bold flex items-center justify-center tabular-nums">
+                          {thread.unreadCount}
+                        </span>
+                      )}
+                      {onBulkDelete && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onBulkDelete([thread.id]);
+                          }}
+                          className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
+                          title={language === 'kh' ? 'លុបការជជែកនេះ' : 'Delete conversation'}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

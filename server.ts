@@ -1597,88 +1597,11 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
       }
     }
 
-    // If this is a silent background poll and no real Graph API token returned data, do not overwrite with demo threads
-    if (isBackgroundPoll) {
-      return res.json({
-        success: true,
-        source: 'local_live_poll',
-        data: [],
-      });
-    }
-
-    // 2. Return active Live Messenger conversations for manual sync button
-    const nowIso = new Date().toISOString();
-    const earlierIso = new Date(Date.now() - 120000).toISOString();
-    const syncedConversations = [
-      {
-        id: `conv_live_${pageId}_1`,
-        updated_time: nowIso,
-        unread_count: 1,
-        snippet: `ជំរាបសួរបង! ខ្ញុំឆាតមកផេក ${shortPageName} ចង់សួរថាម៉ូដថ្មីនេះនៅមានស្តុកអត់បង?`,
-        senders: {
-          data: [
-            {
-              name: 'លី ស្រីនិច (Messenger Live)',
-              id: `fb_psid_${pageId}_101`,
-              avatarUrl: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=300&q=80',
-              phone: '012 668 990',
-              province: 'ភ្នំពេញ',
-            },
-          ],
-        },
-        messages: {
-          data: [
-            {
-              id: `m_sync_${Date.now()}_2`,
-              message: `បងបើមានស្តុក ខ្ញុំសុំកុម្ម៉ង់ ១ ឈុត ដឹកមកទួលគោក លេខទូរស័ព្ទ 012 668 990 ណា៎បង!`,
-              created_time: nowIso,
-              from: { name: 'លី ស្រីនិច (Messenger Live)', id: `fb_psid_${pageId}_101` },
-              isFromPage: false,
-            },
-            {
-              id: `m_sync_${Date.now()}_1`,
-              message: `ជំរាបសួរបង! ខ្ញុំឆាតមកផេក ${shortPageName} ចង់សួរថាម៉ូដថ្មីនេះនៅមានស្តុកអត់បង?`,
-              created_time: earlierIso,
-              from: { name: 'លី ស្រីនិច (Messenger Live)', id: `fb_psid_${pageId}_101` },
-              isFromPage: false,
-            },
-          ],
-        },
-      },
-      {
-        id: `conv_live_${pageId}_2`,
-        updated_time: nowIso,
-        unread_count: 1,
-        snippet: `បងសុំលេខកុង ABA ឬ KHQR របស់ផេក ${shortPageName} មកខ្ញុំវេលុយជូនឥឡូវបង`,
-        senders: {
-          data: [
-            {
-              name: 'វណ្ណៈ ពិសិដ្ឋ (Facebook Shopper)',
-              id: `fb_psid_${pageId}_102`,
-              avatarUrl: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=300&q=80',
-              phone: '096 445 778',
-              province: 'សៀមរាប',
-            },
-          ],
-        },
-        messages: {
-          data: [
-            {
-              id: `m_sync_${Date.now()}_3`,
-              message: `បងសុំលេខកុង ABA ឬ KHQR របស់ផេក ${shortPageName} មកខ្ញុំវេលុយជូនឥឡូវបង ហើយផ្ញើតាម J&T មកសៀមរាបផង (096 445 778)`,
-              created_time: nowIso,
-              from: { name: 'វណ្ណៈ ពិសិដ្ឋ (Facebook Shopper)', id: `fb_psid_${pageId}_102` },
-              isFromPage: false,
-            },
-          ],
-        },
-      },
-    ];
-
+    // Do not inject demo conversations when no real Graph API conversations are returned
     return res.json({
       success: true,
-      source: 'live_messenger_sync',
-      data: syncedConversations,
+      source: 'local_live_poll',
+      data: [],
     });
   } catch (err: any) {
     console.error('Error syncing conversations:', err);
@@ -2679,8 +2602,16 @@ const saveOnlineOrders = (ordersList: any[]) => {
   }
 };
 
+let hasPurgedInitialServerThreads = false;
+
 const getOnlineThreads = (): any[] => {
   try {
+    if (!hasPurgedInitialServerThreads) {
+      hasPurgedInitialServerThreads = true;
+      liveIncomingEvents.length = 0;
+      saveOnlineThreads([]);
+      return [];
+    }
     if (fs.existsSync(THREADS_FILE_PATH)) {
       const raw = fs.readFileSync(THREADS_FILE_PATH, 'utf-8');
       const parsed = JSON.parse(raw);
@@ -2790,6 +2721,7 @@ app.post('/api/threads/sync', (req: Request, res: Response) => {
     if (!Array.isArray(threads)) {
       return res.status(400).json({ error: 'threads array is required' });
     }
+    hasPurgedInitialServerThreads = true;
     saveOnlineThreads(threads);
     return res.json({
       success: true,
@@ -2799,6 +2731,21 @@ app.post('/api/threads/sync', (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('[Threads API] Error syncing threads:', err);
     return res.status(500).json({ error: err.message || 'Failed to sync threads' });
+  }
+});
+
+app.delete('/api/threads', (_req: Request, res: Response) => {
+  try {
+    hasPurgedInitialServerThreads = true;
+    liveIncomingEvents.length = 0;
+    saveOnlineThreads([]);
+    return res.json({
+      success: true,
+      message: 'បានលុបសារទាំងអស់ក្នុងប្រអប់សាររួចរាល់',
+      data: [],
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to delete all threads' });
   }
 });
 
