@@ -11,9 +11,15 @@ export interface OfflineEditLogItem {
   synced: boolean;
 }
 
+let sharedDbPromise: Promise<IDBDatabase> | null = null;
+
 function openDesktopDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (sharedDbPromise) {
+    return sharedDbPromise;
+  }
+  sharedDbPromise = new Promise((resolve, reject) => {
     if (typeof window === 'undefined' || !window.indexedDB) {
+      sharedDbPromise = null;
       reject(new Error('IndexedDB not supported'));
       return;
     }
@@ -24,9 +30,23 @@ function openDesktopDb(): Promise<IDBDatabase> {
         db.createObjectStore(STORE_NAME);
       }
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        sharedDbPromise = null;
+      };
+      db.onclose = () => {
+        sharedDbPromise = null;
+      };
+      resolve(db);
+    };
+    request.onerror = () => {
+      sharedDbPromise = null;
+      reject(request.error);
+    };
   });
+  return sharedDbPromise;
 }
 
 export async function saveToDesktopIndexedDB(key: string, value: any): Promise<boolean> {
@@ -37,15 +57,14 @@ export async function saveToDesktopIndexedDB(key: string, value: any): Promise<b
       const store = tx.objectStore(STORE_NAME);
       store.put(value, key);
       tx.oncomplete = () => {
-        db.close();
         resolve(true);
       };
       tx.onerror = () => {
-        db.close();
         resolve(false);
       };
     });
   } catch {
+    sharedDbPromise = null;
     return false;
   }
 }
@@ -58,15 +77,14 @@ export async function loadFromDesktopIndexedDB<T>(key: string): Promise<T | null
       const store = tx.objectStore(STORE_NAME);
       const req = store.get(key);
       req.onsuccess = () => {
-        db.close();
         resolve((req.result as T) ?? null);
       };
       req.onerror = () => {
-        db.close();
         resolve(null);
       };
     });
   } catch {
+    sharedDbPromise = null;
     return null;
   }
 }

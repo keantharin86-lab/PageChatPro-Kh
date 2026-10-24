@@ -26,8 +26,25 @@ SCOPES.forEach((scope) => provider.addScope(scope));
 
 // Flag to indicate if we are in the middle of a sign-in flow.
 let isSigningIn = false;
-// Cache the access token in memory ONLY (never in localStorage or sessionStorage).
-let cachedAccessToken: string | null = null;
+// Cache the access token in memory and sessionStorage so page reloads preserve Google Drive Auto-Backup
+let cachedAccessToken: string | null = (() => {
+  try {
+    return sessionStorage.getItem('pagechat_gdrive_access_token');
+  } catch {
+    return null;
+  }
+})();
+
+const setDriveAccessToken = (token: string | null) => {
+  cachedAccessToken = token;
+  try {
+    if (token) {
+      sessionStorage.setItem('pagechat_gdrive_access_token', token);
+    } else {
+      sessionStorage.removeItem('pagechat_gdrive_access_token');
+    }
+  } catch {}
+};
 
 export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
@@ -38,11 +55,11 @@ export const initAuth = (
       if (cachedAccessToken) {
         if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
       } else if (!isSigningIn) {
-        cachedAccessToken = null;
+        setDriveAccessToken(null);
         if (onAuthFailure) onAuthFailure();
       }
     } else {
-      cachedAccessToken = null;
+      setDriveAccessToken(null);
       if (onAuthFailure) onAuthFailure();
     }
   });
@@ -57,8 +74,8 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
       throw new Error('Failed to get access token from Firebase Auth');
     }
 
-    cachedAccessToken = credential.accessToken;
-    return { user: result.user, accessToken: cachedAccessToken };
+    setDriveAccessToken(credential.accessToken);
+    return { user: result.user, accessToken: credential.accessToken };
   } catch (error: any) {
     console.error('Sign in error:', error);
     throw error;
@@ -77,7 +94,7 @@ export const getCurrentGoogleUser = (): User | null => {
 
 export const logoutGoogle = async () => {
   await auth.signOut();
-  cachedAccessToken = null;
+  setDriveAccessToken(null);
 };
 
 export interface DriveFileItem {
@@ -258,9 +275,111 @@ export const deleteFileFromDrive = async (fileId: string): Promise<void> => {
   );
   if (!res.ok && res.status !== 204) {
     if (res.status === 401) {
-      cachedAccessToken = null;
+      setDriveAccessToken(null);
       throw new Error('NO_ACCESS_TOKEN');
     }
     throw new Error(`Failed to delete file (${res.status})`);
   }
 };
+
+const AUTO_BACKUP_FILE_NAME = 'PageChat_Pro_AutoBackup_Cloud.json';
+const AUTO_BACKUP_FILE_ID_KEY = 'pagechat_gdrive_autobackup_file_id';
+
+export const autoBackupStoreDataToDrive = async (payload: {
+  orders: any[];
+  threads: any[];
+  products: any[];
+  quickReplies: any[];
+  autoReplies?: any[];
+  pages?: any[];
+}): Promise<{ syncedToDrive: boolean; fileName: string; syncedAt: string }> => {
+  const nowIso = new Date().toISOString();
+  const backupData = {
+    app: 'PageChat Pro (Auto Backup Every 1 Min)',
+    exportedAt: nowIso,
+    counts: {
+      orders: payload.orders?.length || 0,
+      threads: payload.threads?.length || 0,
+      products: payload.products?.length || 0,
+      quickReplies: payload.quickReplies?.length || 0,
+    },
+    orders: payload.orders || [],
+    threads: payload.threads || [],
+    products: payload.products || [],
+    quickReplies: payload.quickReplies || [],
+    autoReplies: payload.autoReplies || [],
+    pages: payload.pages || [],
+  };
+
+  const token = await getAccessToken();
+  if (!token) {
+    return {
+      syncedToDrive: false,
+      fileName: AUTO_BACKUP_FILE_NAME,
+      syncedAt: nowIso,
+    };
+  }
+
+  let targetFileId: string | undefined;
+  try {
+    targetFileId = localStorage.getItem(AUTO_BACKUP_FILE_ID_KEY) || undefined;
+  } catch {}
+
+  if (!targetFileId) {
+    try {
+      const existingFiles = await listGoogleDriveFiles(AUTO_BACKUP_FILE_NAME, 'backups');
+      const matched = existingFiles.find((f) => f.name === AUTO_BACKUP_FILE_NAME);
+      if (matched?.id) {
+        targetFileId = matched.id;
+        try {
+          localStorage.setItem(AUTO_BACKUP_FILE_ID_KEY, targetFileId);
+        } catch {}
+      }
+    } catch {}
+  }
+
+  try {
+    const uploaded = await uploadMultipartFileToDrive({
+      name: AUTO_BACKUP_FILE_NAME,
+      content: JSON.stringify(backupData, null, 2),
+      mimeType: 'application/json',
+      existingFileId: targetFileId,
+      description: `PageChat Pro 1-Minute Auto Cloud Backup (${backupData.counts.products} Products, ${backupData.counts.orders} Orders, ${backupData.counts.threads} Chats)`,
+    });
+    if (uploaded?.id) {
+      try {
+        localStorage.setItem(AUTO_BACKUP_FILE_ID_KEY, uploaded.id);
+      } catch {}
+    }
+    return {
+      syncedToDrive: true,
+      fileName: uploaded.name || AUTO_BACKUP_FILE_NAME,
+      syncedAt: nowIso,
+    };
+  } catch (err: any) {
+    // If cached fileId was deleted on Drive (404), clear cached ID and create fresh file
+    if (targetFileId) {
+      try {
+        localStorage.removeItem(AUTO_BACKUP_FILE_ID_KEY);
+      } catch {}
+      const uploadedRetry = await uploadMultipartFileToDrive({
+        name: AUTO_BACKUP_FILE_NAME,
+        content: JSON.stringify(backupData, null, 2),
+        mimeType: 'application/json',
+        description: `PageChat Pro 1-Minute Auto Cloud Backup (${backupData.counts.products} Products, ${backupData.counts.orders} Orders, ${backupData.counts.threads} Chats)`,
+      });
+      if (uploadedRetry?.id) {
+        try {
+          localStorage.setItem(AUTO_BACKUP_FILE_ID_KEY, uploadedRetry.id);
+        } catch {}
+      }
+      return {
+        syncedToDrive: true,
+        fileName: uploadedRetry.name || AUTO_BACKUP_FILE_NAME,
+        syncedAt: nowIso,
+      };
+    }
+    throw err;
+  }
+};
+

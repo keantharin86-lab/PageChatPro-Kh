@@ -49,6 +49,12 @@ interface GoogleDriveViewProps {
   }) => void;
   onSendFileToChat?: (text: string, imageUrl?: string) => void;
   language: 'kh' | 'en';
+  isAutoBackupEnabled?: boolean;
+  onToggleAutoBackup?: () => void;
+  lastAutoBackupTime?: string;
+  isAutoBackingUp?: boolean;
+  autoBackupCountdown?: number;
+  onTriggerAutoBackupNow?: () => void;
 }
 
 interface PendingConfirmAction {
@@ -68,6 +74,12 @@ export const GoogleDriveView: React.FC<GoogleDriveViewProps> = ({
   onRestoreBackupData,
   onSendFileToChat,
   language,
+  isAutoBackupEnabled = true,
+  onToggleAutoBackup,
+  lastAutoBackupTime = '',
+  isAutoBackingUp = false,
+  autoBackupCountdown = 60,
+  onTriggerAutoBackupNow,
 }) => {
   const [needsAuth, setNeedsAuth] = useState<boolean>(true);
   const [user, setUser] = useState<User | null>(null);
@@ -674,6 +686,82 @@ export const GoogleDriveView: React.FC<GoogleDriveViewProps> = ({
           </div>
         ) : (
           <>
+            {/* 1-Minute Auto-Backup Control Bar */}
+            <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-blue-50 border border-emerald-200 rounded-2xl p-4 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start sm:items-center gap-3">
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${
+                  isAutoBackupEnabled
+                    ? 'bg-emerald-600 text-white border-emerald-700 shadow-xs'
+                    : 'bg-slate-200 text-slate-500 border-slate-300'
+                }`}>
+                  <RefreshCw className={`w-5 h-5 ${isAutoBackingUp ? 'animate-spin' : ''}`} />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-sm font-bold text-slate-900">
+                      {language === 'kh'
+                        ? 'ប្រព័ន្ធ Auto-Backup ទុកឯកសារចូល Google Drive Cloud (១នាទី ១ដង)'
+                        : 'Auto-Backup All Store Data to Google Drive Cloud (Every 1 Min)'}
+                    </h3>
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                      isAutoBackupEnabled
+                        ? 'bg-emerald-600 text-white border-emerald-700'
+                        : 'bg-slate-200 text-slate-600 border-slate-300'
+                    }`}>
+                      {isAutoBackupEnabled
+                        ? language === 'kh'
+                          ? `កំពុងដំណើរការ (${autoBackupCountdown}វិនាទី)`
+                          : `ACTIVE (${autoBackupCountdown}s)`
+                        : language === 'kh'
+                        ? 'បានបិទ (OFF)'
+                        : 'PAUSED'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600 mt-0.5">
+                    {language === 'kh'
+                      ? `រក្សាទុកស្វ័យប្រវត្តិរៀងរាល់ ១ នាទីម្តងទៅកាន់ឯកសារ "PageChat_Pro_AutoBackup_Cloud.json" ក្នុង Google Drive របស់អ្នក${lastAutoBackupTime ? ` • រក្សាទុកចុងក្រោយ៖ ${lastAutoBackupTime}` : ''}`
+                      : `Automatically backs up all products, orders & chats every 60 seconds to "PageChat_Pro_AutoBackup_Cloud.json"${lastAutoBackupTime ? ` • Last saved: ${lastAutoBackupTime}` : ''}`}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                {onTriggerAutoBackupNow && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onTriggerAutoBackupNow();
+                      setTimeout(() => fetchDriveData(searchQuery, filterType), 1800);
+                    }}
+                    disabled={isAutoBackingUp}
+                    className="px-3 py-2 rounded-xl text-xs font-bold bg-white hover:bg-emerald-50 text-emerald-700 border border-emerald-200 transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isAutoBackingUp ? 'animate-spin' : ''}`} />
+                    <span>{language === 'kh' ? 'ទុកឥឡូវនេះភ្លាម' : 'Backup Now'}</span>
+                  </button>
+                )}
+                {onToggleAutoBackup && (
+                  <button
+                    type="button"
+                    onClick={onToggleAutoBackup}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-2xs ${
+                      isAutoBackupEnabled
+                        ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                        : 'bg-slate-800 hover:bg-slate-900 text-white'
+                    }`}
+                  >
+                    {isAutoBackupEnabled
+                      ? language === 'kh'
+                        ? 'បិទ Auto (ON)'
+                        : 'Auto ON'
+                      : language === 'kh'
+                      ? 'បើក Auto ១នាទីម្តង'
+                      : 'Turn Auto ON'}
+                  </button>
+                )}
+              </div>
+            </div>
+
             {/* Quick Cloud Actions Cards */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* Card 1: Full Cloud Backup */}

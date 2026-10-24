@@ -63,6 +63,15 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [stockStatusFilter, setStockStatusFilter] = useState<'all' | 'in_stock' | 'low_stock' | 'out_of_stock'>('all');
+  const [lowStockThreshold, setLowStockThreshold] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('pagechat_low_stock_threshold');
+      const parsed = saved ? parseInt(saved, 10) : 5;
+      return !isNaN(parsed) && parsed >= 1 ? parsed : 5;
+    } catch {
+      return 5;
+    }
+  });
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid');
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingProduct, setEditingProduct] = useState<ProductItem | null>(null);
@@ -109,8 +118,8 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
     const matchesCategory = selectedCategory === 'all' || p.category.toLowerCase() === selectedCategory.toLowerCase();
     if (!matchesCategory) return false;
 
-    if (stockStatusFilter === 'in_stock' && p.stock <= 5) return false;
-    if (stockStatusFilter === 'low_stock' && (p.stock <= 0 || p.stock > 5)) return false;
+    if (stockStatusFilter === 'in_stock' && p.stock <= lowStockThreshold) return false;
+    if (stockStatusFilter === 'low_stock' && (p.stock <= 0 || p.stock > lowStockThreshold)) return false;
     if (stockStatusFilter === 'out_of_stock' && p.stock > 0) return false;
 
     if (searchQuery.trim()) {
@@ -128,8 +137,9 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
 
   const totalStockCount = products.reduce((acc, curr) => acc + (curr.stock || 0), 0);
   const totalStockValue = products.reduce((acc, curr) => acc + (curr.stock || 0) * (curr.price || 0), 0);
-  const lowStockCount = products.filter((p) => p.stock > 0 && p.stock <= 5).length;
+  const lowStockCount = products.filter((p) => p.stock > 0 && p.stock <= lowStockThreshold).length;
   const outOfStockCount = products.filter((p) => p.stock <= 0).length;
+  const criticalStockProducts = products.filter((p) => p.stock <= lowStockThreshold);
 
   // Handle Add Product
   const handleCreate = async (e: React.FormEvent) => {
@@ -457,28 +467,74 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
             ${totalStockValue.toFixed(2)}
           </p>
         </div>
-        <div className="p-3 bg-white border border-slate-200 rounded-xl shadow-2xs">
-          <span className="text-[10px] font-semibold uppercase text-slate-400 tracking-wider block">
-            {language === 'kh' ? 'ការជូនដំណឹងស្តុក' : 'Stock Alerts'}
+        <div className={`p-3 border rounded-xl shadow-2xs transition-colors ${
+          criticalStockProducts.length > 0
+            ? 'bg-rose-50 border-rose-300 ring-1 ring-rose-500/20'
+            : 'bg-white border-slate-200'
+        }`}>
+          <span className={`text-[10px] font-semibold uppercase tracking-wider block ${
+            criticalStockProducts.length > 0 ? 'text-rose-700' : 'text-slate-400'
+          }`}>
+            {language === 'kh' ? `ការជូនដំណឹងស្តុកទាប (≤ ${lowStockThreshold})` : `Low Stock Alert (≤ ${lowStockThreshold})`}
           </span>
           <div className="flex items-center gap-2 mt-1 text-xs font-bold">
             {lowStockCount > 0 ? (
-              <span className="text-amber-600 flex items-center gap-1">
-                <AlertCircle className="w-3.5 h-3.5" />
-                <span>{lowStockCount} ជិតអស់</span>
+              <span className="text-rose-600 flex items-center gap-1">
+                <AlertCircle className="w-3.5 h-3.5 text-rose-600 animate-pulse" />
+                <span>{lowStockCount} ជិតអស់ស្តុក</span>
               </span>
-            ) : (
+            ) : outOfStockCount === 0 ? (
               <span className="text-emerald-700 flex items-center gap-1">
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 <span>ស្តុកគ្រប់គ្រាន់</span>
               </span>
-            )}
+            ) : null}
             {outOfStockCount > 0 && (
-              <span className="text-rose-600 text-[11px]">({outOfStockCount} អស់ស្តុក)</span>
+              <span className="text-rose-700 bg-rose-100 px-1.5 py-0.5 rounded text-[11px] border border-rose-200">
+                🚨 {outOfStockCount} អស់ស្តុក
+              </span>
             )}
           </div>
         </div>
       </div>
+
+      {/* Red Low-Stock Warning Banner when any product has stock <= lowStockThreshold */}
+      {criticalStockProducts.length > 0 && (
+        <div className="mx-5 md:mx-6 mt-4 p-3.5 rounded-2xl bg-rose-50 border-2 border-rose-300 text-rose-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+          <div className="flex items-start sm:items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+              <AlertCircle className="w-4.5 h-4.5" />
+            </div>
+            <div>
+              <p className="text-xs font-bold text-rose-900">
+                {language === 'kh'
+                  ? `⚠️ ការព្រមានស្តុកទាប៖ មានទំនិញចំនួន ${criticalStockProducts.length} មុខ ដែលមានស្តុកត្រឹម ឬតិចជាង ${lowStockThreshold} ឯកតា!`
+                  : `⚠️ Low Stock Warning: ${criticalStockProducts.length} product(s) have stock at or below ${lowStockThreshold} items!`}
+              </p>
+              <p className="text-[11px] text-rose-700 mt-0.5 line-clamp-1">
+                {criticalStockProducts.map((p) => `${p.nameKh} (${p.stock})`).join(' • ')}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() =>
+                setStockStatusFilter(stockStatusFilter === 'low_stock' ? 'all' : 'low_stock')
+              }
+              className="px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white transition-colors cursor-pointer shadow-2xs"
+            >
+              {stockStatusFilter === 'low_stock'
+                ? language === 'kh'
+                  ? 'បង្ហាញទំនិញទាំងអស់'
+                  : 'Show All'
+                : language === 'kh'
+                ? 'មើលទំនិញជិតអស់ស្តុក'
+                : 'Filter Low Stock'}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="p-5 md:p-6 space-y-4">
         {/* Search & Filter Toolbar */}
@@ -531,10 +587,32 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
               className="px-2.5 py-1.5 text-xs bg-slate-100 border border-slate-200 rounded-lg font-medium text-slate-700 focus:outline-none cursor-pointer"
             >
               <option value="all">គ្រប់ស្ថានភាពស្តុក</option>
-              <option value="in_stock">នៅសល់ច្រើន (&gt; 5)</option>
-              <option value="low_stock">ជិតអស់ពីស្តុក (1-5)</option>
+              <option value="in_stock">នៅសល់ច្រើន (&gt; {lowStockThreshold})</option>
+              <option value="low_stock">ជិតអស់ពីស្តុក (1-{lowStockThreshold})</option>
               <option value="out_of_stock">អស់ពីស្តុក (0)</option>
             </select>
+
+            {/* Configurable Low Stock Threshold */}
+            <div className="flex items-center gap-1.5 px-2.5 py-1 bg-rose-50 border border-rose-200 rounded-lg shrink-0" title="កំណត់ចំនួនស្តុកទាបដើម្បីលោតពណ៌ក្រហមព្រមាន">
+              <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+              <span className="text-[11px] font-bold text-rose-700 whitespace-nowrap">
+                {language === 'kh' ? 'ព្រមានស្តុក ≤' : 'Alert ≤'}
+              </span>
+              <input
+                type="number"
+                min="1"
+                max="999"
+                value={lowStockThreshold}
+                onChange={(e) => {
+                  const val = Math.max(1, parseInt(e.target.value, 10) || 5);
+                  setLowStockThreshold(val);
+                  try {
+                    localStorage.setItem('pagechat_low_stock_threshold', String(val));
+                  } catch {}
+                }}
+                className="w-12 px-1.5 py-0.5 text-xs font-bold text-rose-700 bg-white border border-rose-300 rounded text-center focus:outline-none focus:ring-1 focus:ring-rose-500"
+              />
+            </div>
           </div>
         </div>
 
@@ -543,10 +621,16 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
         {/* ========================================================= */}
         {viewMode === 'grid' && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {filtered.map((prod) => (
+            {filtered.map((prod) => {
+              const isLowOrOut = prod.stock <= lowStockThreshold;
+              return (
               <div
                 key={prod.id}
-                className="bg-white border border-slate-200 rounded-2xl overflow-hidden hover:shadow-md transition-all flex flex-col justify-between group"
+                className={`rounded-2xl overflow-hidden hover:shadow-md transition-all flex flex-col justify-between group ${
+                  isLowOrOut
+                    ? 'bg-rose-50/50 border-2 border-rose-500 ring-2 ring-rose-500/15 shadow-sm'
+                    : 'bg-white border border-slate-200'
+                }`}
               >
                 <div>
                   {/* Image */}
@@ -586,11 +670,30 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
+                    {/* Low-Stock / Out-of-Stock Red Warning Badge on Image */}
+                    {isLowOrOut && (
+                      <div className="absolute bottom-2.5 left-2.5 right-2.5">
+                        <div className="px-2.5 py-1 bg-rose-600/95 backdrop-blur-xs text-white text-[11px] font-bold rounded-lg shadow-md flex items-center justify-between border border-rose-400">
+                          <span className="flex items-center gap-1">
+                            <AlertCircle className="w-3.5 h-3.5 shrink-0 animate-pulse" />
+                            <span>
+                              {prod.stock <= 0
+                                ? language === 'kh'
+                                  ? '🚨 អស់ពីស្តុកហើយ!'
+                                  : '🚨 OUT OF STOCK!'
+                                : language === 'kh'
+                                ? `🚨 ស្តុកទាបជិតអស់! (នៅសល់ ${prod.stock})`
+                                : `🚨 LOW STOCK! (${prod.stock} left)`}
+                            </span>
+                          </span>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Content */}
                   <div className="p-4">
-                    <h3 className="font-bold text-slate-900 text-sm line-clamp-1 mb-1" title={prod.nameKh}>
+                    <h3 className={`font-bold text-sm line-clamp-1 mb-1 ${isLowOrOut ? 'text-rose-900' : 'text-slate-900'}`} title={prod.nameKh}>
                       {prod.nameKh}
                     </h3>
                     {prod.name && prod.name !== prod.nameKh && (
@@ -695,8 +798,10 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
                             <span 
                               onClick={() => startInlineEditStock(prod)}
                               title="ចុចដើម្បីវាយបញ្ចូលចំនួនស្តុកថ្មី"
-                              className={`text-xs font-bold tabular-nums px-1 cursor-pointer hover:underline ${
-                                prod.stock <= 0 ? 'text-rose-600' : prod.stock <= 5 ? 'text-amber-600' : 'text-slate-800'
+                              className={`text-xs font-bold tabular-nums px-1.5 py-0.5 rounded cursor-pointer hover:underline ${
+                                isLowOrOut
+                                  ? 'bg-rose-600 text-white shadow-2xs'
+                                  : 'text-slate-800'
                               }`}
                             >
                               {prod.stock}
@@ -717,7 +822,9 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
                 </div>
 
                 {/* Card Action Buttons */}
-                <div className="p-3 bg-slate-50 border-t border-slate-100 flex items-center gap-2">
+                <div className={`p-3 border-t flex items-center gap-2 ${
+                  isLowOrOut ? 'bg-rose-100/60 border-rose-200' : 'bg-slate-50 border-slate-100'
+                }`}>
                   <button
                     onClick={() => openEditModal(prod)}
                     className="flex-1 py-1.5 px-2 text-xs font-bold text-slate-700 bg-white hover:bg-blue-50 hover:text-blue-600 hover:border-blue-300 border border-slate-200 rounded-lg transition-colors flex items-center justify-center gap-1 cursor-pointer"
@@ -736,7 +843,8 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
                   )}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
@@ -760,8 +868,17 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
-                  {filtered.map((prod) => (
-                    <tr key={prod.id} className="hover:bg-slate-50/60 transition-colors group">
+                  {filtered.map((prod) => {
+                    const isLowOrOut = prod.stock <= lowStockThreshold;
+                    return (
+                    <tr
+                      key={prod.id}
+                      className={`transition-colors group ${
+                        isLowOrOut
+                          ? 'bg-rose-50/80 hover:bg-rose-100/70 text-rose-950'
+                          : 'hover:bg-slate-50/60'
+                      }`}
+                    >
                       {/* Image */}
                       <td className="py-2.5 px-4">
                         <img
@@ -770,7 +887,9 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
                           onError={(e) => {
                             (e.target as HTMLImageElement).src = 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=600&q=80';
                           }}
-                          className="w-10 h-10 rounded-lg object-cover border border-slate-200"
+                          className={`w-10 h-10 rounded-lg object-cover border ${
+                            isLowOrOut ? 'border-rose-400 ring-2 ring-rose-500/20' : 'border-slate-200'
+                          }`}
                         />
                       </td>
 
@@ -781,7 +900,7 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
 
                       {/* Name */}
                       <td className="py-2.5 px-4">
-                        <p className="font-bold text-slate-900">{prod.nameKh}</p>
+                        <p className={`font-bold ${isLowOrOut ? 'text-rose-900' : 'text-slate-900'}`}>{prod.nameKh}</p>
                         {prod.name && prod.name !== prod.nameKh && (
                           <p className="text-[11px] text-slate-400">{prod.name}</p>
                         )}
@@ -813,8 +932,8 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
                           >
                             -
                           </button>
-                          <span className={`font-bold tabular-nums px-1 min-w-6 text-center ${
-                            prod.stock <= 0 ? 'text-rose-600' : prod.stock <= 5 ? 'text-amber-600' : 'text-slate-800'
+                          <span className={`font-bold tabular-nums px-1.5 py-0.5 rounded min-w-6 text-center ${
+                            isLowOrOut ? 'bg-rose-600 text-white' : 'text-slate-800'
                           }`}>
                             {prod.stock}
                           </span>
@@ -832,12 +951,12 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
                       {/* Stock status badge */}
                       <td className="py-2.5 px-4">
                         {prod.stock <= 0 ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-50 text-rose-700 border border-rose-200">
-                            អស់ពីស្តុក
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-600 text-white shadow-2xs">
+                            🚨 អស់ពីស្តុក (0)
                           </span>
-                        ) : prod.stock <= 5 ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
-                            ជិតអស់ ({prod.stock})
+                        ) : prod.stock <= lowStockThreshold ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-600 text-white shadow-2xs">
+                            🚨 ស្តុកទាបជិតអស់ ({prod.stock})
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
@@ -875,7 +994,8 @@ export const ProductsCatalogView: React.FC<ProductsCatalogViewProps> = ({
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

@@ -383,6 +383,7 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                     <div className="flex-1 p-3 space-y-2.5 overflow-y-auto">
                       {activeThread.messages.map((m) => {
                         const isCustomer = m.sender === 'customer';
+                        const orderAtt = m.attachments?.find((a) => a.type === 'order_invoice');
                         return (
                           <div
                             key={m.id}
@@ -397,8 +398,31 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                                   : 'bg-blue-600 text-white rounded-tr-xs'
                               }`}
                             >
-                              <p className=" break-words">{m.text}</p>
+                              <p className="break-words">{m.text}</p>
                             </div>
+                            {orderAtt && orderAtt.data && (
+                              <div className="mt-1.5 w-60 bg-white border-2 border-emerald-500 rounded-xl p-2.5 shadow-xs text-slate-900">
+                                <div className="flex items-center justify-between border-b border-slate-100 pb-1.5 mb-1.5">
+                                  <span className="text-[11px] font-bold text-emerald-700">
+                                    បុង #{orderAtt.data.orderNumber}
+                                  </span>
+                                  <span className="text-xs font-extrabold text-slate-900 tabular-nums">
+                                    ${Number(orderAtt.data.total || 0).toFixed(2)}
+                                  </span>
+                                </div>
+                                <p className="text-[10px] text-slate-600 truncate mb-2">
+                                  {orderAtt.data.customerName} · {orderAtt.data.customerPhone}
+                                </p>
+                                <button
+                                  type="button"
+                                  onClick={() => onViewOrderInvoice(orderAtt.data.id)}
+                                  className="w-full py-1.5 rounded-lg bg-slate-900 text-white text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                                >
+                                  <Receipt className="w-3 h-3" />
+                                  <span>{language === 'kh' ? 'មើលវិក្កយបត្រក្នុងការបញ្ជាទិញ' : 'View Order Invoice'}</span>
+                                </button>
+                              </div>
+                            )}
                             <span className="text-[9px] text-slate-400 mt-0.5 px-1 tabular-nums">
                               {m.timestamp}
                             </span>
@@ -412,6 +436,15 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                       onSubmit={handleSendQuickMobileMessage}
                       className="p-2 bg-white border-t border-slate-200 flex items-center gap-1.5 shrink-0"
                     >
+                      <button
+                        type="button"
+                        onClick={onOpenCreateOrder}
+                        className="px-2.5 py-2 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold flex items-center gap-1 shrink-0 cursor-pointer"
+                        title="បង្កើតការបញ្ជាទិញ (Create Order)"
+                      >
+                        <ShoppingBag className="w-3.5 h-3.5" />
+                        <span>{language === 'kh' ? '+ បុង' : '+ Order'}</span>
+                      </button>
                       <input
                         type="text"
                         value={quickMsgText}

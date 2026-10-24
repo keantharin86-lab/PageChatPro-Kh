@@ -27,6 +27,7 @@ import {
   loadFromDesktopIndexedDB,
   exportDesktopDatabaseFile,
 } from './utils/offlineDb';
+import { autoBackupStoreDataToDrive } from './services/googleDriveAuth';
 import { Menu, WifiOff, Edit3, Save, Smartphone, User, X } from 'lucide-react';
 import { 
   INITIAL_PAGES, 
@@ -82,20 +83,30 @@ const addDeletedProductId = (id: string) => {
 };
 
 const saveProductsToLocalStorageSafely = (list: ProductItem[]) => {
+  const payload = JSON.stringify(list);
   try {
-    localStorage.setItem('pagechat_products', JSON.stringify(list));
+    localStorage.setItem('pagechat_products', payload);
+    localStorage.setItem('pagechat_products_backup_v2', payload);
   } catch {
     try {
-      // Fallback if base64 image exceeds localStorage quota: keep metadata in localStorage while full image is saved in IndexedDB & server
-      const compact = list.map((p) => ({
-        ...p,
-        imageUrl:
-          p.imageUrl && p.imageUrl.length > 250000
-            ? p.imageUrl.slice(0, 250000)
-            : p.imageUrl,
-      }));
-      localStorage.setItem('pagechat_products', JSON.stringify(compact));
-    } catch {}
+      // Evict bulky threads cache from localStorage (threads are already in IndexedDB & Facebook Graph API) so products ALWAYS have space
+      localStorage.removeItem('pagechat_threads');
+      localStorage.setItem('pagechat_products', payload);
+      localStorage.setItem('pagechat_products_backup_v2', payload);
+    } catch {
+      try {
+        const compact = list.map((p) => ({
+          ...p,
+          imageUrl:
+            p.imageUrl && p.imageUrl.length > 120000
+              ? p.imageUrl.slice(0, 120000)
+              : p.imageUrl,
+        }));
+        const compactStr = JSON.stringify(compact);
+        localStorage.setItem('pagechat_products', compactStr);
+        localStorage.setItem('pagechat_products_backup_v2', compactStr);
+      } catch {}
+    }
   }
 };
 
@@ -126,6 +137,53 @@ const mergeProductCatalogs = (
         ...p,
         ...existing,
         imageUrl: richerImage,
+      });
+    }
+  }
+
+  return Array.from(map.values());
+};
+
+const saveOrdersToLocalStorageSafely = (list: Order[]) => {
+  const payload = JSON.stringify(list);
+  try {
+    localStorage.setItem('pagechat_orders', payload);
+    localStorage.setItem('pagechat_orders_backup_v2', payload);
+  } catch {
+    try {
+      localStorage.removeItem('pagechat_threads');
+      localStorage.setItem('pagechat_orders', payload);
+      localStorage.setItem('pagechat_orders_backup_v2', payload);
+    } catch {}
+  }
+};
+
+const mergeOrdersCatalog = (primaryList: Order[], secondaryList: Order[]): Order[] => {
+  const map = new Map<string, Order>();
+  const numberToId = new Map<string, string>();
+
+  for (const o of primaryList) {
+    if (!o || !o.id) continue;
+    map.set(o.id, o);
+    if (o.orderNumber) numberToId.set(o.orderNumber, o.id);
+  }
+
+  for (const o of secondaryList) {
+    if (!o || !o.id) continue;
+    const matchedId = map.has(o.id)
+      ? o.id
+      : o.orderNumber && numberToId.has(o.orderNumber)
+      ? numberToId.get(o.orderNumber)!
+      : null;
+
+    if (!matchedId) {
+      map.set(o.id, o);
+      if (o.orderNumber) numberToId.set(o.orderNumber, o.id);
+    } else {
+      const existing = map.get(matchedId)!;
+      map.set(matchedId, {
+        ...o,
+        ...existing,
       });
     }
   }
@@ -348,18 +406,18 @@ export default function App() {
 
   const [products, setProducts] = useState<ProductItem[]>(() => {
     try {
-      const saved = localStorage.getItem('pagechat_products');
-      if (saved) {
-        const parsed = JSON.parse(saved);
+      const deletedIds = getDeletedProductIds();
+      const savedPrimary = localStorage.getItem('pagechat_products');
+      const savedBackup = localStorage.getItem('pagechat_products_backup_v2');
+      const rawToUse =
+        savedPrimary && savedPrimary !== '[]' ? savedPrimary : savedBackup || savedPrimary;
+      if (rawToUse) {
+        const parsed = JSON.parse(rawToUse);
         if (Array.isArray(parsed)) {
           const filtered = parsed.filter(
-            (p: ProductItem) => p && p.id && !REMOVED_DEMO_PRODUCT_IDS.has(p.id)
+            (p: ProductItem) =>
+              p && p.id && !REMOVED_DEMO_PRODUCT_IDS.has(p.id) && !deletedIds.has(p.id)
           );
-          if (filtered.length !== parsed.length) {
-            try {
-              localStorage.setItem('pagechat_products', JSON.stringify(filtered));
-            } catch {}
-          }
           return filtered;
         }
       }
@@ -401,9 +459,12 @@ export default function App() {
 
   const [orders, setOrders] = useState<Order[]>(() => {
     try {
-      const saved = localStorage.getItem('pagechat_orders');
-      if (saved) {
-        const parsed = JSON.parse(saved);
+      const savedPrimary = localStorage.getItem('pagechat_orders');
+      const savedBackup = localStorage.getItem('pagechat_orders_backup_v2');
+      const rawToUse =
+        savedPrimary && savedPrimary !== '[]' ? savedPrimary : savedBackup || savedPrimary;
+      if (rawToUse) {
+        const parsed = JSON.parse(rawToUse);
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
     } catch (e) {
@@ -415,6 +476,7 @@ export default function App() {
   const [activeView, setActiveView] = useState<ActiveViewType>('inbox');
   const [language, setLanguage] = useState<'kh' | 'en'>('kh');
   const [isOrderModalOpen, setIsOrderModalOpen] = useState(false);
+  const [initialOrderModalProduct, setInitialOrderModalProduct] = useState<ProductItem | null>(null);
   const [activeInvoiceOrderId, setActiveInvoiceOrderId] = useState<string | null>(null);
   const [isInvoiceEditMode, setIsInvoiceEditMode] = useState<boolean>(false);
   const [isConnectPageModalOpen, setIsConnectPageModalOpen] = useState(false);
@@ -515,30 +577,32 @@ export default function App() {
     }
   };
 
-  // Helper to safely persist threads to IndexedDB, localStorage, and backend server
+  // Helper to safely persist threads to IndexedDB, localStorage, and backend server without starving localStorage quota for products
   const persistThreadsToStorageAndServer = (nextThreads: ChatThread[]) => {
     saveToDesktopIndexedDB('pagechat_threads', nextThreads);
     markLocalComputerSave();
 
     try {
-      localStorage.setItem('pagechat_threads', JSON.stringify(nextThreads));
-    } catch (quotaErr) {
-      try {
-        const lightweight = nextThreads.map((t) => ({
-          ...t,
-          messages: t.messages.map((m) => ({
-            ...m,
-            attachments: m.attachments?.map((att) => {
-              if (att.type === 'image' && att.data?.url && att.data.url.length > 180000) {
-                return att;
-              }
-              return att;
-            }),
-          })),
-        }));
-        localStorage.setItem('pagechat_threads', JSON.stringify(lightweight));
-      } catch {}
-    }
+      const compactThreads = nextThreads.slice(0, 40).map((t) => ({
+        ...t,
+        messages: (t.messages || []).slice(-25).map((m) => ({
+          ...m,
+          attachments: m.attachments?.map((att) => {
+            if ((att.type === 'image' || att.type === 'audio') && att.data?.url && att.data.url.startsWith('data:') && att.data.url.length > 25000) {
+              return {
+                ...att,
+                data: {
+                  ...att.data,
+                  url: '',
+                },
+              };
+            }
+            return att;
+          }),
+        })),
+      }));
+      localStorage.setItem('pagechat_threads', JSON.stringify(compactThreads));
+    } catch {}
 
     if (isOnlineRef.current) {
       fetch('/api/threads/sync', {
@@ -606,11 +670,110 @@ export default function App() {
   }, [pages]);
 
   useEffect(() => {
-    // Only write products to IndexedDB & localStorage after initial hydration or when products array is non-empty
-    if (!isHydrated && products.length === 0) return;
+    // Never overwrite IndexedDB or localStorage with an empty products array from an effect
+    if (products.length === 0) return;
     saveToDesktopIndexedDB('pagechat_products', products);
     saveProductsToLocalStorageSafely(products);
-  }, [products, isHydrated]);
+  }, [products]);
+
+  // Global 1-Minute Auto-Backup to Google Drive Cloud & Local Snapshot
+  const [isDriveAutoBackupEnabled, setIsDriveAutoBackupEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('pagechat_drive_autobackup_1min');
+      if (saved !== null) return saved === 'true';
+    } catch {}
+    return true;
+  });
+  const [lastDriveAutoBackupTime, setLastDriveAutoBackupTime] = useState<string>('');
+  const [isDriveAutoBackingUp, setIsDriveAutoBackingUp] = useState<boolean>(false);
+  const [driveAutoBackupCountdown, setDriveAutoBackupCountdown] = useState<number>(60);
+
+  const ordersRef = useRef<Order[]>(orders);
+  ordersRef.current = orders;
+  const pagesRef = useRef<PageAccount[]>(pages);
+  pagesRef.current = pages;
+
+  const handleToggleDriveAutoBackup = () => {
+    setIsDriveAutoBackupEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('pagechat_drive_autobackup_1min', String(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const runCloudAutoBackupNow = async () => {
+    if (isDriveAutoBackingUp) return;
+    setIsDriveAutoBackingUp(true);
+    try {
+      const currentProducts = productsRef.current;
+      const currentOrders = ordersRef.current;
+      const currentThreads = threadsRef.current;
+      const currentQuickReplies = quickRepliesRef.current;
+      const currentAutoReplies = autoRepliesRef.current;
+      const currentPages = pagesRef.current;
+
+      // 1. Always save local & server snapshot
+      if (currentProducts.length > 0) {
+        saveToDesktopIndexedDB('pagechat_products', currentProducts);
+        saveProductsToLocalStorageSafely(currentProducts);
+        fetch('/api/products/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            products: currentProducts,
+            deletedIds: Array.from(getDeletedProductIds()),
+          }),
+        }).catch(() => {});
+      }
+
+      saveToDesktopIndexedDB('pagechat_cloud_autobackup_snapshot', {
+        savedAt: new Date().toISOString(),
+        products: currentProducts,
+        orders: currentOrders,
+        threads: currentThreads,
+        quickReplies: currentQuickReplies,
+        autoReplies: currentAutoReplies,
+        pages: currentPages,
+      });
+
+      // 2. Sync to Google Drive Cloud if signed in
+      await autoBackupStoreDataToDrive({
+        orders: currentOrders,
+        threads: currentThreads,
+        products: currentProducts,
+        quickReplies: currentQuickReplies,
+        autoReplies: currentAutoReplies,
+        pages: currentPages,
+      }).catch(() => null);
+
+      const timeFormatted = new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+      setLastDriveAutoBackupTime(timeFormatted);
+      setLastSavedTime(timeFormatted);
+    } finally {
+      setIsDriveAutoBackingUp(false);
+      setDriveAutoBackupCountdown(60);
+    }
+  };
+
+  useEffect(() => {
+    if (!isDriveAutoBackupEnabled) return;
+    const interval = setInterval(() => {
+      setDriveAutoBackupCountdown((prev) => {
+        if (prev <= 1) {
+          runCloudAutoBackupNow();
+          return 60;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isDriveAutoBackupEnabled]);
 
   useEffect(() => {
     saveToDesktopIndexedDB('pagechat_quick_replies', quickReplies);
@@ -627,11 +790,11 @@ export default function App() {
   }, [selectedThreadId]);
 
   useEffect(() => {
+    if (orders.length === 0) return;
+    ordersRef.current = orders;
     saveToDesktopIndexedDB('pagechat_orders', orders);
+    saveOrdersToLocalStorageSafely(orders);
     markLocalComputerSave();
-    try {
-      localStorage.setItem('pagechat_orders', JSON.stringify(orders));
-    } catch {}
     if (isOnlineRef.current) {
       fetch('/api/orders', {
         method: 'POST',
@@ -649,11 +812,12 @@ export default function App() {
   useEffect(() => {
     let isMounted = true;
     const loadIndexedDbState = async () => {
-      const [idbThreads, idbOrders, idbProducts, idbPages] = await Promise.all([
+      const [idbThreads, idbOrders, idbProducts, idbPages, idbCloudSnapshot] = await Promise.all([
         loadFromDesktopIndexedDB<ChatThread[]>('pagechat_threads'),
         loadFromDesktopIndexedDB<Order[]>('pagechat_orders'),
         loadFromDesktopIndexedDB<ProductItem[]>('pagechat_products'),
         loadFromDesktopIndexedDB<PageAccount[]>('pagechat_pro_pages'),
+        loadFromDesktopIndexedDB<any>('pagechat_cloud_autobackup_snapshot'),
       ]);
       if (!isMounted) return;
 
@@ -699,12 +863,26 @@ export default function App() {
         setThreads((prev) => ensureAllPagesHaveLiveThreads(prev, resolvedPages));
       }
 
-      if (Array.isArray(idbOrders) && idbOrders.length > 0) {
-        setOrders(idbOrders);
+      const combinedIdbOrders: Order[] = [
+        ...(Array.isArray(idbOrders) ? idbOrders : []),
+        ...(Array.isArray(idbCloudSnapshot?.orders) ? idbCloudSnapshot.orders : []),
+      ];
+      if (combinedIdbOrders.length > 0) {
+        setOrders((prev) => {
+          const merged = mergeOrdersCatalog(prev, combinedIdbOrders);
+          ordersRef.current = merged;
+          saveOrdersToLocalStorageSafely(merged);
+          saveToDesktopIndexedDB('pagechat_orders', merged);
+          return merged;
+        });
       }
-      if (Array.isArray(idbProducts) && idbProducts.length > 0) {
+      const combinedIdbProducts: ProductItem[] = [
+        ...(Array.isArray(idbProducts) ? idbProducts : []),
+        ...(Array.isArray(idbCloudSnapshot?.products) ? idbCloudSnapshot.products : []),
+      ];
+      if (combinedIdbProducts.length > 0) {
         setProducts((prev) => {
-          const merged = mergeProductCatalogs(prev, idbProducts);
+          const merged = mergeProductCatalogs(prev, combinedIdbProducts);
           productsRef.current = merged;
           saveProductsToLocalStorageSafely(merged);
           saveToDesktopIndexedDB('pagechat_products', merged);
@@ -712,7 +890,10 @@ export default function App() {
             fetch('/api/products/sync', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ products: merged }),
+              body: JSON.stringify({
+                products: merged,
+                deletedIds: Array.from(getDeletedProductIds()),
+              }),
             }).catch(() => {});
           }
           return merged;
@@ -760,19 +941,22 @@ export default function App() {
           }
         }
 
-        let loadedOrders: Order[] | null = null;
         if (ordRes && isMounted) {
           const ordJson = await ordRes.json();
           if (ordJson.success && Array.isArray(ordJson.data) && ordJson.data.length > 0) {
-            loadedOrders = ordJson.data;
             setOrders((prev) => {
-              const mergedMap = new Map<string, Order>();
-              [...ordJson.data, ...prev].forEach((o: Order) => {
-                if (o && o.id && !mergedMap.has(o.id)) {
-                  mergedMap.set(o.id, o);
-                }
-              });
-              return Array.from(mergedMap.values());
+              const merged = mergeOrdersCatalog(prev, ordJson.data);
+              ordersRef.current = merged;
+              saveOrdersToLocalStorageSafely(merged);
+              saveToDesktopIndexedDB('pagechat_orders', merged);
+              if (merged.length > ordJson.data.length) {
+                fetch('/api/orders', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ orders: merged }),
+                }).catch(() => {});
+              }
+              return merged;
             });
           }
         }
@@ -1636,6 +1820,19 @@ export default function App() {
         if (!isMounted) return;
         try {
           const parsed = JSON.parse(event.data);
+          if (parsed && parsed.type === 'orders_updated' && Array.isArray(parsed.orders)) {
+            setOrders((prev) => {
+              const merged = mergeOrdersCatalog(parsed.orders, prev);
+              if (merged.length === prev.length && JSON.stringify(merged) === JSON.stringify(prev)) {
+                return prev;
+              }
+              ordersRef.current = merged;
+              saveOrdersToLocalStorageSafely(merged);
+              saveToDesktopIndexedDB('pagechat_orders', merged);
+              return merged;
+            });
+            return;
+          }
           if (parsed && parsed.id && parsed.text) {
             ingestIncomingWebhookEvents([parsed]);
           }
@@ -1667,12 +1864,36 @@ export default function App() {
       }
     };
 
+    const pollServerOrders = async () => {
+      try {
+        const res = await fetch('/api/orders');
+        const ordJson = await res.json();
+        if (!isMounted) return;
+        if (ordJson && ordJson.success && Array.isArray(ordJson.data) && ordJson.data.length > 0) {
+          setOrders((prev) => {
+            const merged = mergeOrdersCatalog(ordJson.data, prev);
+            if (merged.length === prev.length && JSON.stringify(merged) === JSON.stringify(prev)) {
+              return prev;
+            }
+            ordersRef.current = merged;
+            saveOrdersToLocalStorageSafely(merged);
+            saveToDesktopIndexedDB('pagechat_orders', merged);
+            return merged;
+          });
+        }
+      } catch {
+        // silent order sync error
+      }
+    };
+
     pollLiveEvents();
     const pollInterval = setInterval(pollLiveEvents, 2500);
+    const ordersPollInterval = setInterval(pollServerOrders, 3000);
 
     return () => {
       isMounted = false;
       clearInterval(pollInterval);
+      clearInterval(ordersPollInterval);
       if (eventSource) {
         eventSource.close();
       }
@@ -2249,9 +2470,18 @@ export default function App() {
   };
 
   const handleSaveOrder = async (newOrder: Order) => {
-    const updatedOrders = [newOrder, ...orders];
+    const updatedOrders = mergeOrdersCatalog([newOrder], ordersRef.current);
+    ordersRef.current = updatedOrders;
     setOrders(updatedOrders);
+    saveOrdersToLocalStorageSafely(updatedOrders);
+    saveToDesktopIndexedDB('pagechat_orders', updatedOrders);
     soundNotifier.playOrderSuccess();
+
+    fetch('/api/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order: newOrder, orders: updatedOrders }),
+    }).catch(() => {});
 
     const now = new Date();
     const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
@@ -2360,7 +2590,7 @@ export default function App() {
 
     if (newOrder.items && newOrder.items.length > 0) {
       newOrder.items.forEach((item) => {
-        const targetProd = products.find((p) => p.id === item.productId);
+        const targetProd = productsRef.current.find((p) => p.id === item.productId);
         if (targetProd) {
           const newStock = Math.max(0, (targetProd.stock || 0) - item.quantity);
           handleEditProduct({ ...targetProd, stock: newStock });
@@ -2370,15 +2600,33 @@ export default function App() {
   };
 
   const handleUpdateOrderStatus = (orderId: string, status: Order['status']) => {
-    setOrders((prev) =>
-      prev.map((o) => (o.id === orderId ? { ...o, status } : o))
-    );
+    setOrders((prev) => {
+      const next = prev.map((o) => (o.id === orderId ? { ...o, status } : o));
+      ordersRef.current = next;
+      saveOrdersToLocalStorageSafely(next);
+      saveToDesktopIndexedDB('pagechat_orders', next);
+      fetch(`/api/orders/${encodeURIComponent(orderId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+      }).catch(() => {});
+      return next;
+    });
   };
 
   const handleUpdateOrder = (updatedOrder: Order) => {
-    setOrders((prev) =>
-      prev.map((o) => (o.id === updatedOrder.id ? updatedOrder : o))
-    );
+    setOrders((prev) => {
+      const next = prev.map((o) => (o.id === updatedOrder.id ? updatedOrder : o));
+      ordersRef.current = next;
+      saveOrdersToLocalStorageSafely(next);
+      saveToDesktopIndexedDB('pagechat_orders', next);
+      fetch(`/api/orders/${encodeURIComponent(updatedOrder.id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedOrder),
+      }).catch(() => {});
+      return next;
+    });
     setThreads((prev) =>
       prev.map((t) => {
         const isMatched = t.orderIds?.includes(updatedOrder.id) || t.id === updatedOrder.threadId;
@@ -2824,7 +3072,20 @@ export default function App() {
               onImportLocalFile={(loaded) => {
                 if (Array.isArray(loaded.orders) && loaded.orders.length > 0) setOrders(loaded.orders);
                 if (Array.isArray(loaded.threads) && loaded.threads.length > 0) setThreads(loaded.threads);
-                if (Array.isArray(loaded.products) && loaded.products.length > 0) setProducts(loaded.products);
+                if (Array.isArray(loaded.products) && loaded.products.length > 0) {
+                  setProducts((prev) => {
+                    const merged = mergeProductCatalogs(loaded.products, prev);
+                    productsRef.current = merged;
+                    saveProductsToLocalStorageSafely(merged);
+                    saveToDesktopIndexedDB('pagechat_products', merged);
+                    fetch('/api/products/sync', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ products: merged }),
+                    }).catch(() => {});
+                    return merged;
+                  });
+                }
                 if (Array.isArray(loaded.pages) && loaded.pages.length > 0) setPages(loaded.pages);
                 if (Array.isArray(loaded.quickReplies) && loaded.quickReplies.length > 0)
                   setQuickReplies(loaded.quickReplies);
@@ -2919,7 +3180,11 @@ export default function App() {
                   products={products}
                   orders={orders}
                   onSendMessage={handleSendMessage}
-                  onOpenCreateOrder={() => setIsOrderModalOpen(true)}
+                  onOpenCreateOrder={(initialProd) => {
+                    setInitialOrderModalProduct(initialProd || null);
+                    setIsOrderModalOpen(true);
+                  }}
+                  onSaveOrder={handleSaveOrder}
                   onViewOrderInvoice={(orderId) => {
                     setIsInvoiceEditMode(false);
                     setActiveInvoiceOrderId(orderId);
@@ -2965,7 +3230,10 @@ export default function App() {
                   customer={selectedThread.customer}
                   orders={orders}
                   onUpdateCustomer={handleUpdateCustomer}
-                  onOpenCreateOrder={() => setIsOrderModalOpen(true)}
+                  onOpenCreateOrder={() => {
+                    setInitialOrderModalProduct(null);
+                    setIsOrderModalOpen(true);
+                  }}
                   onViewOrderInvoice={(orderId) => setActiveInvoiceOrderId(orderId)}
                   onExportConversationPdf={() => setIsConversationPdfModalOpen(true)}
                   language={language}
@@ -3001,6 +3269,12 @@ export default function App() {
             threads={threads}
             products={products}
             quickReplies={quickReplies}
+            isAutoBackupEnabled={isDriveAutoBackupEnabled}
+            onToggleAutoBackup={handleToggleDriveAutoBackup}
+            lastAutoBackupTime={lastDriveAutoBackupTime}
+            isAutoBackingUp={isDriveAutoBackingUp}
+            autoBackupCountdown={driveAutoBackupCountdown}
+            onTriggerAutoBackupNow={runCloudAutoBackupNow}
             onRestoreBackupData={(backup) => {
               if (backup.orders && backup.orders.length > 0) {
                 setOrders(backup.orders);
@@ -3009,7 +3283,18 @@ export default function App() {
                 setThreads(backup.threads);
               }
               if (backup.products && backup.products.length > 0) {
-                setProducts(backup.products);
+                setProducts((prev) => {
+                  const merged = mergeProductCatalogs(backup.products!, prev);
+                  productsRef.current = merged;
+                  saveProductsToLocalStorageSafely(merged);
+                  saveToDesktopIndexedDB('pagechat_products', merged);
+                  fetch('/api/products/sync', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ products: merged }),
+                  }).catch(() => {});
+                  return merged;
+                });
               }
               if (backup.quickReplies && backup.quickReplies.length > 0) {
                 setQuickReplies(backup.quickReplies);
@@ -3097,6 +3382,10 @@ export default function App() {
               setActiveInvoiceOrderId(id);
             }}
             onUpdateStatus={handleUpdateOrderStatus}
+            onOpenCreateOrder={() => {
+              setInitialOrderModalProduct(null);
+              setIsOrderModalOpen(true);
+            }}
             language={language}
           />
         )}
@@ -3151,7 +3440,10 @@ export default function App() {
               setSelectedThreadId(id);
             }}
             selectedThreadId={selectedThreadId}
-            onOpenCreateOrder={() => setIsOrderModalOpen(true)}
+            onOpenCreateOrder={() => {
+              setInitialOrderModalProduct(null);
+              setIsOrderModalOpen(true);
+            }}
             onViewOrderInvoice={(id) => {
               setIsInvoiceEditMode(false);
               setActiveInvoiceOrderId(id);
@@ -3182,14 +3474,34 @@ export default function App() {
       </div>
 
       {/* Order Creation Modal */}
-      {isOrderModalOpen && selectedThread && (
+      {isOrderModalOpen && (
         <OrderModal
           isOpen={isOrderModalOpen}
-          onClose={() => setIsOrderModalOpen(false)}
-          customer={selectedThread.customer}
+          onClose={() => {
+            setIsOrderModalOpen(false);
+            setInitialOrderModalProduct(null);
+          }}
+          customer={
+            selectedThread?.customer || {
+              id: `cust_${Date.now()}`,
+              name: 'អតិថិជនទូទៅ (Walk-in / Chat)',
+              avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80',
+              platform: selectedPage.platform || 'messenger',
+              phone: '012 889 977',
+              province: 'ភ្នំពេញ',
+              address: 'ភ្នំពេញ',
+              tags: ['អតិថិជនថ្មី'],
+              totalOrders: 0,
+              totalSpent: 0,
+              notes: '',
+              createdAt: new Date().toISOString().split('T')[0],
+            }
+          }
           products={products}
           pageId={selectedPage.id}
-          threadId={selectedThread.id}
+          threadId={selectedThread?.id || ''}
+          threadMessages={selectedThread?.messages}
+          initialProduct={initialOrderModalProduct}
           onSaveOrder={handleSaveOrder}
           language={language}
         />

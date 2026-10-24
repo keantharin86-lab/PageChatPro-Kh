@@ -11,7 +11,7 @@ import {
   Upload,
   RotateCcw
 } from 'lucide-react';
-import { Customer, ProductItem, Order, OrderLineItem } from '../types';
+import { Customer, ProductItem, Order, OrderLineItem, ChatMessage } from '../types';
 import { useKhqrConfig, DEFAULT_KHQR_IMAGE, FALLBACK_KHQR_IMAGE } from '../utils/khqrSettings';
 
 interface OrderModalProps {
@@ -21,6 +21,8 @@ interface OrderModalProps {
   products: ProductItem[];
   pageId: string;
   threadId: string;
+  threadMessages?: ChatMessage[];
+  initialProduct?: ProductItem | null;
   onSaveOrder: (newOrder: Order) => void;
   language: 'kh' | 'en';
 }
@@ -32,24 +34,29 @@ export const OrderModal: React.FC<OrderModalProps> = ({
   products,
   pageId,
   threadId,
+  threadMessages = [],
+  initialProduct = null,
   onSaveOrder,
   language,
 }) => {
-  const [customerName, setCustomerName] = useState(customer.name);
-  const [customerPhone, setCustomerPhone] = useState(customer.phone);
-  const [customerProvince, setCustomerProvince] = useState(customer.province);
-  const [customerAddress, setCustomerAddress] = useState(customer.address);
+  const [customerName, setCustomerName] = useState(customer.name || 'អតិថិជន (Messenger)');
+  const [customerPhone, setCustomerPhone] = useState(customer.phone || '');
+  const [customerProvince, setCustomerProvince] = useState(customer.province || 'ភ្នំពេញ');
+  const [customerAddress, setCustomerAddress] = useState(customer.address || '');
 
   // Line items
-  const [items, setItems] = useState<OrderLineItem[]>([
-    {
-      productId: products[0]?.id || 'custom_1',
-      name: products[0]?.nameKh || 'រ៉ូបហូលផាមួងខ្មែរម៉ូដសម័យ',
-      quantity: 1,
-      price: products[0]?.price || 38.00,
-      subtotal: products[0]?.price || 38.00,
-    },
-  ]);
+  const [items, setItems] = useState<OrderLineItem[]>(() => {
+    const firstProd = initialProduct || products[0];
+    return [
+      {
+        productId: firstProd?.id || 'custom_1',
+        name: firstProd?.nameKh || 'ទំនិញកម្ម៉ង់ក្នុងឆាត',
+        quantity: 1,
+        price: firstProd?.price ?? 25.0,
+        subtotal: firstProd?.price ?? 25.0,
+      },
+    ];
+  });
 
   const [deliveryProvider, setDeliveryProvider] = useState<'jt' | 'virak_buntham' | 'capitol' | 'grab'>('jt');
   const [deliveryFee, setDeliveryFee] = useState<number>(customer.province === 'ភ្នំពេញ' ? 1.50 : 2.00);
@@ -60,6 +67,54 @@ export const OrderModal: React.FC<OrderModalProps> = ({
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   });
+
+  // Auto-sync customer info, detected phone/address from chat messages, and initialProduct whenever modal opens
+  React.useEffect(() => {
+    if (!isOpen) return;
+
+    let detectedPhone = customer.phone || '';
+    let detectedAddress = customer.address || '';
+    for (const msg of threadMessages) {
+      if (msg.sender !== 'customer') continue;
+      const phoneRegex = /(?:\+?855|0)[1-9]\d{7,8}|\b0\d{2}[- ]?\d{3}[- ]?\d{3,4}\b/;
+      const match = (msg.text || '').match(phoneRegex);
+      if (match && (!detectedPhone || detectedPhone === 'មិនទាន់មានលេខទូរស័ព្ទ')) {
+        detectedPhone = match[0];
+      }
+      const txt = msg.text || '';
+      if (
+        (txt.includes('ផ្ទះ') ||
+          txt.includes('ផ្លូវ') ||
+          txt.includes('ភ្នំពេញ') ||
+          txt.includes('សៀមរាប') ||
+          txt.includes('បាត់ដំបង') ||
+          txt.includes('ទួលគោក') ||
+          txt.includes('សែនសុខ') ||
+          txt.includes('ចំការមន')) &&
+        (!detectedAddress || detectedAddress === 'ភ្នំពេញ (Messenger Live)')
+      ) {
+        detectedAddress = txt.length > 70 ? `${txt.slice(0, 68)}...` : txt;
+      }
+    }
+
+    setCustomerName(customer.name || 'អតិថិជន (Messenger)');
+    setCustomerPhone(detectedPhone || '012 889 977');
+    setCustomerProvince(customer.province || 'ភ្នំពេញ');
+    setCustomerAddress(detectedAddress || customer.province || 'ភ្នំពេញ');
+
+    const targetProd = initialProduct || products[0];
+    if (targetProd) {
+      setItems([
+        {
+          productId: targetProd.id,
+          name: targetProd.nameKh || targetProd.name,
+          quantity: 1,
+          price: targetProd.price,
+          subtotal: targetProd.price,
+        },
+      ]);
+    }
+  }, [isOpen, customer.id, initialProduct?.id]);
 
   // KHQR config & upload
   const { config: khqrConfig, updateKhqr, resetKhqr } = useKhqrConfig();
@@ -121,13 +176,18 @@ export const OrderModal: React.FC<OrderModalProps> = ({
     const now = new Date();
     const formattedDate = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
 
+    const safeName = customerName.trim() || customer.name || 'អតិថិជន (Messenger)';
+    const safePhone = customerPhone.trim() || customer.phone || 'មិនទាន់បញ្ជាក់';
+    const safeProvince = customerProvince.trim() || customer.province || 'ភ្នំពេញ';
+    const safeAddress = customerAddress.trim() || customer.address || safeProvince;
+
     const newOrder: Order = {
-      id: `ord_${Date.now()}`,
+      id: `ord_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       orderNumber,
-      customerName,
-      customerPhone,
-      customerAddress,
-      customerProvince,
+      customerName: safeName,
+      customerPhone: safePhone,
+      customerAddress: safeAddress,
+      customerProvince: safeProvince,
       items,
       subtotal,
       deliveryFee,
@@ -164,7 +224,7 @@ export const OrderModal: React.FC<OrderModalProps> = ({
                 {language === 'kh' ? 'បង្កើតការកុម្ម៉ង់ថ្មី (New Order)' : 'Create New Order'}
               </h3>
               <p className="text-xs text-slate-500">
-                {language === 'kh' ? 'បញ្ចូលមុខទំនិញ គណនាថ្លៃដើម និងសេវាដឹក' : 'Add items, delivery, and calculate slip'}
+                {language === 'kh' ? 'រក្សាទុកក្នុងការបញ្ជាទិញ (Orders) ទាំងលើទូរស័ព្ទ និងកុំព្យូទ័រដោយស្វ័យប្រវត្តិ' : 'Saves to Orders across both mobile and desktop'}
               </p>
             </div>
           </div>
@@ -190,9 +250,9 @@ export const OrderModal: React.FC<OrderModalProps> = ({
                 </label>
                 <input
                   type="text"
-                  required
                   value={customerName}
                   onChange={(e) => setCustomerName(e.target.value)}
+                  placeholder="ឈ្មោះអតិថិជន..."
                   className="w-full px-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500 font-medium"
                 />
               </div>
@@ -202,9 +262,9 @@ export const OrderModal: React.FC<OrderModalProps> = ({
                 </label>
                 <input
                   type="text"
-                  required
                   value={customerPhone}
                   onChange={(e) => setCustomerPhone(e.target.value)}
+                  placeholder="012 xxx xxx"
                   className="w-full px-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500 font-mono font-medium"
                 />
               </div>
@@ -214,9 +274,9 @@ export const OrderModal: React.FC<OrderModalProps> = ({
                 </label>
                 <input
                   type="text"
-                  required
                   value={customerProvince}
                   onChange={(e) => setCustomerProvince(e.target.value)}
+                  placeholder="ភ្នំពេញ / ខេត្ត..."
                   className="w-full px-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500 font-medium"
                 />
               </div>
@@ -241,7 +301,6 @@ export const OrderModal: React.FC<OrderModalProps> = ({
                 </label>
                 <input
                   type="text"
-                  required
                   value={customerAddress}
                   onChange={(e) => setCustomerAddress(e.target.value)}
                   placeholder="ផ្ទះលេខ ផ្លូវ..."

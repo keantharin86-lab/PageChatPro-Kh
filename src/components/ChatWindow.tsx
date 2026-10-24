@@ -122,7 +122,8 @@ interface ChatWindowProps {
   products: ProductItem[];
   orders: Order[];
   onSendMessage: (text: string, attachments?: any[]) => void;
-  onOpenCreateOrder: () => void;
+  onOpenCreateOrder: (initialProduct?: ProductItem) => void;
+  onSaveOrder?: (newOrder: Order) => void;
   onViewOrderInvoice: (orderId: string) => void;
   onEditOrderInvoice?: (orderId: string) => void;
   onEditMessage?: (threadId: string, messageId: string, newText: string) => void;
@@ -149,6 +150,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   orders,
   onSendMessage,
   onOpenCreateOrder,
+  onSaveOrder,
   onViewOrderInvoice,
   onEditOrderInvoice,
   onEditMessage,
@@ -173,6 +175,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const [aiSuggestedText, setAiSuggestedText] = useState<string | null>(null);
   const [showKhqrModal, setShowKhqrModal] = useState(false);
   const [khqrAmount, setKhqrAmount] = useState<string>('15.00');
+  const [recordKhqrAsOrder, setRecordKhqrAsOrder] = useState<boolean>(true);
   const [copiedAccount, setCopiedAccount] = useState(false);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState('');
@@ -1013,8 +1016,60 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     setShowProductPicker(false);
   };
 
-  // Generate & Send Real Bakong KHQR Card
+  // Instant 1-Click Order Creation from a Product or KHQR in Chat -> Saves directly into Orders (ការបញ្ជាទិញ) on both Mobile & Desktop
+  const handleQuickCreateOrderFromProduct = (product: ProductItem) => {
+    setShowProductPicker(false);
+    if (!onSaveOrder) {
+      onOpenCreateOrder(product);
+      return;
+    }
+    const now = new Date();
+    const orderDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const formattedTime = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
+    const orderNumber = `ORD-${Math.floor(1000 + Math.random() * 9000)}`;
+    const resolvedPhone = detectedLeadInfo?.phone || thread.customer.phone || '012 889 977';
+    const resolvedAddress = detectedLeadInfo?.address || thread.customer.address || thread.customer.province || 'ភ្នំពេញ';
+    const deliveryFee = (thread.customer.province || 'ភ្នំពេញ') === 'ភ្នំពេញ' ? 1.5 : 2.0;
+    const subtotal = Number(product.price || 0);
+    const total = subtotal + deliveryFee;
+
+    const newOrder: Order = {
+      id: `ord_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      orderNumber,
+      customerName: thread.customer.name || 'អតិថិជន (Messenger)',
+      customerPhone: resolvedPhone,
+      customerAddress: resolvedAddress,
+      customerProvince: thread.customer.province || 'ភ្នំពេញ',
+      items: [
+        {
+          productId: product.id,
+          name: product.nameKh || product.name,
+          quantity: 1,
+          price: subtotal,
+          subtotal,
+        },
+      ],
+      subtotal,
+      deliveryFee,
+      discount: 0,
+      total,
+      totalKhr: Math.round(total * 4100),
+      paymentMethod: 'aba_khqr',
+      deliveryProvider: 'jt',
+      status: 'pending',
+      createdAt: `${orderDate}, ${formattedTime}`,
+      orderDate,
+      pageId: selectedPage?.id || thread.pageId,
+      threadId: thread.id,
+      notes: 'កម្ម៉ង់ផ្ទាល់ពីប្រអប់សារឆាត',
+    };
+
+    onSaveOrder(newOrder);
+  };
+
+  // Generate & Send Real Bakong KHQR Card (and optionally attach directly to Orders list)
   const handleSendKhqrCard = (amount: number) => {
+    const billNumber = `BILL-${Date.now().toString().slice(-6)}`;
     const khqrData = {
       merchantName: khqrConfig.merchantName || 'Sok Chea CHHAI',
       accountNumber: khqrConfig.accountNumber || '005 452 334',
@@ -1023,7 +1078,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       amountKhr: Math.round(amount * 4100),
       currency: 'USD',
       qrImage: khqrConfig.qrImage || DEFAULT_KHQR_IMAGE,
-      billNumber: `BILL-${Date.now().toString().slice(-6)}`,
+      billNumber,
       createdAt: new Date().toLocaleTimeString('km-KH'),
     };
 
@@ -1033,6 +1088,51 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         data: khqrData,
       },
     ]);
+
+    if (recordKhqrAsOrder && onSaveOrder) {
+      const now = new Date();
+      const orderDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      const formattedTime = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
+      const matchedProduct = products.find((p) => Math.abs(p.price - amount) < 0.01) || products[0];
+      const itemName = matchedProduct
+        ? matchedProduct.nameKh
+        : `វិក្កយបត្រទូទាត់ KHQR (${billNumber})`;
+      const resolvedPhone = detectedLeadInfo?.phone || thread.customer.phone || '012 889 977';
+      const resolvedAddress = detectedLeadInfo?.address || thread.customer.address || thread.customer.province || 'ភ្នំពេញ';
+
+      const newOrder: Order = {
+        id: `ord_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        orderNumber: `ORD-${Math.floor(1000 + Math.random() * 9000)}`,
+        customerName: thread.customer.name || 'អតិថិជន (Messenger)',
+        customerPhone: resolvedPhone,
+        customerAddress: resolvedAddress,
+        customerProvince: thread.customer.province || 'ភ្នំពេញ',
+        items: [
+          {
+            productId: matchedProduct?.id || 'khqr_bill',
+            name: itemName,
+            quantity: 1,
+            price: amount,
+            subtotal: amount,
+          },
+        ],
+        subtotal: amount,
+        deliveryFee: 0,
+        discount: 0,
+        total: amount,
+        totalKhr: Math.round(amount * 4100),
+        paymentMethod: 'aba_khqr',
+        deliveryProvider: 'jt',
+        status: 'pending',
+        createdAt: `${orderDate}, ${formattedTime}`,
+        orderDate,
+        pageId: selectedPage?.id || thread.pageId,
+        threadId: thread.id,
+        notes: `ផ្ញើវិក្កយបត្រ KHQR ពីប្រអប់សារ (${billNumber})`,
+      };
+      onSaveOrder(newOrder);
+    }
+
     setShowKhqrModal(false);
   };
 
@@ -1273,7 +1373,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
           {/* Fast Create Order Button */}
           <button
-            onClick={onOpenCreateOrder}
+            onClick={() => onOpenCreateOrder()}
             className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors shadow-2xs cursor-pointer"
             title="បង្កើតការបញ្ជាទិញរហ័ស"
           >
@@ -1646,24 +1746,45 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                         return (
                           <div
                             key={idx}
-                            className="p-2.5 rounded-xl bg-white text-slate-900 border border-slate-200 flex items-center gap-3"
+                            className="p-2.5 rounded-xl bg-white text-slate-900 border border-slate-200 flex flex-col gap-2"
                           >
-                            <img
-                              src={prod.imageUrl}
-                              alt={prod.nameKh}
-                              referrerPolicy="no-referrer"
-                              className="w-12 h-12 rounded-lg object-cover border border-slate-100"
-                            />
-                            <div className="min-w-0 flex-1">
-                              <p className="text-xs font-semibold truncate">
-                                {chatSearchQuery.trim()
-                                  ? renderHighlightedText(prod.nameKh, chatSearchQuery, isCurrentMatch)
-                                  : prod.nameKh}
-                              </p>
-                              <p className="text-[11px] text-blue-600 font-bold tabular-nums">
-                                ${prod.price.toFixed(2)} ({prod.priceKhr.toLocaleString()} រៀល)
-                              </p>
-                              <p className="text-[10px] text-slate-500">ស្តុកនៅសល់: {prod.stock}</p>
+                            <div className="flex items-center gap-3">
+                              <img
+                                src={prod.imageUrl}
+                                alt={prod.nameKh}
+                                referrerPolicy="no-referrer"
+                                className="w-12 h-12 rounded-lg object-cover border border-slate-100 shrink-0"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-xs font-semibold truncate">
+                                  {chatSearchQuery.trim()
+                                    ? renderHighlightedText(prod.nameKh, chatSearchQuery, isCurrentMatch)
+                                    : prod.nameKh}
+                                </p>
+                                <p className="text-[11px] text-blue-600 font-bold tabular-nums">
+                                  ${prod.price.toFixed(2)} ({prod.priceKhr.toLocaleString()} រៀល)
+                                </p>
+                                <p className="text-[10px] text-slate-500">ស្តុកនៅសល់: {prod.stock}</p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5 pt-1.5 border-t border-slate-100">
+                              <button
+                                type="button"
+                                onClick={() => handleQuickCreateOrderFromProduct(prod)}
+                                className="flex-1 py-1 px-2 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-lg flex items-center justify-center gap-1 transition-colors cursor-pointer shadow-2xs"
+                                title="កត់ចូលក្នុងបញ្ជីការបញ្ជាទិញ (Orders) ភ្លាមៗ"
+                              >
+                                <ShoppingBag className="w-3 h-3" />
+                                <span>{language === 'kh' ? '+ ដាក់ចូលការបញ្ជាទិញភ្លាម' : '+ Add to Orders'}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onOpenCreateOrder(prod)}
+                                className="py-1 px-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold rounded-lg transition-colors cursor-pointer"
+                                title="បើកផ្ទាំងកែប្រែបុង"
+                              >
+                                {language === 'kh' ? 'កែបុង' : 'Customize'}
+                              </button>
                             </div>
                           </div>
                         );
@@ -2122,13 +2243,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           </div>
           <div className="overflow-y-auto space-y-1.5 flex-1 pr-1">
             {products.map((p) => (
-              <button
+              <div
                 key={p.id}
-                type="button"
-                onClick={() => handleSendProduct(p)}
-                className="w-full p-2 flex items-center justify-between rounded-xl hover:bg-slate-50 transition-colors border border-transparent hover:border-slate-200 text-left"
+                className="w-full p-2 flex items-center justify-between gap-2 rounded-xl hover:bg-slate-50 transition-colors border border-slate-100 hover:border-slate-200 text-left"
               >
-                <div className="flex items-center gap-2.5 min-w-0">
+                <div
+                  onClick={() => handleSendProduct(p)}
+                  className="flex items-center gap-2.5 min-w-0 flex-1 cursor-pointer"
+                >
                   <img
                     src={p.imageUrl}
                     alt={p.nameKh}
@@ -2137,14 +2259,31 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   />
                   <div className="min-w-0">
                     <p className="text-xs font-semibold text-slate-800 truncate">{p.nameKh}</p>
-                    <p className="text-[10px] text-slate-500">ស្តុកនៅសល់ {p.stock} | {p.category}</p>
+                    <p className="text-[10px] text-slate-500">
+                      ${p.price.toFixed(2)} • ស្តុកនៅសល់ {p.stock}
+                    </p>
                   </div>
                 </div>
-                <div className="text-right shrink-0">
-                  <p className="text-xs font-bold text-blue-600 tabular-nums">${p.price.toFixed(2)}</p>
-                  <span className="text-[10px] text-emerald-600 font-medium">ចុចផ្ញើ ↗</span>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleSendProduct(p)}
+                    className="px-2.5 py-1 text-[11px] font-semibold bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg cursor-pointer transition-colors"
+                    title="ផ្ញើរូបទំនិញចូលឆាត"
+                  >
+                    ផ្ញើរូប ↗
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleQuickCreateOrderFromProduct(p)}
+                    className="px-2.5 py-1 text-[11px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                    title="ចេញវិក្កយបត្រ និងកត់ចូលក្នុងបញ្ជីការបញ្ជាទិញ (Orders) ភ្លាមៗ"
+                  >
+                    <ShoppingBag className="w-3 h-3" />
+                    <span>+ កម្ម៉ង់ភ្លាម</span>
+                  </button>
                 </div>
-              </button>
+              </div>
             ))}
           </div>
         </div>
@@ -2376,6 +2515,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               </p>
             </div>
 
+            {/* Auto-record KHQR Bill into Orders List checkbox */}
+            <label className="flex items-center gap-2 p-2.5 mb-3 bg-emerald-50 border border-emerald-200 rounded-xl cursor-pointer">
+              <input
+                type="checkbox"
+                checked={recordKhqrAsOrder}
+                onChange={(e) => setRecordKhqrAsOrder(e.target.checked)}
+                className="rounded text-emerald-600 focus:ring-emerald-500"
+              />
+              <span className="text-[11px] font-semibold text-emerald-900">
+                កត់ចូលក្នុងបញ្ជី «ការបញ្ជាទិញ (Orders)» ស្វ័យប្រវត្តិ (ទាំងទូរស័ព្ទ & កុំព្យូទ័រ)
+              </span>
+            </label>
+
             {/* Action Buttons */}
             <div className="flex items-center gap-2">
               <button
@@ -2420,7 +2572,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           <div className="flex items-center gap-1 shrink-0">
             <button
               type="button"
-              onClick={onOpenCreateOrder}
+              onClick={() => onOpenCreateOrder()}
               className="flex items-center gap-1 px-2.5 py-1 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors shadow-2xs cursor-pointer"
               title="បង្កើតការបញ្ជាទិញដោយស្វ័យប្រវត្ត"
             >
@@ -2544,7 +2696,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         </button>
         <button
           type="button"
-          onClick={onOpenCreateOrder}
+          onClick={() => onOpenCreateOrder()}
           className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-white hover:bg-slate-100 text-emerald-700 border border-emerald-200 rounded-md whitespace-nowrap transition-colors shrink-0 shadow-2xs cursor-pointer"
         >
           <ShoppingBag className="w-3 h-3 text-emerald-600" />

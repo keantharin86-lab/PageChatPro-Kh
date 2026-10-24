@@ -20,6 +20,7 @@ interface OrdersListViewProps {
   onViewInvoice: (orderId: string) => void;
   onEditInvoice?: (orderId: string) => void;
   onUpdateStatus: (orderId: string, status: OrderStatus) => void;
+  onOpenCreateOrder?: () => void;
   language: 'kh' | 'en';
 }
 
@@ -28,6 +29,7 @@ export const OrdersListView: React.FC<OrdersListViewProps> = ({
   onViewInvoice,
   onEditInvoice,
   onUpdateStatus,
+  onOpenCreateOrder,
   language,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -74,15 +76,30 @@ export const OrdersListView: React.FC<OrdersListViewProps> = ({
       <div className="p-6 bg-white border-b border-slate-200 shrink-0">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
           <div>
-            <h2 className="text-lg font-bold text-slate-900">
-              {language === 'kh' ? 'ការបញ្ជាទិញ (Orders Management)' : 'Orders Management'}
-            </h2>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-lg font-bold text-slate-900">
+                {language === 'kh' ? 'ការបញ្ជាទិញ (Orders Management)' : 'Orders Management'}
+              </h2>
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                {language === 'kh' ? 'Sync ជាប់គ្នាទាំងទូរស័ព្ទ & កុំព្យូទ័រ' : 'Synced Mobile & Desktop'}
+              </span>
+            </div>
             <p className="text-xs text-slate-500 mt-0.5">
               {language === 'kh'
-                ? 'តាមដានស្ថានភាពកុម្ម៉ង់ទំនិញដែលបានបង្កើតចេញពីការជជែក និងបោះពុម្ពវិក្កយបត្រ'
-                : 'Track customer orders created from chat threads'}
+                ? 'រាល់ការបង្កើតការបញ្ជាទិញចេញពីប្រអប់សារ ទំនិញ ឬ KHQR ត្រូវបានភ្ជាប់មកទីនេះដោយស្វ័យប្រវត្តិទាំងលើទូរស័ព្ទ និងកុំព្យូទ័រ'
+                : 'Every order created from chat, product cards, or KHQR is automatically attached here across phone and computer'}
             </p>
           </div>
+          {onOpenCreateOrder && (
+            <button
+              type="button"
+              onClick={onOpenCreateOrder}
+              className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-2 shadow-xs transition-colors cursor-pointer shrink-0"
+            >
+              <ShoppingBag className="w-4 h-4" />
+              <span>{language === 'kh' ? '+ បង្កើតការបញ្ជាទិញថ្មី' : '+ Create New Order'}</span>
+            </button>
+          )}
         </div>
 
         {/* 4-Item Metric Summary Strip */}

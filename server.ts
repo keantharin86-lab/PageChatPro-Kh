@@ -2413,12 +2413,15 @@ app.delete('/api/products/:id', (req: Request, res: Response) => {
 
 app.post('/api/products/sync', (req: Request, res: Response) => {
   try {
-    const { products } = req.body;
+    const { products, deletedIds } = req.body;
     if (!Array.isArray(products)) {
       return res.status(400).json({ error: 'products array is required' });
     }
-    const sanitized = products
-      .filter((p: any) => p && p.id && !REMOVED_DEMO_PRODUCT_IDS.has(p.id))
+    const deletedSet = new Set<string>(Array.isArray(deletedIds) ? deletedIds : []);
+    const existingServerProducts = getOnlineProducts();
+
+    const sanitizedIncoming = products
+      .filter((p: any) => p && p.id && !REMOVED_DEMO_PRODUCT_IDS.has(p.id) && !deletedSet.has(String(p.id)))
       .map((p: any) => {
         const price = typeof p.price === 'number' ? p.price : parseFloat(p.price) || 0;
         const priceKhr = p.priceKhr || Math.round(price * 4100);
@@ -2440,11 +2443,38 @@ app.post('/api/products/sync', (req: Request, res: Response) => {
           updatedAt: p.updatedAt || new Date().toISOString(),
         };
       });
-    saveOnlineProducts(sanitized);
+
+    // Merge incoming products with existing server products so an empty or partial client sync never wipes out server products
+    const mergedMap = new Map<string, any>();
+    for (const item of sanitizedIncoming) {
+      mergedMap.set(String(item.id), item);
+    }
+    for (const srvItem of existingServerProducts) {
+      if (!srvItem || !srvItem.id) continue;
+      const sid = String(srvItem.id);
+      if (REMOVED_DEMO_PRODUCT_IDS.has(sid) || deletedSet.has(sid)) continue;
+      if (!mergedMap.has(sid)) {
+        mergedMap.set(sid, srvItem);
+      } else {
+        const clientItem = mergedMap.get(sid);
+        const richerImage =
+          srvItem.imageUrl && (!clientItem.imageUrl || srvItem.imageUrl.length > clientItem.imageUrl.length)
+            ? srvItem.imageUrl
+            : clientItem.imageUrl;
+        mergedMap.set(sid, {
+          ...srvItem,
+          ...clientItem,
+          imageUrl: richerImage,
+        });
+      }
+    }
+
+    const finalProducts = Array.from(mergedMap.values());
+    saveOnlineProducts(finalProducts);
     return res.json({
       success: true,
-      data: sanitized,
-      count: sanitized.length,
+      data: finalProducts,
+      count: finalProducts.length,
       syncedAt: new Date().toISOString(),
     });
   } catch (err: any) {
@@ -2656,6 +2686,47 @@ const saveOnlineThreads = (threadsList: any[]) => {
   }
 };
 
+const mergeServerOrders = (incoming: any[], existing: any[]): any[] => {
+  const map = new Map<string, any>();
+  for (const ord of existing) {
+    if (!ord || !ord.id) continue;
+    map.set(ord.id, ord);
+  }
+  for (const ord of incoming) {
+    if (!ord || !ord.id) continue;
+    const prev = map.get(ord.id);
+    if (!prev) {
+      map.set(ord.id, ord);
+    } else {
+      map.set(ord.id, {
+        ...prev,
+        ...ord,
+        updatedAt: ord.updatedAt || prev.updatedAt || Date.now(),
+      });
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => {
+    const timeA = Number(String(a.id || '').replace(/\D+/g, '')) || 0;
+    const timeB = Number(String(b.id || '').replace(/\D+/g, '')) || 0;
+    return timeB - timeA;
+  });
+};
+
+const broadcastOrdersUpdate = (ordersList: any[]) => {
+  const ssePayload = `data: ${JSON.stringify({
+    type: 'orders_updated',
+    orders: ordersList,
+    timestamp: Date.now(),
+  })}\n\n`;
+  for (const clientRes of webhookSseClients) {
+    try {
+      clientRes.write(ssePayload);
+    } catch {
+      webhookSseClients.delete(clientRes);
+    }
+  }
+};
+
 app.get('/api/orders', (req: Request, res: Response) => {
   const orders = getOnlineOrders();
   return res.json({
@@ -2669,11 +2740,14 @@ app.get('/api/orders', (req: Request, res: Response) => {
 app.post('/api/orders', (req: Request, res: Response) => {
   try {
     const body = req.body;
+    const existing = getOnlineOrders();
     if (Array.isArray(body.orders)) {
-      saveOnlineOrders(body.orders);
+      const merged = mergeServerOrders(body.orders, existing);
+      saveOnlineOrders(merged);
+      broadcastOrdersUpdate(merged);
       return res.json({
         success: true,
-        data: body.orders,
+        data: merged,
         syncedAt: new Date().toISOString(),
       });
     }
@@ -2681,17 +2755,23 @@ app.post('/api/orders', (req: Request, res: Response) => {
     if (!newOrder || !newOrder.id) {
       return res.status(400).json({ error: 'Order data is required' });
     }
-    const current = getOnlineOrders();
+    const current = [...existing];
     const idx = current.findIndex((o) => o.id === newOrder.id || o.orderNumber === newOrder.orderNumber);
+    const enrichedOrder = {
+      ...newOrder,
+      updatedAt: Date.now(),
+    };
     if (idx >= 0) {
-      current[idx] = newOrder;
+      current[idx] = { ...current[idx], ...enrichedOrder };
     } else {
-      current.unshift(newOrder);
+      current.unshift(enrichedOrder);
     }
     saveOnlineOrders(current);
+    broadcastOrdersUpdate(current);
     return res.status(201).json({
       success: true,
-      order: newOrder,
+      order: enrichedOrder,
+      data: current,
       syncedAt: new Date().toISOString(),
     });
   } catch (err: any) {
@@ -2707,14 +2787,16 @@ app.put('/api/orders/:id', (req: Request, res: Response) => {
     const current = getOnlineOrders();
     const idx = current.findIndex((o) => o.id === orderId);
     if (idx >= 0) {
-      current[idx] = { ...current[idx], ...updates };
+      current[idx] = { ...current[idx], ...updates, updatedAt: Date.now() };
     } else {
-      current.unshift({ ...updates, id: orderId });
+      current.unshift({ ...updates, id: orderId, updatedAt: Date.now() });
     }
     saveOnlineOrders(current);
+    broadcastOrdersUpdate(current);
     return res.json({
       success: true,
       order: current[idx >= 0 ? idx : 0],
+      data: current,
       syncedAt: new Date().toISOString(),
     });
   } catch (err: any) {
