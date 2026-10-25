@@ -368,13 +368,32 @@ export const PagesManagementView: React.FC<PagesManagementViewProps> = ({
                     <span className="font-semibold text-slate-700">{page.activeStaff}</span>
                   </div>
 
+                  {/* 1-Click Pull All Customer Messages from Meta Page Access Token & Go Live */}
+                  <button
+                    type="button"
+                    onClick={() => onSelectPage(page)}
+                    className="mb-3 w-full py-2 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-xs font-bold shadow-2xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                    title={
+                      language === 'kh'
+                        ? 'ចុចដើម្បីយកសារអតិថិជនទាំងអស់ចូលក្នុងផេកដែលបានបញ្ចូល Page Access Token (Meta) និង Live ជាមួយសារថ្មីៗ'
+                        : 'Pull all customer messages from Page Access Token (Meta) into this Page & go Live with new messages'
+                    }
+                  >
+                    <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">
+                      {language === 'kh'
+                        ? '📥 សារអតិថិជនទាំងអស់ (Meta Token) & Live សារថ្មីៗ'
+                        : 'All Customer Messages (Meta Token) & Live'}
+                    </span>
+                  </button>
+
                   {/* Actions Bar */}
                   <div className="mt-auto pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5">
                       <button
                         onClick={() => onEditPage(page)}
                         className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-                        title={language === 'kh' ? 'កែប្រែព័ត៌មានទំព័រ' : 'Edit Page'}
+                        title={language === 'kh' ? 'កែប្រែព័ត៌មានទំព័រ / បញ្ចូល Token' : 'Edit Page / Enter Token'}
                       >
                         <Edit3 className="w-4 h-4" />
                       </button>

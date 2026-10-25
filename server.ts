@@ -3,6 +3,8 @@ import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
+import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
@@ -310,21 +312,46 @@ export function extractExistingVoiceTranscript(rawText?: string, hintText?: stri
   return '';
 }
 
+export function isSyntheticDemoToneWav(buffer: Buffer, mimeType: string): boolean {
+  if (!buffer || buffer.length < 44) return false;
+  if (!mimeType.includes('wav') && buffer.toString('ascii', 0, 4) !== 'RIFF') return false;
+  try {
+    const sampleRate = buffer.readUInt32LE(24);
+    const numChannels = buffer.readUInt16LE(22);
+    // Synthetic WAV tones created by createPlayableWavDataUrl use 8000Hz mono PCM
+    return sampleRate === 8000 && numChannels === 1;
+  } catch {
+    return false;
+  }
+}
+
 export async function transcribeCustomerVoiceMessage({
   audioUrl,
   audioDataUrl,
   hintText,
+  browserTranscript,
+  forceRetranscribe = false,
   pageId,
   products,
 }: {
   audioUrl?: string;
   audioDataUrl?: string;
   hintText?: string;
+  browserTranscript?: string;
+  forceRetranscribe?: boolean;
   pageId?: string;
   products?: any[];
 }): Promise<string> {
   const existing = extractExistingVoiceTranscript(undefined, hintText);
-  if (existing) {
+  const cleanBrowserTranscript = (browserTranscript || '').trim();
+
+  // 1. If live microphone SpeechRecognition already captured the exact spoken words, return immediately (0ms)
+  if (cleanBrowserTranscript) {
+    return cleanBrowserTranscript;
+  }
+
+  // 2. If an existing transcript is already available and not forcing re-transcription, return immediately (0ms)
+  if (!forceRetranscribe && existing && !/^សារសម្លេង\s*\(/.test(existing)) {
     return existing;
   }
 
@@ -333,19 +360,22 @@ export async function transcribeCustomerVoiceMessage({
     Array.isArray(products) && products.length > 0 ? products : getOnlineProducts();
   const firstProd = activeProducts[0];
   const defaultKhmerTranscript = firstProd
-    ? `សួស្តីបង! "${firstProd.nameKh || firstProd.name}" នេះតម្លៃប៉ុន្មានដែរ ហើយមានក្នុងស្តុកអត់បង?`
+    ? `សួស្តីបង! "${firstProd.nameKh || firstProd.name}" នេះតម្លៃប៉ុន្មានដែរ ($${Number(firstProd.price || 0).toFixed(2)}) ហើយមានក្នុងស្តុកអត់បង?`
     : 'សួស្តីបង! ម៉ូដនេះតម្លៃប៉ុន្មានដែរ ហើយមានក្នុងស្តុកអត់បង?';
 
   if (ai && (audioDataUrl || audioUrl)) {
     try {
       let base64Audio = '';
-      let mimeType = 'audio/mp4';
+      let mimeType = 'audio/webm';
+      let isSyntheticTone = false;
 
       const localParsed = extractBinaryFromDataUrlOrMediaPath(audioDataUrl || audioUrl || '');
       if (localParsed) {
-        // Synthetic WAV tones created by createPlayableWavDataUrl are ~48KB with 8000Hz mono PCM; only send real recorded audio or non-synthetic clips
-        base64Audio = localParsed.buffer.toString('base64');
-        mimeType = localParsed.mimeType.startsWith('audio/') ? localParsed.mimeType : 'audio/webm';
+        isSyntheticTone = isSyntheticDemoToneWav(localParsed.buffer, localParsed.mimeType);
+        if (!isSyntheticTone) {
+          base64Audio = localParsed.buffer.toString('base64');
+          mimeType = localParsed.mimeType.startsWith('audio/') ? localParsed.mimeType : 'audio/webm';
+        }
       } else if (
         typeof audioUrl === 'string' &&
         (audioUrl.startsWith('http') || audioUrl.startsWith('/api/facebook/media-proxy'))
@@ -360,64 +390,111 @@ export async function transcribeCustomerVoiceMessage({
         }
         if (targetFetchUrl.startsWith('http')) {
           const token = getBestRealTokenForPage(proxyPageId);
-          let audioRes = await fetch(targetFetchUrl, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-              Accept: 'audio/*,video/*,*/*;q=0.8',
-            },
-          });
-          if (!audioRes.ok && token && token.startsWith('EAA') && !token.startsWith('EAABw_')) {
-            const sep = targetFetchUrl.includes('?') ? '&' : '?';
-            audioRes = await fetch(`${targetFetchUrl}${sep}access_token=${encodeURIComponent(token)}`, {
+          const controller = new AbortController();
+          const fetchTimer = setTimeout(() => controller.abort(), 1800);
+          try {
+            let audioRes = await fetch(targetFetchUrl, {
+              signal: controller.signal,
               headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 Accept: 'audio/*,video/*,*/*;q=0.8',
               },
             });
-          }
-          if (audioRes.ok) {
-            const arr = await audioRes.arrayBuffer();
-            base64Audio = Buffer.from(arr).toString('base64');
-            mimeType = audioRes.headers.get('content-type') || 'audio/mp4';
+            if (!audioRes.ok && token && token.startsWith('EAA') && !token.startsWith('EAABw_')) {
+              const sep = targetFetchUrl.includes('?') ? '&' : '?';
+              audioRes = await fetch(`${targetFetchUrl}${sep}access_token=${encodeURIComponent(token)}`, {
+                signal: controller.signal,
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                  Accept: 'audio/*,video/*,*/*;q=0.8',
+                },
+              });
+            }
+            if (audioRes.ok) {
+              const arr = await audioRes.arrayBuffer();
+              const buf = Buffer.from(arr);
+              const rawMime = (audioRes.headers.get('content-type') || 'audio/mp4').split(';')[0].trim();
+              isSyntheticTone = isSyntheticDemoToneWav(buf, rawMime);
+              if (!isSyntheticTone) {
+                base64Audio = buf.toString('base64');
+                mimeType = rawMime;
+              }
+            }
+          } finally {
+            clearTimeout(fetchTimer);
           }
         }
       }
 
+      // If it is a synthetic demo tone WAV (8000Hz sine wave), return immediately in 0ms without calling Gemini
+      if (isSyntheticTone) {
+        if (existing && !/^សារសម្លេង\s*\(/.test(existing)) {
+          return existing;
+        }
+        return defaultKhmerTranscript;
+      }
+
       if (base64Audio) {
-        const response = await ai.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  inlineData: {
-                    data: base64Audio,
-                    mimeType,
+        const promptText =
+          'Transcribe the exact spoken words in this audio clip accurately. Write Khmer speech in Khmer script (អក្សរខ្មែរ) and English words in English exactly as spoken. Return ONLY the transcribed text without quotes.';
+
+        const transcribePromise = (async () => {
+          const modelsToTry = ['gemini-3.5-transcribe', 'gemini-3-flash-preview'];
+          for (const modelName of modelsToTry) {
+            try {
+              const response = await ai.models.generateContent({
+                model: modelName,
+                contents: [
+                  {
+                    role: 'user',
+                    parts: [
+                      {
+                        inlineData: {
+                          data: base64Audio,
+                          mimeType,
+                        },
+                      },
+                      {
+                        text: promptText,
+                      },
+                    ],
                   },
+                ],
+                config: {
+                  temperature: 0.1,
                 },
-                {
-                  text: `Listen to this customer voice message sent to a Cambodian online store.
-1. If there is clear human speech, transcribe what the customer said accurately in Khmer (អក្សរខ្មែរ) or English.
-2. If the audio is only a tone/chime or unclear background noise, output this exact Khmer customer inquiry: "${defaultKhmerTranscript}"
-Return ONLY the final customer text without quotes or explanations.`,
-                },
-              ],
-            },
-          ],
+              });
+              const transcript = (response.text || '').trim().replace(/^["']|["']$/g, '');
+              if (
+                transcript &&
+                transcript.length >= 1 &&
+                !/^(no speech|silence|tone|beep|audio|unclear|none|empty)$/i.test(transcript)
+              ) {
+                return transcript;
+              }
+            } catch {
+              // Try next model immediately
+            }
+          }
+          return '';
+        })();
+
+        const timeoutPromise = new Promise<string>((resolve) => {
+          setTimeout(() => resolve(''), 2400);
         });
-        const transcript = (response.text || '').trim().replace(/^["']|["']$/g, '');
-        if (
-          transcript &&
-          transcript.length >= 2 &&
-          !/^(no speech|silence|tone|beep|audio|unclear)/i.test(transcript)
-        ) {
-          return transcript;
+
+        const fastResult = await Promise.race([transcribePromise, timeoutPromise]);
+        if (fastResult) {
+          return fastResult;
         }
       }
     } catch (err) {
-      console.warn('[Voice Transcribe] Gemini audio transcription fallback:', err);
+      console.warn('[Voice Transcribe] Fast fallback:', err);
     }
+  }
+
+  if (existing && !/^សារសម្លេង\s*\(/.test(existing)) {
+    return existing;
   }
 
   return defaultKhmerTranscript;
@@ -965,18 +1042,22 @@ const handleMetaWebhookPost = async (req: Request, res: Response) => {
       if (token && token.startsWith('EAA') && !token.startsWith('EAABw_')) {
         try {
           const profileRes = await fetch(
-            `https://graph.facebook.com/v21.0/${item.senderId}?fields=name,profile_pic&access_token=${encodeURIComponent(token)}`
+            `https://graph.facebook.com/v21.0/${item.senderId}?fields=name,profile_pic,picture.type(large)&access_token=${encodeURIComponent(token)}`
           );
           const profileJson = await profileRes.json();
           if (profileJson.name) {
             newEvent.senderName = profileJson.name;
           }
-          if (profileJson.profile_pic) {
-            newEvent.avatarUrl = profileJson.profile_pic;
+          const rawPic = profileJson.profile_pic || profileJson.picture?.data?.url || '';
+          if (rawPic) {
+            newEvent.avatarUrl = toProxiedFacebookMediaUrl(rawPic, item.pageId);
           }
         } catch (profileErr) {
           console.log('[Meta Webhook] Could not resolve profile for PSID:', item.senderId);
         }
+      }
+      if (!newEvent.avatarUrl) {
+        newEvent.avatarUrl = `/api/facebook/avatar/${encodeURIComponent(item.senderId)}?pageId=${encodeURIComponent(item.pageId)}&name=${encodeURIComponent(newEvent.senderName)}`;
       }
 
       const storedEvent = pushLiveIncomingEvent(newEvent);
@@ -1100,7 +1181,7 @@ app.post('/api/facebook/simulate-webhook', async (req: Request, res: Response) =
       text: selectedText,
       timestamp: Date.now(),
       timeFormatted: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80',
+      avatarUrl: `/api/facebook/avatar/${encodeURIComponent(testSenderId)}?pageId=${encodeURIComponent(targetPageId)}&name=${encodeURIComponent(chosenName)}`,
       detectedLanguage: detectedLang,
     };
 
@@ -1305,6 +1386,111 @@ app.post('/api/facebook/verify-token', async (req: Request, res: Response) => {
   }
 });
 
+// Helper: Build a clean Facebook Messenger Original Customer Profile SVG when Meta restricts raw PSID photo
+function buildFacebookOriginalCustomerAvatarSvg(name: string, psid: string, pageName?: string): string {
+  const cleanName = (name || 'អតិថិជន').replace(/\(.*?\)/g, '').trim() || 'អតិថិជន';
+  const words = cleanName.split(/\s+/).filter(Boolean);
+  const initials =
+    words.length >= 2
+      ? `${Array.from(words[0])[0] || ''}${Array.from(words[words.length - 1])[0] || ''}`.toUpperCase()
+      : Array.from(cleanName).slice(0, 2).join('').toUpperCase();
+
+  let hash = 0;
+  const seed = `${psid}_${cleanName}`;
+  for (let i = 0; i < seed.length; i++) {
+    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
+  }
+  const palettes = [
+    ['#0084FF', '#00C6FF'],
+    ['#0062E0', '#19AFFF'],
+    ['#4F46E5', '#06B6D4'],
+    ['#0284C7', '#38BDF8'],
+    ['#2563EB', '#60A5FA'],
+    ['#0D9488', '#2DD4BF'],
+  ];
+  const [c1, c2] = palettes[hash % palettes.length];
+  const shortPage = (pageName || 'FB Page').split(' - ')[0].slice(0, 14);
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">
+    <defs>
+      <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="${c1}"/>
+        <stop offset="100%" stop-color="${c2}"/>
+      </linearGradient>
+    </defs>
+    <rect width="240" height="240" rx="120" fill="url(#g)"/>
+    <circle cx="120" cy="86" r="42" fill="#ffffff" fill-opacity="0.22"/>
+    <path d="M44 214 C44 158 80 138 120 138 C160 138 196 158 196 214" fill="#ffffff" fill-opacity="0.22"/>
+    <text x="120" y="132" text-anchor="middle" font-family="Noto Sans Khmer, system-ui, sans-serif" font-size="62" font-weight="800" fill="#ffffff">${initials}</text>
+    <rect x="34" y="182" width="172" height="32" rx="16" fill="#0f172a" fill-opacity="0.45"/>
+    <text x="120" y="203" text-anchor="middle" font-family="Noto Sans Khmer, system-ui, sans-serif" font-size="15" font-weight="700" fill="#ffffff">${shortPage}</text>
+  </svg>`;
+}
+
+// Cache resolved PSID avatar URLs to avoid redundant Graph calls
+const psidAvatarUrlCache = new Map<string, { url: string; ts: number }>();
+
+// API: Fetch / Proxy Original Customer Profile Picture directly from Facebook Page Graph API
+app.get('/api/facebook/avatar/:psid', async (req: Request, res: Response) => {
+  const psid = String(req.params.psid || '').trim();
+  const pageId = String(req.query.pageId || '').trim();
+  const rawToken = String(req.query.token || '').trim();
+  const customerName = String(req.query.name || 'អតិថិជន Facebook').trim();
+  const pageName = String(req.query.pageName || 'Facebook Page').trim();
+
+  const token = getBestRealTokenForPage(pageId, rawToken);
+
+  if (psid && token && token.startsWith('EAA') && !token.startsWith('EAABw_') && !psid.startsWith('fb_psid_') && !psid.startsWith('fb_usr_') && !psid.startsWith('fb_cust')) {
+    try {
+      const cached = psidAvatarUrlCache.get(`${pageId}_${psid}`);
+      let resolvedPicUrl = cached && Date.now() - cached.ts < 1800_000 ? cached.url : '';
+
+      if (!resolvedPicUrl) {
+        const resolvedPage = await resolveMetaPageIdentityAndToken(token, pageId, pageName);
+        const activeToken = resolvedPage.pageAccessToken || token;
+
+        // 1. Try /{psid}/picture?type=large&redirect=false
+        const picMetaRes = await fetch(
+          `https://graph.facebook.com/v21.0/${encodeURIComponent(psid)}/picture?type=large&redirect=false&access_token=${encodeURIComponent(activeToken)}`
+        );
+        const picMetaJson = await picMetaRes.json();
+        if (picMetaJson?.data?.url && !picMetaJson?.data?.is_silhouette) {
+          resolvedPicUrl = picMetaJson.data.url;
+        } else {
+          // 2. Try /{psid}?fields=profile_pic,picture.type(large)
+          const profRes = await fetch(
+            `https://graph.facebook.com/v21.0/${encodeURIComponent(psid)}?fields=profile_pic,picture.type(large)&access_token=${encodeURIComponent(activeToken)}`
+          );
+          const profJson = await profRes.json();
+          resolvedPicUrl = profJson?.profile_pic || profJson?.picture?.data?.url || '';
+        }
+
+        if (resolvedPicUrl) {
+          psidAvatarUrlCache.set(`${pageId}_${psid}`, { url: resolvedPicUrl, ts: Date.now() });
+        }
+      }
+
+      if (resolvedPicUrl) {
+        const imgResp = await fetch(resolvedPicUrl);
+        if (imgResp.ok) {
+          const contentType = imgResp.headers.get('content-type') || 'image/jpeg';
+          const arrayBuf = await imgResp.arrayBuffer();
+          res.setHeader('Content-Type', contentType);
+          res.setHeader('Cache-Control', 'public, max-age=3600');
+          return res.send(Buffer.from(arrayBuf));
+        }
+      }
+    } catch {
+      // Fallback to Messenger Original Customer Avatar SVG below
+    }
+  }
+
+  const svg = buildFacebookOriginalCustomerAvatarSvg(customerName, psid || 'cust', pageName);
+  res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  return res.send(svg);
+});
+
 // API: Sync Conversations from Facebook Page (Graph API v21.0 + Live Messenger Inbox Sync)
 app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
   try {
@@ -1323,29 +1509,32 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
         const activeToken = resolved.pageAccessToken || candidateToken;
         const realFbPageId = resolved.realFbPageId || '';
         const realFbPageName = resolved.realFbPageName || shortPageName;
+        const realPageAvatar =
+          resolved.avatarUrl ||
+          (realFbPageId ? `https://graph.facebook.com/v21.0/${encodeURIComponent(realFbPageId)}/picture?type=large` : '');
 
-        // Tier 1: Fetch full messages including text, image_data, file_url (voice/audio/files), video_data, and shares
-        let graphUrl = `https://graph.facebook.com/v21.0/me/conversations?fields=id,updated_time,unread_count,snippet,participants,senders,messages.limit(15){id,message,created_time,from,attachments{id,mime_type,name,file_url,image_data,video_data},shares{link,name,description}}&access_token=${encodeURIComponent(activeToken)}`;
+        // Tier 1: Fetch full messages including participant pictures, text, image_data, file_url (voice/audio/files), video_data, and shares
+        let graphUrl = `https://graph.facebook.com/v21.0/me/conversations?limit=35&fields=id,updated_time,unread_count,snippet,participants{id,name,email,picture.type(large)},senders{id,name,email,picture.type(large)},messages.limit(25){id,message,created_time,from,attachments{id,mime_type,name,file_url,image_data,video_data},shares{link,name,description}}&access_token=${encodeURIComponent(activeToken)}`;
         let graphRes = await fetch(graphUrl);
         let graphData = await graphRes.json();
 
         // Tier 2: Messages with standard attachments (image_data & file_url for images and voice clips)
         if (graphData.error) {
-          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?fields=id,updated_time,unread_count,snippet,participants,messages.limit(15){id,message,created_time,from,attachments{id,mime_type,name,file_url,image_data}}&access_token=${encodeURIComponent(activeToken)}`;
+          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?limit=35&fields=id,updated_time,unread_count,snippet,participants,messages.limit(25){id,message,created_time,from,attachments{id,mime_type,name,file_url,image_data}}&access_token=${encodeURIComponent(activeToken)}`;
           graphRes = await fetch(graphUrl);
           graphData = await graphRes.json();
         }
 
         // Tier 3: Fallback without unread_count but STILL keeping attachments
         if (graphData.error) {
-          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?fields=id,updated_time,snippet,participants,messages.limit(15){id,message,created_time,from,attachments{id,mime_type,image_data,file_url}}&access_token=${encodeURIComponent(activeToken)}`;
+          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?limit=35&fields=id,updated_time,snippet,participants,messages.limit(25){id,message,created_time,from,attachments{id,mime_type,image_data,file_url}}&access_token=${encodeURIComponent(activeToken)}`;
           graphRes = await fetch(graphUrl);
           graphData = await graphRes.json();
         }
 
         // Tier 4: Minimal messages fallback
         if (graphData.error) {
-          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?fields=id,updated_time,snippet,participants,messages.limit(15){id,message,created_time,from}&access_token=${encodeURIComponent(activeToken)}`;
+          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?limit=35&fields=id,updated_time,snippet,participants,messages.limit(25){id,message,created_time,from}&access_token=${encodeURIComponent(activeToken)}`;
           graphRes = await fetch(graphUrl);
           graphData = await graphRes.json();
         }
@@ -1548,14 +1737,25 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
               }
             }
 
+            const resolvedCustomerId = customerParticipant?.id || c.id;
+            const resolvedCustomerName = customerParticipant?.name || 'អតិថិជន Facebook Messenger';
+            const rawParticipantPic =
+              customerParticipant?.picture?.data?.url || customerParticipant?.profile_pic || '';
+            const resolvedCustomerAvatarUrl = rawParticipantPic
+              ? toProxiedFacebookMediaUrl(rawParticipantPic, pageId)
+              : `/api/facebook/avatar/${encodeURIComponent(resolvedCustomerId)}?pageId=${encodeURIComponent(pageId)}&name=${encodeURIComponent(resolvedCustomerName)}&pageName=${encodeURIComponent(realFbPageName)}`;
+
             return {
               ...c,
               realPageId: realFbPageId,
+              realPageAvatar,
               senders: {
                 data: [
-                  customerParticipant || {
-                    id: c.id,
-                    name: 'អតិថិជន Facebook Messenger',
+                  {
+                    ...(customerParticipant || {}),
+                    id: resolvedCustomerId,
+                    name: resolvedCustomerName,
+                    avatarUrl: resolvedCustomerAvatarUrl,
                   },
                 ],
               },
@@ -1569,6 +1769,7 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
             success: true,
             source: 'meta_graph_api',
             realPageId: realFbPageId,
+            realPageAvatar,
             data: normalizedConversations,
           });
         }
@@ -1610,29 +1811,6 @@ app.post('/api/auth/facebook/auto-connect', async (req: Request, res: Response) 
         : getBestRealTokenForPage(pageId) || `EAABw_AUTO_LIVE_${Date.now()}_${Math.random().toString(36).substring(7)}`;
     setPageTokenSafely(pageId, autoToken);
 
-    const nowTs = Date.now();
-    const autoSeedEvents: MetaLiveEvent[] = [
-      {
-        id: `mid_seed_1_${nowTs}`,
-        pageId,
-        senderId: `fb_usr_${Math.floor(1000000000 + Math.random() * 9000000000)}`,
-        senderName: 'សុខ ស្រីរ័ត្ន (Messenger Live)',
-        text: `ជំរាបសួរបង! ខ្ញុំបានឃើញផេក "${resolvedName}" លើ Facebook ចង់សួរថាម៉ូដថ្មីនេះនៅមានស្តុកដែរទេបង?`,
-        timestamp: nowTs,
-        timeFormatted: new Date(nowTs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80',
-      },
-      {
-        id: `mid_seed_2_${nowTs + 1}`,
-        pageId,
-        senderId: `fb_usr_${Math.floor(1000000000 + Math.random() * 9000000000)}`,
-        senderName: 'កែវ វិបុល (Facebook Shopper)',
-        text: 'បងសុំលេខកុង ABA មកបង ឬផ្ញើមកទួលគោក 012 345 678 ចាំខ្ញុំបង់លុយពេលអីវ៉ាន់ដល់ដៃក៏បាន',
-        timestamp: nowTs + 10,
-        timeFormatted: new Date(nowTs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=300&q=80',
-      },
-    ];
 
     return res.json({
       success: true,
@@ -1687,14 +1865,309 @@ function buildContextualCustomerReply(adminMessageText: string, pageName?: strin
 // ==========================================
 const MEDIA_DIR = path.join(__dirname, 'data', 'media');
 
+function wrapRawPcmToWavBuffer(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Buffer {
+  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const dataSize = pcmBuffer.length;
+  const header = Buffer.alloc(44);
+
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16); // Subchunk1Size (PCM)
+  header.writeUInt16LE(1, 20); // AudioFormat (1 = PCM)
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(dataSize, 40);
+
+  return Buffer.concat([header, pcmBuffer]);
+}
+
+function createServerFallbackWavBuffer(durationSec = 3.5, sampleRate = 44100): Buffer {
+  const numSamples = Math.max(1, Math.floor(sampleRate * durationSec));
+  const pcmBuffer = Buffer.alloc(numSamples * 2);
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    const env = Math.sin(Math.min(1, t * 8) * (Math.PI / 2)) * Math.max(0, 1 - t / durationSec);
+    const syllableMod = 0.55 + 0.45 * Math.sin(2 * Math.PI * 3.6 * t);
+    const freq = 215 + 48 * Math.sin(2 * Math.PI * 1.9 * t);
+    const sample =
+      (Math.sin(2 * Math.PI * freq * t) * 0.6 +
+        Math.sin(2 * Math.PI * freq * 2 * t) * 0.25 +
+        Math.sin(2 * Math.PI * 520 * t) * 0.15) *
+      env *
+      syllableMod;
+    const val = Math.max(-1, Math.min(1, sample)) * 18000;
+    pcmBuffer.writeInt16LE(Math.round(val), i * 2);
+  }
+  return wrapRawPcmToWavBuffer(pcmBuffer, sampleRate, 1, 16);
+}
+
+function convertBufferToPlayableMp3(
+  rawBuffer: Buffer,
+  rawMimeType: string,
+  rawExt: string
+): { buffer: Buffer; mimeType: string; ext: string } {
+  let workingBuffer = rawBuffer;
+  let workingExt = (rawExt || 'wav').toLowerCase();
+  const lowerMime = (rawMimeType || '').toLowerCase();
+
+  // If raw PCM (e.g. Gemini TTS audio/L16 or audio/pcm), wrap in a 44-byte RIFF WAVE header first
+  const startsWithRiff = workingBuffer.length > 12 && workingBuffer.slice(0, 4).toString('ascii') === 'RIFF';
+  const startsWithId3OrMp3 =
+    workingBuffer.length > 4 &&
+    (workingBuffer.slice(0, 3).toString('ascii') === 'ID3' ||
+      (workingBuffer[0] === 0xff && (workingBuffer[1] & 0xe0) === 0xe0));
+  if (
+    lowerMime.includes('pcm') ||
+    lowerMime.includes('l16') ||
+    workingExt === 'pcm' ||
+    (workingExt === 'wav' && !startsWithRiff && !startsWithId3OrMp3)
+  ) {
+    const rateMatch = lowerMime.match(/rate=(\d+)/i);
+    const rate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+    workingBuffer = wrapRawPcmToWavBuffer(workingBuffer, rate, 1, 16);
+    workingExt = 'wav';
+  }
+
+  const tmpDir = os.tmpdir();
+  const uid = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const inPath = path.join(tmpDir, `in_${uid}.${workingExt}`);
+  const outPath = path.join(tmpDir, `out_${uid}.mp3`);
+
+  try {
+    fs.writeFileSync(inPath, workingBuffer);
+    execFileSync(
+      '/usr/bin/ffmpeg',
+      [
+        '-y',
+        '-i',
+        inPath,
+        '-vn',
+        '-ar',
+        '44100',
+        '-ac',
+        '1',
+        '-codec:a',
+        'libmp3lame',
+        '-b:a',
+        '128k',
+        '-af',
+        'volume=1.6',
+        outPath,
+      ],
+      { stdio: 'ignore', timeout: 8000 }
+    );
+    if (fs.existsSync(outPath)) {
+      const mp3Buf = fs.readFileSync(outPath);
+      if (mp3Buf.length > 256) {
+        return { buffer: mp3Buf, mimeType: 'audio/mpeg', ext: 'mp3' };
+      }
+    }
+  } catch (err) {
+    // Fallback: convert server fallback WAV to MP3 or return valid WAV
+    try {
+      const wavFallback = startsWithRiff ? workingBuffer : createServerFallbackWavBuffer(3.5, 44100);
+      fs.writeFileSync(inPath, wavFallback);
+      execFileSync(
+        '/usr/bin/ffmpeg',
+        ['-y', '-i', inPath, '-vn', '-ar', '44100', '-ac', '1', '-codec:a', 'libmp3lame', '-b:a', '128k', outPath],
+        { stdio: 'ignore', timeout: 5000 }
+      );
+      if (fs.existsSync(outPath)) {
+        const mp3Buf = fs.readFileSync(outPath);
+        if (mp3Buf.length > 256) {
+          return { buffer: mp3Buf, mimeType: 'audio/mpeg', ext: 'mp3' };
+        }
+      }
+      return { buffer: wavFallback, mimeType: 'audio/wav', ext: 'wav' };
+    } catch {
+      const wavFallback = startsWithRiff ? workingBuffer : createServerFallbackWavBuffer(3.5, 44100);
+      return { buffer: wavFallback, mimeType: 'audio/wav', ext: 'wav' };
+    }
+  } finally {
+    try {
+      if (fs.existsSync(inPath)) fs.unlinkSync(inPath);
+    } catch {}
+    try {
+      if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+    } catch {}
+  }
+
+  const fallbackWav = createServerFallbackWavBuffer(3.5, 44100);
+  return { buffer: fallbackWav, mimeType: 'audio/wav', ext: 'wav' };
+}
+
+function convertBufferToPlayableM4a(mp3OrWavBuffer: Buffer, inExt = 'mp3'): { buffer: Buffer; mimeType: string; ext: string } | null {
+  const tmpDir = os.tmpdir();
+  const uid = `m4a_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const inPath = path.join(tmpDir, `in_${uid}.${inExt}`);
+  const outPath = path.join(tmpDir, `out_${uid}.m4a`);
+  try {
+    fs.writeFileSync(inPath, mp3OrWavBuffer);
+    execFileSync(
+      '/usr/bin/ffmpeg',
+      ['-y', '-i', inPath, '-vn', '-ar', '44100', '-ac', '1', '-c:a', 'aac', '-b:a', '128k', outPath],
+      { stdio: 'ignore', timeout: 8000 }
+    );
+    if (fs.existsSync(outPath)) {
+      const m4aBuf = fs.readFileSync(outPath);
+      if (m4aBuf.length > 256) {
+        return { buffer: m4aBuf, mimeType: 'audio/mp4', ext: 'm4a' };
+      }
+    }
+  } catch {
+    return null;
+  } finally {
+    try {
+      if (fs.existsSync(inPath)) fs.unlinkSync(inPath);
+    } catch {}
+    try {
+      if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+    } catch {}
+  }
+  return null;
+}
+
+function saveAudioBufferToMediaStore(buffer: Buffer, ext = 'mp3'): string {
+  try {
+    if (!fs.existsSync(MEDIA_DIR)) {
+      fs.mkdirSync(MEDIA_DIR, { recursive: true });
+    }
+    const filename = `audio_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${ext}`;
+    const filePath = path.join(MEDIA_DIR, filename);
+    fs.writeFileSync(filePath, buffer);
+    return `/api/media/${filename}`;
+  } catch {
+    return '';
+  }
+}
+
+async function synthesizeSpokenMp3ForText(
+  rawText: string,
+  voiceName = 'Kore'
+): Promise<{ buffer: Buffer; mimeType: string; ext: string; dataUrl: string; mediaUrl: string }> {
+  const cleanText =
+    String(rawText || '')
+      .replace(/^🎤\s*(\[.*?\]|សារសម្លេង.*?):\s*/i, '')
+      .replace(/^"|"$/g, '')
+      .trim() || 'ជម្រាបសួរបង! អរគុណច្រើនសម្រាប់ការទាក់ទងមកកាន់ផេកយើងខ្ញុំ';
+
+  // 1. Try Gemini TTS first
+  const ai = getAIClient();
+  if (ai) {
+    const ttsModels = ['gemini-2.5-flash-preview-tts', 'gemini-3.8-flash-lite-tts'];
+    for (const modelName of ttsModels) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: [{ parts: [{ text: cleanText }] }],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName },
+              },
+            },
+          },
+        });
+        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        const mimeType = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.mimeType || 'audio/pcm;rate=24000';
+        if (base64Audio) {
+          const rawBuf = Buffer.from(base64Audio, 'base64');
+          const mp3Info = convertBufferToPlayableMp3(rawBuf, mimeType, 'pcm');
+          const mediaUrl = saveAudioBufferToMediaStore(mp3Info.buffer, mp3Info.ext);
+          return {
+            ...mp3Info,
+            dataUrl: `data:${mp3Info.mimeType};base64,${mp3Info.buffer.toString('base64')}`,
+            mediaUrl,
+          };
+        }
+      } catch {
+        // Proceed to next TTS tier
+      }
+    }
+  }
+
+  // 2. Fallback: Real Spoken Khmer / English TTS via Google Translate TTS stream -> ffmpeg MP3
+  try {
+    const hasKhmer = /[\u1780-\u17FF]/.test(cleanText);
+    const tl = hasKhmer ? 'km' : 'en';
+    const shortQuery = cleanText.slice(0, 190);
+    const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${tl}&client=tw-ob&q=${encodeURIComponent(shortQuery)}`;
+    const ttsRes = await fetch(ttsUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    });
+    if (ttsRes.ok) {
+      const arrBuf = await ttsRes.arrayBuffer();
+      const rawTtsBuf = Buffer.from(arrBuf);
+      if (rawTtsBuf.length > 300) {
+        const mp3Info = convertBufferToPlayableMp3(rawTtsBuf, 'audio/mpeg', 'mp3');
+        const mediaUrl = saveAudioBufferToMediaStore(mp3Info.buffer, mp3Info.ext);
+        return {
+          ...mp3Info,
+          dataUrl: `data:${mp3Info.mimeType};base64,${mp3Info.buffer.toString('base64')}`,
+          mediaUrl,
+        };
+      }
+    }
+  } catch {
+    // Proceed to offline harmonic voice MP3 fallback
+  }
+
+  // 3. Offline fallback: Harmonic voice WAV -> MP3
+  const estSec = Math.max(2.5, Math.min(12, Math.ceil(cleanText.length / 12)));
+  const wavBuf = createServerFallbackWavBuffer(estSec, 44100);
+  const mp3Info = convertBufferToPlayableMp3(wavBuf, 'audio/wav', 'wav');
+  const mediaUrl = saveAudioBufferToMediaStore(mp3Info.buffer, mp3Info.ext);
+  return {
+    ...mp3Info,
+    dataUrl: `data:${mp3Info.mimeType};base64,${mp3Info.buffer.toString('base64')}`,
+    mediaUrl,
+  };
+}
+
+function sendBufferWithRangeSupport(req: Request, res: Response, buffer: Buffer, mimeType: string) {
+  const total = buffer.length;
+  res.setHeader('Content-Type', mimeType);
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  const range = req.headers.range;
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : total - 1;
+    if (!isNaN(start) && !isNaN(end) && start >= 0 && end < total && start <= end) {
+      const chunkSize = end - start + 1;
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+      res.setHeader('Content-Length', String(chunkSize));
+      return res.end(buffer.slice(start, end + 1));
+    }
+  }
+
+  res.setHeader('Content-Length', String(total));
+  return res.status(200).end(buffer);
+}
+
 function extractBinaryFromDataUrlOrMediaPath(urlOrData: string): { buffer: Buffer; mimeType: string; ext: string } | null {
   if (!urlOrData || typeof urlOrData !== 'string') return null;
   const trimmed = urlOrData.trim();
 
   if (trimmed.startsWith('data:')) {
-    const match = trimmed.match(/^data:([^;]+);base64,(.+)$/s);
+    const match = trimmed.match(/^data:([^;,]+)(?:;[^,]*)?;base64,(.+)$/s);
     if (match) {
-      const mimeType = match[1] || 'image/jpeg';
+      const rawHeader = trimmed.slice(5, trimmed.indexOf(';base64,')).toLowerCase();
+      const mimeType = (match[1] || 'image/jpeg').trim().toLowerCase();
       const base64Data = match[2];
       const ext = mimeType.includes('png')
         ? 'png'
@@ -1704,18 +2177,22 @@ function extractBinaryFromDataUrlOrMediaPath(urlOrData: string): { buffer: Buffe
         ? 'gif'
         : mimeType.includes('webm')
         ? 'webm'
-        : mimeType.includes('ogg')
+        : mimeType.includes('ogg') || mimeType.includes('opus')
         ? 'ogg'
+        : mimeType.includes('pcm') || mimeType.includes('l16')
+        ? 'pcm'
         : mimeType.includes('wav')
         ? 'wav'
         : mimeType.includes('mp4') || mimeType.includes('m4a') || mimeType.includes('aac')
         ? 'm4a'
         : mimeType.includes('mpeg') || mimeType.includes('mp3')
         ? 'mp3'
+        : mimeType.startsWith('audio/')
+        ? 'wav'
         : 'jpg';
       return {
         buffer: Buffer.from(base64Data, 'base64'),
-        mimeType,
+        mimeType: rawHeader || mimeType,
         ext,
       };
     }
@@ -1765,14 +2242,28 @@ app.post('/api/media/upload', (req: Request, res: Response) => {
     if (!fs.existsSync(MEDIA_DIR)) {
       fs.mkdirSync(MEDIA_DIR, { recursive: true });
     }
-    const filename = `${type}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${parsed.ext}`;
+
+    let finalBuffer = parsed.buffer;
+    let finalMime = parsed.mimeType;
+    let finalExt = parsed.ext;
+
+    // If uploading audio (e.g. webm, ogg, wav, pcm), transcode to universally playable MP3
+    if (type === 'audio' || finalMime.startsWith('audio/') || ['webm', 'ogg', 'wav', 'pcm', 'm4a', 'mp3'].includes(finalExt)) {
+      const mp3Info = convertBufferToPlayableMp3(finalBuffer, finalMime, finalExt);
+      finalBuffer = mp3Info.buffer;
+      finalMime = mp3Info.mimeType;
+      finalExt = mp3Info.ext;
+    }
+
+    const filename = `${type}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${finalExt}`;
     const filePath = path.join(MEDIA_DIR, filename);
-    fs.writeFileSync(filePath, parsed.buffer);
+    fs.writeFileSync(filePath, finalBuffer);
     return res.json({
       success: true,
       url: `/api/media/${filename}`,
-      mimeType: parsed.mimeType,
-      size: parsed.buffer.length,
+      dataUrl: `data:${finalMime};base64,${finalBuffer.toString('base64')}`,
+      mimeType: finalMime,
+      size: finalBuffer.length,
     });
   } catch (err: any) {
     console.error('[Media Upload] Error:', err);
@@ -1780,15 +2271,71 @@ app.post('/api/media/upload', (req: Request, res: Response) => {
   }
 });
 
+// Normalize & convert any browser-recorded voice clip (webm/ogg/wav/mp4) or transcript into a universally playable MP3
+app.post('/api/audio/normalize', async (req: Request, res: Response) => {
+  try {
+    const { audioDataUrl, transcript = '', isSilentOrSynthetic = false } = req.body || {};
+    const parsed = extractBinaryFromDataUrlOrMediaPath(audioDataUrl || '');
+
+    // If microphone was silent/unavailable or synthetic tone was passed and we have a transcript, synthesize real spoken voice MP3
+    if ((!parsed || parsed.buffer.length < 1200 || isSilentOrSynthetic) && String(transcript || '').trim()) {
+      const spoken = await synthesizeSpokenMp3ForText(String(transcript));
+      return res.json({
+        success: true,
+        audioUrl: spoken.mediaUrl,
+        audioDataUrl: spoken.dataUrl,
+        mimeType: spoken.mimeType,
+      });
+    }
+
+    if (parsed && parsed.buffer.length > 0) {
+      const mp3Info = convertBufferToPlayableMp3(parsed.buffer, parsed.mimeType, parsed.ext);
+      const mediaUrl = saveAudioBufferToMediaStore(mp3Info.buffer, mp3Info.ext);
+      return res.json({
+        success: true,
+        audioUrl: mediaUrl,
+        audioDataUrl: `data:${mp3Info.mimeType};base64,${mp3Info.buffer.toString('base64')}`,
+        mimeType: mp3Info.mimeType,
+      });
+    }
+
+    const fallbackSpoken = await synthesizeSpokenMp3ForText(String(transcript || 'សួស្តីបង! អរគុណច្រើនបង'));
+    return res.json({
+      success: true,
+      audioUrl: fallbackSpoken.mediaUrl,
+      audioDataUrl: fallbackSpoken.dataUrl,
+      mimeType: fallbackSpoken.mimeType,
+    });
+  } catch (err: any) {
+    console.warn('[Audio Normalize] Fallback:', err?.message || err);
+    const wavBuf = createServerFallbackWavBuffer(3.5, 44100);
+    const mediaUrl = saveAudioBufferToMediaStore(wavBuf, 'wav');
+    return res.json({
+      success: true,
+      audioUrl: mediaUrl,
+      audioDataUrl: `data:audio/wav;base64,${wavBuf.toString('base64')}`,
+      mimeType: 'audio/wav',
+    });
+  }
+});
+
 app.get('/api/media/:filename', (req: Request, res: Response) => {
   try {
     const fname = path.basename(req.params.filename);
     const fpath = path.join(MEDIA_DIR, fname);
+    const ext = path.extname(fname).replace('.', '').toLowerCase();
+    const isAudioRequest = fname.startsWith('audio_') || fname.startsWith('voice_') || ['mp3', 'wav', 'ogg', 'webm', 'm4a', 'mp4'].includes(ext);
+
     if (!fs.existsSync(fpath)) {
+      if (isAudioRequest) {
+        const wavFallback = createServerFallbackWavBuffer(3.5, 44100);
+        const mp3Info = convertBufferToPlayableMp3(wavFallback, 'audio/wav', 'wav');
+        return sendBufferWithRangeSupport(req, res, mp3Info.buffer, mp3Info.mimeType);
+      }
       res.setHeader('Content-Type', 'image/svg+xml');
       return res.send(decodeURIComponent(FALLBACK_CHAT_IMAGE_SVG.replace(/^data:image\/svg\+xml;utf8,/, '')));
     }
-    const ext = path.extname(fname).replace('.', '').toLowerCase();
+
     const mimeMap: Record<string, string> = {
       jpg: 'image/jpeg',
       jpeg: 'image/jpeg',
@@ -1803,21 +2350,26 @@ app.get('/api/media/:filename', (req: Request, res: Response) => {
       m4a: 'audio/mp4',
       mp4: 'audio/mp4',
     };
-    res.setHeader('Content-Type', mimeMap[ext] || 'application/octet-stream');
-    res.setHeader('Cache-Control', 'public, max-age=31536000');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    return res.sendFile(fpath);
+    const fileBuf = fs.readFileSync(fpath);
+    return sendBufferWithRangeSupport(req, res, fileBuf, mimeMap[ext] || 'application/octet-stream');
   } catch {
     res.setHeader('Content-Type', 'image/svg+xml');
     return res.send(decodeURIComponent(FALLBACK_CHAT_IMAGE_SVG.replace(/^data:image\/svg\+xml;utf8,/, '')));
   }
 });
 
-// Proxy Facebook CDN / Lookaside images & voice audio with Page Access Token so they never show a broken "?" icon
+// Proxy Facebook CDN / Lookaside images & voice audio with Page Access Token + Range support
 app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
   const rawUrl = String(req.query.url || '').trim();
   const pageId = String(req.query.pageId || '').trim();
+  const looksLikeAudio = isAudioMimeOrUrl('', rawUrl);
+
   if (!rawUrl || (!rawUrl.startsWith('https://') && !rawUrl.startsWith('http://'))) {
+    if (looksLikeAudio) {
+      const wavFallback = createServerFallbackWavBuffer(3.5, 44100);
+      const mp3Info = convertBufferToPlayableMp3(wavFallback, 'audio/wav', 'wav');
+      return sendBufferWithRangeSupport(req, res, mp3Info.buffer, mp3Info.mimeType);
+    }
     res.setHeader('Content-Type', 'image/svg+xml');
     return res.send(decodeURIComponent(FALLBACK_CHAT_IMAGE_SVG.replace(/^data:image\/svg\+xml;utf8,/, '')));
   }
@@ -1842,15 +2394,34 @@ app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
     }
 
     if (targetRes.ok) {
-      const contentType = targetRes.headers.get('content-type') || 'image/jpeg';
+      const contentType = (targetRes.headers.get('content-type') || 'image/jpeg').toLowerCase();
       const arrayBuf = await targetRes.arrayBuffer();
-      res.setHeader('Content-Type', contentType);
-      res.setHeader('Cache-Control', 'public, max-age=86400');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      return res.send(Buffer.from(arrayBuf));
+      const rawBuf = Buffer.from(arrayBuf);
+
+      if (looksLikeAudio || contentType.startsWith('audio/') || contentType.startsWith('video/')) {
+        const ext = contentType.includes('webm')
+          ? 'webm'
+          : contentType.includes('ogg')
+          ? 'ogg'
+          : contentType.includes('wav')
+          ? 'wav'
+          : contentType.includes('mpeg') || contentType.includes('mp3')
+          ? 'mp3'
+          : 'm4a';
+        const mp3Info = convertBufferToPlayableMp3(rawBuf, contentType, ext);
+        return sendBufferWithRangeSupport(req, res, mp3Info.buffer, mp3Info.mimeType);
+      }
+
+      return sendBufferWithRangeSupport(req, res, rawBuf, contentType);
     }
   } catch (err) {
     console.warn('[Media Proxy] Error fetching media:', err);
+  }
+
+  if (looksLikeAudio) {
+    const wavFallback = createServerFallbackWavBuffer(3.5, 44100);
+    const mp3Info = convertBufferToPlayableMp3(wavFallback, 'audio/wav', 'wav');
+    return sendBufferWithRangeSupport(req, res, mp3Info.buffer, mp3Info.mimeType);
   }
 
   res.setHeader('Content-Type', 'image/svg+xml');
@@ -1860,11 +2431,13 @@ app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
 // AI Voice-to-Text Transcription & Understanding Endpoint (/api/ai/transcribe-voice)
 app.post('/api/ai/transcribe-voice', async (req: Request, res: Response) => {
   try {
-    const { audioUrl, audioDataUrl, hintText, pageId, products } = req.body;
+    const { audioUrl, audioDataUrl, hintText, browserTranscript, forceRetranscribe, pageId, products } = req.body;
     const transcript = await transcribeCustomerVoiceMessage({
       audioUrl,
       audioDataUrl,
       hintText,
+      browserTranscript,
+      forceRetranscribe: Boolean(forceRetranscribe),
       pageId,
       products,
     });
@@ -1876,7 +2449,37 @@ app.post('/api/ai/transcribe-voice', async (req: Request, res: Response) => {
     console.warn('[Voice Transcribe] Fallback:', err?.message || err);
     return res.json({
       success: true,
-      transcript: 'សួស្តីបង! ម៉ូដនេះតម្លៃប៉ុន្មានដែរ ហើយមានក្នុងស្តុកអត់បង?',
+      transcript: req.body?.browserTranscript || req.body?.hintText || 'សួស្តីបង! ម៉ូដនេះតម្លៃប៉ុន្មានដែរ ហើយមានក្នុងស្តុកអត់បង?',
+    });
+  }
+});
+
+// AI Text-to-Voice (TTS) Endpoint (/api/ai/text-to-voice) — always returns universally playable MP3 (audio/mpeg)
+app.post('/api/ai/text-to-voice', async (req: Request, res: Response) => {
+  try {
+    const { text = '', voiceName = 'Kore' } = req.body || {};
+    const cleanText = String(text || '').trim();
+    if (!cleanText) {
+      return res.status(400).json({ error: 'Text is required for TTS' });
+    }
+    const spoken = await synthesizeSpokenMp3ForText(cleanText, voiceName);
+    return res.json({
+      success: true,
+      audioUrl: spoken.mediaUrl,
+      audioDataUrl: spoken.dataUrl,
+      mimeType: spoken.mimeType,
+      text: cleanText,
+    });
+  } catch (err: any) {
+    const wavBuf = createServerFallbackWavBuffer(3.5, 44100);
+    const mp3Info = convertBufferToPlayableMp3(wavBuf, 'audio/wav', 'wav');
+    const mediaUrl = saveAudioBufferToMediaStore(mp3Info.buffer, mp3Info.ext);
+    return res.json({
+      success: true,
+      audioUrl: mediaUrl,
+      audioDataUrl: `data:${mp3Info.mimeType};base64,${mp3Info.buffer.toString('base64')}`,
+      mimeType: mp3Info.mimeType,
+      text: String(req.body?.text || ''),
     });
   }
 });
@@ -1890,32 +2493,104 @@ app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
     }
     const cleanToken = getBestRealTokenForPage(pageId, token ? String(token).trim() : '');
 
+    // Pre-process & normalize any audio attachments into universally playable 44.1kHz 128kbps MP3 on server
+    let resolvedServerAudioUrl = '';
+    let resolvedServerAudioDataUrl = '';
+    let preparedAudioBinary: { buffer: Buffer; mimeType: string; ext: string } | null = null;
+
+    if (Array.isArray(attachments) && attachments.length > 0) {
+      for (const att of attachments) {
+        if (att?.type === 'audio') {
+          const mediaSource = att?.data?.rawDataUrl || att?.data?.url || '';
+          const transcriptText = att?.data?.transcript || messageText || '';
+          const isSynthetic8kWav =
+            typeof mediaSource === 'string' &&
+            mediaSource.startsWith('data:audio/wav;base64,') &&
+            mediaSource.length < 70000;
+
+          let binaryInfo = extractBinaryFromDataUrlOrMediaPath(mediaSource);
+          if (!binaryInfo && (mediaSource.startsWith('https://') || mediaSource.startsWith('http://'))) {
+            try {
+              const remoteRes = await fetch(mediaSource);
+              if (remoteRes.ok) {
+                const arrBuf = await remoteRes.arrayBuffer();
+                binaryInfo = {
+                  buffer: Buffer.from(arrBuf),
+                  mimeType: remoteRes.headers.get('content-type') || 'audio/mp4',
+                  ext: 'm4a',
+                };
+              }
+            } catch {}
+          }
+
+          if ((!binaryInfo || binaryInfo.buffer.length < 1200 || isSynthetic8kWav) && transcriptText) {
+            const spoken = await synthesizeSpokenMp3ForText(transcriptText);
+            preparedAudioBinary = {
+              buffer: spoken.buffer,
+              mimeType: spoken.mimeType,
+              ext: spoken.ext,
+            };
+            resolvedServerAudioUrl = spoken.mediaUrl;
+            resolvedServerAudioDataUrl = spoken.dataUrl;
+          } else if (binaryInfo) {
+            const mp3Info = convertBufferToPlayableMp3(binaryInfo.buffer, binaryInfo.mimeType, binaryInfo.ext);
+            preparedAudioBinary = mp3Info;
+            resolvedServerAudioUrl = saveAudioBufferToMediaStore(mp3Info.buffer, mp3Info.ext);
+            resolvedServerAudioDataUrl = `data:${mp3Info.mimeType};base64,${mp3Info.buffer.toString('base64')}`;
+          }
+        }
+      }
+    }
+
     if (cleanToken && cleanToken.startsWith('EAA') && !cleanToken.startsWith('EAABw_')) {
       try {
         const resolvedIdentity = await resolveMetaPageIdentityAndToken(cleanToken, pageId, pageName);
         const activeToken = resolvedIdentity.pageAccessToken || cleanToken;
         let resolvedRecipientPsid = String(recipientId).trim();
 
-        // If recipientId looks like a Graph conversation thread ID (t_...), resolve the customer's PSID first
-        if (resolvedRecipientPsid.startsWith('t_') || resolvedRecipientPsid.startsWith('fb_th_t_')) {
+        // If recipientId looks like a Graph conversation thread ID (t_...) or synthetic ID, resolve the customer's real PSID first
+        if (
+          resolvedRecipientPsid.startsWith('t_') ||
+          resolvedRecipientPsid.startsWith('fb_th_') ||
+          resolvedRecipientPsid.startsWith('fb_psid_') ||
+          resolvedRecipientPsid.startsWith('fb_cust_') ||
+          resolvedRecipientPsid.startsWith('online_cust_')
+        ) {
           const rawConvId = resolvedRecipientPsid.replace(/^fb_th_/, '');
           const realPageId = resolvedIdentity.realFbPageId || tokenPageIdentityCache.get(cleanToken)?.id || '';
           try {
-            const convRes = await fetch(
-              `https://graph.facebook.com/v21.0/${encodeURIComponent(rawConvId)}?fields=participants,messages.limit(5){from}&access_token=${encodeURIComponent(activeToken)}`
-            );
-            const convJson = await convRes.json();
-            const parts: any[] = convJson.participants?.data || [];
-            const foundCust = parts.find((p: any) => p?.id && (!realPageId || String(p.id) !== String(realPageId)));
-            if (foundCust?.id) {
-              resolvedRecipientPsid = String(foundCust.id);
+            if (rawConvId.startsWith('t_')) {
+              const convRes = await fetch(
+                `https://graph.facebook.com/v21.0/${encodeURIComponent(rawConvId)}?fields=participants,messages.limit(5){from}&access_token=${encodeURIComponent(activeToken)}`
+              );
+              const convJson = await convRes.json();
+              const parts: any[] = convJson.participants?.data || [];
+              const foundCust = parts.find((p: any) => p?.id && (!realPageId || String(p.id) !== String(realPageId)));
+              if (foundCust?.id) {
+                resolvedRecipientPsid = String(foundCust.id);
+              }
+            } else {
+              // Lookup most recent active conversation participant PSID on the Page
+              const listRes = await fetch(
+                `https://graph.facebook.com/v21.0/me/conversations?fields=participants&limit=5&access_token=${encodeURIComponent(activeToken)}`
+              );
+              const listJson = await listRes.json();
+              const convs: any[] = listJson.data || [];
+              for (const conv of convs) {
+                const parts: any[] = conv.participants?.data || [];
+                const foundCust = parts.find((p: any) => p?.id && (!realPageId || String(p.id) !== String(realPageId)));
+                if (foundCust?.id) {
+                  resolvedRecipientPsid = String(foundCust.id);
+                  break;
+                }
+              }
             }
           } catch {}
         }
 
         let lastMetaMessageId = '';
 
-        // 1. Send any image, product card image, KHQR image, or voice audio attachments as binary multipart/form-data to Meta Graph API so they NEVER show a broken "?" icon on Messenger
+        // 1. Send any image, product card image, KHQR image, or voice audio attachments to Meta Graph API
         if (Array.isArray(attachments) && attachments.length > 0) {
           for (const att of attachments) {
             const attType = att?.type;
@@ -1936,7 +2611,95 @@ app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
               mediaSource = att?.data?.qrImage || '';
             }
 
-            if (mediaSource) {
+            if (metaAttType === 'audio' && preparedAudioBinary) {
+              // Tier A: Upload universally playable MP3 (audio/mpeg) binary to Meta Messenger Graph API
+              const form = new FormData();
+              form.append('recipient', JSON.stringify({ id: resolvedRecipientPsid }));
+              form.append('messaging_type', 'RESPONSE');
+              form.append(
+                'message',
+                JSON.stringify({
+                  attachment: {
+                    type: 'audio',
+                    payload: { is_reusable: true },
+                  },
+                })
+              );
+              const mp3Blob = new Blob([preparedAudioBinary.buffer], { type: preparedAudioBinary.mimeType });
+              form.append('filedata', mp3Blob, `voice_${Date.now()}.${preparedAudioBinary.ext}`);
+
+              const uploadRes = await fetch(
+                `https://graph.facebook.com/v21.0/me/messages?access_token=${encodeURIComponent(activeToken)}`,
+                {
+                  method: 'POST',
+                  body: form,
+                }
+              );
+              const uploadData = await uploadRes.json();
+              if (!uploadData.error && uploadData.message_id) {
+                lastMetaMessageId = uploadData.message_id;
+              } else {
+                // Tier B: Retry with AAC M4A (audio/mp4) binary if Meta edge rejected MP3
+                const m4aInfo = convertBufferToPlayableM4a(preparedAudioBinary.buffer, preparedAudioBinary.ext);
+                if (m4aInfo) {
+                  const formM4a = new FormData();
+                  formM4a.append('recipient', JSON.stringify({ id: resolvedRecipientPsid }));
+                  formM4a.append('messaging_type', 'RESPONSE');
+                  formM4a.append(
+                    'message',
+                    JSON.stringify({
+                      attachment: {
+                        type: 'audio',
+                        payload: { is_reusable: true },
+                      },
+                    })
+                  );
+                  const m4aBlob = new Blob([m4aInfo.buffer], { type: 'audio/mp4' });
+                  formM4a.append('filedata', m4aBlob, `voice_${Date.now()}.m4a`);
+                  const m4aRes = await fetch(
+                    `https://graph.facebook.com/v21.0/me/messages?access_token=${encodeURIComponent(activeToken)}`,
+                    {
+                      method: 'POST',
+                      body: formM4a,
+                    }
+                  );
+                  const m4aData = await m4aRes.json();
+                  if (!m4aData.error && m4aData.message_id) {
+                    lastMetaMessageId = m4aData.message_id;
+                  }
+                }
+
+                // Tier C: Retry via public HTTPS URL if multipart form upload failed
+                if (!lastMetaMessageId && resolvedServerAudioUrl) {
+                  const host = req.get('host') || '';
+                  const publicBase = process.env.APP_URL || (host ? `https://${host}` : '');
+                  if (publicBase.startsWith('https://')) {
+                    const publicAudioUrl = `${publicBase.replace(/\/$/, '')}${resolvedServerAudioUrl}`;
+                    const urlSendRes = await fetch(
+                      `https://graph.facebook.com/v21.0/me/messages?access_token=${encodeURIComponent(activeToken)}`,
+                      {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          recipient: { id: resolvedRecipientPsid },
+                          messaging_type: 'RESPONSE',
+                          message: {
+                            attachment: {
+                              type: 'audio',
+                              payload: { url: publicAudioUrl, is_reusable: true },
+                            },
+                          },
+                        }),
+                      }
+                    );
+                    const urlSendData = await urlSendRes.json();
+                    if (!urlSendData.error && urlSendData.message_id) {
+                      lastMetaMessageId = urlSendData.message_id;
+                    }
+                  }
+                }
+              }
+            } else if (mediaSource) {
               let binaryInfo = extractBinaryFromDataUrlOrMediaPath(mediaSource);
 
               if (!binaryInfo && (mediaSource.startsWith('https://') || mediaSource.startsWith('http://'))) {
@@ -1944,11 +2707,11 @@ app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
                   const remoteRes = await fetch(mediaSource);
                   if (remoteRes.ok) {
                     const arrBuf = await remoteRes.arrayBuffer();
-                    const cType = remoteRes.headers.get('content-type') || (metaAttType === 'audio' ? 'audio/mp4' : 'image/jpeg');
+                    const cType = remoteRes.headers.get('content-type') || 'image/jpeg';
                     binaryInfo = {
                       buffer: Buffer.from(arrBuf),
                       mimeType: cType,
-                      ext: metaAttType === 'audio' ? 'm4a' : 'jpg',
+                      ext: 'jpg',
                     };
                   }
                 } catch {}
@@ -2038,6 +2801,8 @@ app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
             delivery: 'meta_graph_api',
             messageId: lastMetaMessageId,
             recipientId: resolvedRecipientPsid,
+            audioUrl: resolvedServerAudioUrl || undefined,
+            audioDataUrl: resolvedServerAudioDataUrl || undefined,
             message: 'សារ និងឯកសារបានផ្ញើទៅកាន់ Meta Business Messenger ដោយជោគជ័យ',
           });
         }
@@ -2052,6 +2817,8 @@ app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
       success: true,
       delivery: 'live_messenger_confirmed',
       recipientId,
+      audioUrl: resolvedServerAudioUrl || undefined,
+      audioDataUrl: resolvedServerAudioDataUrl || undefined,
       customerReplyText,
       message: 'សារបានផ្ញើទៅកាន់អតិថិជន Messenger ដោយជោគជ័យ (Live Messenger)',
     });
@@ -2650,21 +3417,55 @@ const saveOnlineOrders = (ordersList: any[]) => {
   }
 };
 
-let hasPurgedInitialServerThreads = false;
+const REPETITIVE_AUTO_SEED_NAMES = new Set([
+  'សុខ ស្រីរ័ត្ន (Messenger Live)',
+  'កែវ វិបុល (Facebook Shopper)',
+  'គឹម ស្រីពៅ (Messenger Live)',
+  'សួស ចាន់ថន (Messenger Live)',
+  'ហេង គន្ធា (Facebook Shopper)',
+  'សុខ រស្មី (Messenger Live)',
+  'ចាន់ ថារី (Facebook)',
+  'វណ្ណៈ ពិសិដ្ឋ (Live)',
+  'លី ស្រីនិច (Messenger)',
+  'គីម ហេង (Facebook Shopper)',
+  'ស៊ីនួន មាលា (Live Customer)',
+  'ម៉េង ហុង (FB Live)',
+]);
+
+const isRepetitiveAutoSeededThread = (t: any): boolean => {
+  if (!t || !t.id) return true;
+  const tid = String(t.id);
+  const custId = String(t.customer?.id || '');
+  const custPsid = String(t.customer?.psid || '');
+  const custName = String(t.customer?.name || '').trim();
+  const firstMsgText = String(t.messages?.[0]?.text || t.lastMessage || '').trim();
+
+  if (/^fb_th_.*_[12]_\d+$/.test(tid)) return true;
+  if (/^fb_usr_\d+_[12]$/.test(custId) || /^fb_psid_\d+_[12]$/.test(custPsid)) return true;
+  if (REPETITIVE_AUTO_SEED_NAMES.has(custName)) return true;
+  if (
+    firstMsgText.includes('ចង់សួរថាម៉ូដថ្មីនេះមានក្នុងស្តុកអត់បង? តម្លៃប៉ុន្មានដែរចា៎?') ||
+    firstMsgText.includes('បងសុំកុម្ម៉ង់ ១ ឈុតមកភ្នំពេញ (ទួលគោក) លេខទូរស័ព្ទ 012 889 977 សុំលេខកុង ABA / KHQR ផងបង!') ||
+    firstMsgText.includes('ចង់សួរថារ៉ូបហូលពណ៌ផ្កាឈូកមាន Size L ដែរទេបង?') ||
+    firstMsgText.includes('បងចង់សួរថាកាស Sonos Pro នេះបើកុម្ម៉ង់ឥឡូវ អាចដឹក Grab មកទួលគោកបានទេ?') ||
+    firstMsgText.includes('បងសុំលេខកុង ABA មកប្អូនវេលុយទិញសេរ៉ូម Botanica មួយឈុត')
+  ) {
+    return true;
+  }
+  return false;
+};
 
 const getOnlineThreads = (): any[] => {
   try {
-    if (!hasPurgedInitialServerThreads) {
-      hasPurgedInitialServerThreads = true;
-      liveIncomingEvents.length = 0;
-      saveOnlineThreads([]);
-      return [];
-    }
     if (fs.existsSync(THREADS_FILE_PATH)) {
       const raw = fs.readFileSync(THREADS_FILE_PATH, 'utf-8');
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        return parsed;
+        const cleaned = parsed.filter((t) => !isRepetitiveAutoSeededThread(t));
+        if (cleaned.length !== parsed.length) {
+          saveOnlineThreads(cleaned);
+        }
+        return cleaned;
       }
     }
   } catch (err) {
@@ -2678,11 +3479,133 @@ const saveOnlineThreads = (threadsList: any[]) => {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    fs.writeFileSync(THREADS_FILE_PATH, JSON.stringify(threadsList, null, 2), 'utf-8');
+    const cleaned = (threadsList || []).filter((t) => !isRepetitiveAutoSeededThread(t));
+    fs.writeFileSync(THREADS_FILE_PATH, JSON.stringify(cleaned, null, 2), 'utf-8');
     return true;
   } catch (err) {
     console.error('[Threads API] Error writing threads file:', err);
     return false;
+  }
+};
+
+const mergeServerMessages = (incomingMsgs: any[], existingMsgs: any[]): any[] => {
+  const msgMap = new Map<string, any>();
+  for (const m of existingMsgs || []) {
+    if (!m || !m.id) continue;
+    msgMap.set(String(m.id), m);
+  }
+  for (const m of incomingMsgs || []) {
+    if (!m || !m.id) continue;
+    const mid = String(m.id);
+    const prev = msgMap.get(mid);
+    if (!prev) {
+      msgMap.set(mid, m);
+    } else {
+      // Preserve richer attachment URLs (e.g. audio or image data URLs) if one side stripped them
+      let mergedAttachments = m.attachments || prev.attachments;
+      if (Array.isArray(m.attachments) && Array.isArray(prev.attachments)) {
+        mergedAttachments = m.attachments.map((att: any, idx: number) => {
+          const prevAtt = prev.attachments[idx];
+          if (
+            prevAtt &&
+            prevAtt.data?.url &&
+            (!att?.data?.url || prevAtt.data.url.length > att.data.url.length)
+          ) {
+            return {
+              ...prevAtt,
+              ...att,
+              data: {
+                ...prevAtt.data,
+                ...att.data,
+                url: prevAtt.data.url,
+                transcript: att.data?.transcript || prevAtt.data?.transcript,
+              },
+            };
+          }
+          return att;
+        });
+      }
+      msgMap.set(mid, {
+        ...prev,
+        ...m,
+        attachments: mergedAttachments,
+      });
+    }
+  }
+  return Array.from(msgMap.values());
+};
+
+const mergeServerThreads = (incoming: any[], existing: any[], replaceAll = false): any[] => {
+  const cleanIncoming = (incoming || []).filter((t) => !isRepetitiveAutoSeededThread(t));
+  if (replaceAll) {
+    return cleanIncoming;
+  }
+  const cleanExisting = (existing || []).filter((t) => !isRepetitiveAutoSeededThread(t));
+  const map = new Map<string, any>();
+  const customerKeyToThreadId = new Map<string, string>();
+
+  const getCustomerKey = (t: any): string => {
+    const psid = String(t?.customer?.psid || '').trim();
+    if (psid && !psid.startsWith('fb_psid_')) return `psid:${psid}`;
+    const name = String(t?.customer?.name || '').trim().toLowerCase();
+    const pageId = String(t?.pageId || '');
+    if (name && name !== 'facebook customer') return `name:${pageId}:${name}`;
+    return `id:${t.id}`;
+  };
+
+  for (const t of cleanExisting) {
+    if (!t || !t.id) continue;
+    const tid = String(t.id);
+    const cKey = getCustomerKey(t);
+    map.set(tid, t);
+    customerKeyToThreadId.set(cKey, tid);
+  }
+  for (const t of cleanIncoming) {
+    if (!t || !t.id) continue;
+    const rawTid = String(t.id);
+    const cKey = getCustomerKey(t);
+    const matchedTid = map.has(rawTid) ? rawTid : customerKeyToThreadId.get(cKey);
+    if (!matchedTid) {
+      map.set(rawTid, t);
+      customerKeyToThreadId.set(cKey, rawTid);
+    } else {
+      const prev = map.get(matchedTid);
+      const mergedMessages = mergeServerMessages(t.messages || [], prev.messages || []);
+      const lastMsg = mergedMessages[mergedMessages.length - 1];
+      map.set(matchedTid, {
+        ...prev,
+        ...t,
+        id: matchedTid,
+        customer: {
+          ...(prev.customer || {}),
+          ...(t.customer || {}),
+        },
+        lastMessage: lastMsg?.text || t.lastMessage || prev.lastMessage,
+        lastMessageTime: lastMsg?.timestamp || t.lastMessageTime || prev.lastMessageTime,
+        lastActivityAt: Math.max(Number(t.lastActivityAt || 0), Number(prev.lastActivityAt || 0)) || Date.now(),
+        messages: mergedMessages,
+      });
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => {
+    const timeA = Number(a.lastActivityAt || 0);
+    const timeB = Number(b.lastActivityAt || 0);
+    return timeB - timeA;
+  });
+};
+
+const broadcastThreadsUpdate = (threadsList: any[]) => {
+  const ssePayload = `data: ${JSON.stringify({
+    type: 'threads_updated',
+    threads: threadsList,
+    timestamp: Date.now(),
+  })}\n\n`;
+  for (const clientRes of webhookSseClients) {
+    try {
+      clientRes.write(ssePayload);
+    } catch {
+      webhookSseClients.delete(clientRes);
+    }
   }
 };
 
@@ -2817,15 +3740,21 @@ app.get('/api/threads', (req: Request, res: Response) => {
 
 app.post('/api/threads/sync', (req: Request, res: Response) => {
   try {
-    const { threads } = req.body;
+    const { threads, replaceAll } = req.body;
     if (!Array.isArray(threads)) {
       return res.status(400).json({ error: 'threads array is required' });
     }
-    hasPurgedInitialServerThreads = true;
-    saveOnlineThreads(threads);
+    const existing = getOnlineThreads();
+    const merged = mergeServerThreads(threads, existing, Boolean(replaceAll));
+    const hasChanged = JSON.stringify(merged) !== JSON.stringify(existing);
+    if (hasChanged) {
+      saveOnlineThreads(merged);
+      broadcastThreadsUpdate(merged);
+    }
     return res.json({
       success: true,
-      count: threads.length,
+      data: merged,
+      count: merged.length,
       syncedAt: new Date().toISOString(),
     });
   } catch (err: any) {
@@ -2836,9 +3765,9 @@ app.post('/api/threads/sync', (req: Request, res: Response) => {
 
 app.delete('/api/threads', (_req: Request, res: Response) => {
   try {
-    hasPurgedInitialServerThreads = true;
     liveIncomingEvents.length = 0;
     saveOnlineThreads([]);
+    broadcastThreadsUpdate([]);
     return res.json({
       success: true,
       message: 'បានលុបសារទាំងអស់ក្នុងប្រអប់សាររួចរាល់',

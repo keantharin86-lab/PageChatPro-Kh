@@ -17,8 +17,16 @@ import {
   Pause,
   Move,
   GripVertical,
+  Mic,
+  Square,
+  ArrowLeft,
 } from 'lucide-react';
 import { ChatThread, PageAccount } from '../types';
+import {
+  resolveCustomerOriginalPageAvatar,
+  resolvePageOriginalAvatar,
+  buildClientFallbackAvatarDataUrl,
+} from '../utils/avatarUtils';
 
 type WidgetPositionZone =
   | 'bottom-right'
@@ -140,7 +148,7 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
   onConnectRealToken,
   language,
 }) => {
-  const [isOpen, setIsOpen] = useState<boolean>(true);
+  const [isOpen, setIsOpen] = useState<boolean>(false);
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
   const [customerInput, setCustomerInput] = useState<string>('');
   const [customSenderName, setCustomSenderName] = useState<string>('');
@@ -196,6 +204,127 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
   const closedButtonRef = useRef<HTMLButtonElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const widgetImageInputRef = useRef<HTMLInputElement>(null);
+  const widgetAudioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
+
+  const playWidgetFallbackVoice = async (msgId: string, transcriptText?: string) => {
+    const cleanText = (transcriptText || '')
+      .replace(/🎤\s*\[?សារសម្លេង[^\]]*\]?:?\s*/gi, '')
+      .replace(/^["']|["']$/g, '')
+      .trim();
+
+    if (cleanText) {
+      try {
+        const res = await fetch('/api/ai/text-to-voice', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: cleanText }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const serverSrc = data?.audioUrl || data?.audioDataUrl;
+          if (serverSrc) {
+            const fallbackAudio = new Audio(serverSrc);
+            widgetAudioElementsRef.current[msgId] = fallbackAudio;
+            fallbackAudio.onended = () => setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
+            fallbackAudio.onerror = () => setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
+            await fallbackAudio.play();
+            return;
+          }
+        }
+      } catch {
+        // Proceed to SpeechSynthesis / WAV fallback
+      }
+    }
+
+    if (cleanText && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(cleanText);
+        utterance.lang = /[\u1780-\u17FF]/.test(cleanText) ? 'km-KH' : 'en-US';
+        utterance.rate = 1.0;
+        window.speechSynthesis.speak(utterance);
+      } catch {}
+    }
+
+    try {
+      const wavAudio = new Audio(createWidgetWavDataUrl(3));
+      widgetAudioElementsRef.current[msgId] = wavAudio;
+      wavAudio.onended = () => setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
+      wavAudio.onerror = () => setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
+      await wavAudio.play();
+    } catch {
+      setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
+    }
+  };
+
+  const handlePlayWidgetAudio = (msgId: string, rawAudUrl?: string, transcriptText?: string) => {
+    if (playingWidgetAudioId === msgId) {
+      const existing = widgetAudioElementsRef.current[msgId];
+      if (existing) {
+        existing.pause();
+        existing.currentTime = 0;
+      }
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        try {
+          window.speechSynthesis.cancel();
+        } catch {}
+      }
+      setPlayingWidgetAudioId(null);
+      return;
+    }
+
+    Object.values(widgetAudioElementsRef.current).forEach((el) => {
+      try {
+        el.pause();
+        el.currentTime = 0;
+      } catch {}
+    });
+
+    setPlayingWidgetAudioId(msgId);
+
+    const trimmedUrl = (rawAudUrl || '').trim();
+    if (!trimmedUrl) {
+      void playWidgetFallbackVoice(msgId, transcriptText);
+      return;
+    }
+
+    let playableSrc = trimmedUrl;
+    if (
+      playableSrc.startsWith('http') &&
+      !playableSrc.includes(window.location.host) &&
+      !playableSrc.includes('/api/facebook/media-proxy')
+    ) {
+      playableSrc = `/api/facebook/media-proxy?url=${encodeURIComponent(playableSrc)}`;
+    }
+
+    try {
+      const audio = new Audio(playableSrc);
+      audio.preload = 'auto';
+      widgetAudioElementsRef.current[msgId] = audio;
+
+      let fallbackTriggered = false;
+      const runFallbackOnce = () => {
+        if (fallbackTriggered) return;
+        fallbackTriggered = true;
+        void playWidgetFallbackVoice(msgId, transcriptText);
+      };
+
+      audio.onended = () => {
+        setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
+      };
+      audio.onerror = () => {
+        runFallbackOnce();
+      };
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(() => {
+          runFallbackOnce();
+        });
+      }
+    } catch {
+      void playWidgetFallbackVoice(msgId, transcriptText);
+    }
+  };
 
   useEffect(() => {
     const handleResize = () => {
@@ -380,27 +509,198 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
     e.target.value = '';
   };
 
-  // Customer sends a Voice Sound message into the Page
-  const handleSendCustomerVoiceSound = () => {
-    const voiceText =
-      customerInput.trim() || 'សួស្តីបង ម៉ូដនេះមានក្នុងស្តុកអត់? ហើយតម្លៃប៉ុន្មានដែរចា៎?';
-    const wavUrl = createWidgetWavDataUrl(3.5);
-    onSendCustomerMessageToPage(
-      `🎤 [សារសម្លេង Voice]: "${voiceText}"`,
-      sendAsNewCustomer,
-      customSenderName.trim() || undefined,
-      [
-        {
-          type: 'audio',
-          data: {
-            url: wavUrl,
-            duration: '0:04',
-            transcript: voiceText,
+  const [isRecordingWidgetVoice, setIsRecordingWidgetVoice] = useState(false);
+  const [widgetRecordingSeconds, setWidgetRecordingSeconds] = useState(0);
+  const [widgetLiveTranscript, setWidgetLiveTranscript] = useState('');
+  const widgetMediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const widgetRecordedChunksRef = useRef<Blob[]>([]);
+  const widgetTimerRef = useRef<number | null>(null);
+  const widgetSpeechRecRef = useRef<any>(null);
+  const widgetLiveTranscriptRef = useRef<string>('');
+
+  // Customer records or sends a real Voice Sound message into the Page
+  const handleSendCustomerVoiceSound = async () => {
+    // If the user typed text in the box and isn't recording, send that exact text as a Voice message
+    if (!isRecordingWidgetVoice && customerInput.trim()) {
+      const voiceText = customerInput.trim();
+      setCustomerInput('');
+      let audioUrl = createWidgetWavDataUrl(3.5);
+      let duration = '0:04';
+      try {
+        const res = await fetch('/api/ai/text-to-voice', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: voiceText }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.audioUrl || data?.audioDataUrl) {
+            audioUrl = data.audioUrl || data.audioDataUrl;
+          }
+          if (data?.duration) {
+            duration = data.duration;
+          }
+        }
+      } catch {}
+      onSendCustomerMessageToPage(
+        `🎤 [សារសម្លេង Voice]: "${voiceText}"`,
+        sendAsNewCustomer,
+        customSenderName.trim() || undefined,
+        [
+          {
+            type: 'audio',
+            data: {
+              url: audioUrl,
+              duration,
+              transcript: voiceText,
+            },
           },
-        },
-      ]
-    );
-    setCustomerInput('');
+        ]
+      );
+      return;
+    }
+
+    if (isRecordingWidgetVoice) {
+      if (widgetTimerRef.current) {
+        window.clearInterval(widgetTimerRef.current);
+        widgetTimerRef.current = null;
+      }
+      if (widgetSpeechRecRef.current) {
+        try {
+          widgetSpeechRecRef.current.stop();
+        } catch {}
+      }
+      if (widgetMediaRecorderRef.current && widgetMediaRecorderRef.current.state !== 'inactive') {
+        widgetMediaRecorderRef.current.stop();
+      } else {
+        const durSec = Math.max(2, widgetRecordingSeconds || 3);
+        const wavUrl = createWidgetWavDataUrl(durSec);
+        const voiceText =
+          widgetLiveTranscriptRef.current.trim() ||
+          widgetLiveTranscript.trim() ||
+          customerInput.trim() ||
+          'សួស្តីបង! សារសម្លេងពីអតិថិជន';
+        onSendCustomerMessageToPage(
+          `🎤 [សារសម្លេង Voice]: "${voiceText}"`,
+          sendAsNewCustomer,
+          customSenderName.trim() || undefined,
+          [
+            {
+              type: 'audio',
+              data: {
+                url: wavUrl,
+                duration: `0:${String(durSec).padStart(2, '0')}`,
+                transcript: voiceText,
+              },
+            },
+          ]
+        );
+        setCustomerInput('');
+        setWidgetLiveTranscript('');
+        widgetLiveTranscriptRef.current = '';
+      }
+      setIsRecordingWidgetVoice(false);
+      setWidgetRecordingSeconds(0);
+      return;
+    }
+
+    // Start recording real microphone audio + live SpeechRecognition
+    setWidgetLiveTranscript('');
+    widgetLiveTranscriptRef.current = '';
+    setWidgetRecordingSeconds(0);
+    setIsRecordingWidgetVoice(true);
+
+    const startTime = Date.now();
+    widgetTimerRef.current = window.setInterval(() => {
+      setWidgetRecordingSeconds(Math.floor((Date.now() - startTime) / 1000));
+    }, 500);
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      try {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'km-KH';
+        recognition.onresult = (event: any) => {
+          const transcript = Array.from(event.results)
+            .map((result: any) => result[0].transcript)
+            .join('')
+            .trim();
+          if (transcript) {
+            widgetLiveTranscriptRef.current = transcript;
+            setWidgetLiveTranscript(transcript);
+          }
+        };
+        widgetSpeechRecRef.current = recognition;
+        recognition.start();
+      } catch {}
+    }
+
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        widgetRecordedChunksRef.current = [];
+        const recorder = new MediaRecorder(stream);
+        recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) {
+            widgetRecordedChunksRef.current.push(e.data);
+          }
+        };
+        recorder.onstop = () => {
+          stream.getTracks().forEach((t) => t.stop());
+          const durSec = Math.max(1, Math.round((Date.now() - startTime) / 1000));
+          const durationFormatted = `0:${String(Math.min(59, durSec)).padStart(2, '0')}`;
+          const blob = new Blob(widgetRecordedChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+          const reader = new FileReader();
+          reader.onloadend = async () => {
+            let finalAudioUrl = (reader.result as string) || createWidgetWavDataUrl(durSec);
+            const browserCaptured = widgetLiveTranscriptRef.current.trim() || widgetLiveTranscript.trim();
+            const recognizedText =
+              customerInput.trim() || browserCaptured || 'សួស្តីបង! សារសម្លេងពីអតិថិជន';
+
+            try {
+              const normRes = await fetch('/api/audio/normalize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  audioDataUrl: finalAudioUrl,
+                  fallbackText: recognizedText,
+                }),
+              });
+              if (normRes.ok) {
+                const normData = await normRes.json();
+                if (normData?.audioUrl || normData?.audioDataUrl) {
+                  finalAudioUrl = normData.audioUrl || normData.audioDataUrl;
+                }
+              }
+            } catch {}
+
+            onSendCustomerMessageToPage(
+              `🎤 [សារសម្លេង Voice]: "${recognizedText}"`,
+              sendAsNewCustomer,
+              customSenderName.trim() || undefined,
+              [
+                {
+                  type: 'audio',
+                  data: {
+                    url: finalAudioUrl,
+                    duration: durationFormatted,
+                    transcript: recognizedText,
+                  },
+                },
+              ]
+            );
+            setCustomerInput('');
+            setWidgetLiveTranscript('');
+            widgetLiveTranscriptRef.current = '';
+          };
+          reader.readAsDataURL(blob);
+        };
+        widgetMediaRecorderRef.current = recorder;
+        recorder.start(150);
+      } catch {}
+    }
   };
 
   const quickCustomerQuestions = [
@@ -563,31 +863,43 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
       >
         <div className="flex items-center gap-2 min-w-0">
           <GripVertical className="w-4 h-4 text-white/80 shrink-0 -ml-1" />
-          <div className="relative shrink-0">
+          <div className="relative flex items-center shrink-0">
             <img
-              src={
-                selectedPage.avatar ||
-                'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=200&q=80'
-              }
+              src={resolveCustomerOriginalPageAvatar(activeThread?.customer, selectedPage)}
+              alt={activeThread?.customer.name || 'Customer'}
+              referrerPolicy="no-referrer"
+              onError={(e) => {
+                e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                  activeThread?.customer.name || 'ភ្ញៀវ',
+                  selectedPage.name
+                );
+              }}
+              className="w-8 h-8 rounded-full object-cover border-2 border-white pointer-events-none z-10"
+            />
+            <img
+              src={resolvePageOriginalAvatar(selectedPage)}
               alt={selectedPage.name}
               referrerPolicy="no-referrer"
-              className="w-8 h-8 rounded-full object-cover border-2 border-white pointer-events-none"
+              onError={(e) => {
+                e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                  selectedPage.name,
+                  'FB Page'
+                );
+              }}
+              className="w-5 h-5 rounded-full object-cover border border-white -ml-2 mt-3 pointer-events-none z-20"
             />
-            <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-400 border-2 border-[#0084FF]" />
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
               <p className="text-xs font-extrabold truncate">
-                📱 Messenger: {selectedPage.name.split(' - ')[0]}
+                📱 {selectedPage.name.split(' - ')[0]}
               </p>
-              <span className="text-[9px] font-black bg-white/20 px-1.5 py-0.2 rounded-full uppercase">
-                Live
+              <span className="text-[9px] font-black bg-white/20 px-1.5 py-0.2 rounded-full">
+                រូបដើមពីផេក
               </span>
             </div>
             <p className="text-[10px] text-blue-100 truncate">
-              {language === 'kh'
-                ? 'ទាញក្បាលផ្ទាំងនេះដូរទីតាំងបានគ្រប់កន្លែង'
-                : 'Drag header to move anywhere'}
+              {activeThread?.customer.name || 'ប្រអប់អតិថិជនឆាតចូលផេក'}
             </p>
           </div>
         </div>
@@ -595,8 +907,17 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
         <div className="flex items-center gap-1 shrink-0">
           <button
             type="button"
+            onClick={() => setIsOpen(false)}
+            className="px-2 py-1 rounded-lg bg-white text-[#0084FF] hover:bg-blue-50 transition-colors cursor-pointer flex items-center gap-1 text-[10px] font-extrabold shadow-xs"
+            title="ត្រឡប់មកប្រអប់ដើមវិញ (Back to Main Inbox)"
+          >
+            <ArrowLeft className="w-3 h-3" />
+            <span>{language === 'kh' ? 'មកប្រអប់ដើមវិញ' : 'Main Inbox'}</span>
+          </button>
+          <button
+            type="button"
             onClick={handleCyclePosition}
-            className="px-2 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-white transition-colors cursor-pointer flex items-center gap-1 text-[10px] font-bold"
+            className="px-1.5 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-white transition-colors cursor-pointer flex items-center gap-0.5 text-[10px] font-bold"
             title={
               language === 'kh'
                 ? `ចុចដូរជ្រុង (${POSITION_ZONE_LABELS_KH[positionZone]})`
@@ -604,7 +925,6 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
             }
           >
             <Move className="w-3 h-3" />
-            <span>{language === 'kh' ? 'ដូរទីតាំង' : 'Move'}</span>
           </button>
           <button
             type="button"
@@ -614,14 +934,6 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
           >
             {isMinimized ? <Maximize2 className="w-3.5 h-3.5" /> : <Minimize2 className="w-3.5 h-3.5" />}
           </button>
-          <button
-            type="button"
-            onClick={() => setIsOpen(false)}
-            className="p-1.5 rounded-lg hover:bg-white/20 text-white transition-colors cursor-pointer"
-            title="បិទផ្ទាំងនេះ"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
         </div>
       </div>
 
@@ -630,23 +942,10 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
           {/* Auto-Stream & Mode Controls Bar */}
           <div className="bg-slate-50 border-b border-slate-200 px-3 py-2 space-y-1.5 shrink-0">
             <div className="flex items-center justify-between gap-1.5">
-              <button
-                type="button"
-                onClick={onToggleAutoIncomingStream}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                  autoIncomingStream
-                    ? 'bg-emerald-600 text-white shadow-2xs'
-                    : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
-                }`}
-                title="ឱ្យមានសារអតិថិជនឆាតចូលផេកដោយស្វ័យប្រវត្តិ (Auto) រៀងរាល់ ១៥ វិនាទី"
-              >
-                <Radio className={`w-3 h-3 ${autoIncomingStream ? 'animate-spin' : 'text-emerald-600'}`} />
-                <span>
-                  {autoIncomingStream
-                    ? 'សារភ្ញៀវចូល Auto: កំពុងបើក (ON)'
-                    : 'បើកសារភ្ញៀវចូល Auto'}
-                </span>
-              </button>
+              <div className="px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200">
+                <Radio className="w-3 h-3 text-emerald-600" />
+                <span>សារអតិថិជន Online ផ្ទាល់</span>
+              </div>
 
               <button
                 type="button"
@@ -759,73 +1058,82 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
                     <p className="whitespace-pre-wrap break-words">{msg.text}</p>
 
                     {/* Render Image, Audio, Product, and KHQR Attachments inside Customer Messenger Widget */}
-                    {msg.attachments && msg.attachments.length > 0 && (
-                      <div className="space-y-1.5 pt-1">
-                        {msg.attachments.map((att, idx) => {
-                          if (att.type === 'image') {
-                            const imgUrl = att.data?.url || (att as any).url || WIDGET_FALLBACK_IMAGE_SVG;
-                            return (
-                              <div key={idx} className="rounded-xl overflow-hidden border border-white/20 bg-white">
-                                <img
-                                  src={imgUrl}
-                                  alt={att.data?.caption || 'Image'}
-                                  referrerPolicy="no-referrer"
-                                  onError={(e) => {
-                                    const target = e.currentTarget;
-                                    const src = target.getAttribute('src') || '';
-                                    if (src.startsWith('http') && !src.includes('/api/facebook/proxy-media')) {
-                                      target.src = `/api/facebook/proxy-media?url=${encodeURIComponent(src)}`;
-                                      return;
-                                    }
-                                    if (src !== WIDGET_FALLBACK_IMAGE_SVG) {
-                                      target.src = WIDGET_FALLBACK_IMAGE_SVG;
-                                    }
-                                  }}
-                                  className="w-full max-h-40 object-cover block"
-                                />
-                              </div>
-                            );
-                          }
-
-                          if (att.type === 'audio') {
-                            const audUrl = att.data?.url || (att as any).url || createWidgetWavDataUrl(3);
-                            const isPlaying = playingWidgetAudioId === msg.id;
-                            return (
-                              <div
-                                key={idx}
-                                className={`p-2 rounded-xl flex items-center gap-2 ${
-                                  isCustomerMe ? 'bg-white/20 text-white' : 'bg-indigo-50 text-indigo-950 border border-indigo-200'
-                                }`}
-                              >
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    if (playingWidgetAudioId === msg.id) {
-                                      setPlayingWidgetAudioId(null);
-                                      return;
-                                    }
-                                    setPlayingWidgetAudioId(msg.id);
-                                    const audio = new Audio(audUrl);
-                                    audio.onended = () => setPlayingWidgetAudioId(null);
-                                    audio.onerror = () => setPlayingWidgetAudioId(null);
-                                    audio.play().catch(() => setPlayingWidgetAudioId(null));
-                                  }}
-                                  className="w-7 h-7 rounded-full bg-white text-[#0084FF] flex items-center justify-center shrink-0 cursor-pointer shadow-2xs"
-                                >
-                                  {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
-                                </button>
-                                <div className="min-w-0 flex-1">
-                                  <div className="text-[10px] font-bold flex items-center gap-1">
-                                    <Volume2 className="w-3 h-3" />
-                                    <span>សារសម្លេង ({att.data?.duration || '0:04'})</span>
-                                  </div>
-                                  {att.data?.transcript && (
-                                    <p className="text-[10px] opacity-90 truncate">"{att.data.transcript}"</p>
-                                  )}
+                    {(() => {
+                      const rawAttachments = Array.isArray(msg.attachments) ? [...msg.attachments] : [];
+                      const hasAudioAtt = rawAttachments.some((a) => a.type === 'audio');
+                      const looksLikeVoiceMsg =
+                        !hasAudioAtt &&
+                        typeof msg.text === 'string' &&
+                        (msg.text.includes('🎤') || msg.text.includes('សារសម្លេង'));
+                      if (looksLikeVoiceMsg) {
+                        rawAttachments.push({
+                          type: 'audio',
+                          data: {
+                            url: '',
+                            duration: '0:04',
+                            transcript: msg.text,
+                          },
+                        });
+                      }
+                      if (rawAttachments.length === 0) return null;
+                      return (
+                        <div className="space-y-1.5 pt-1">
+                          {rawAttachments.map((att, idx) => {
+                            if (att.type === 'image') {
+                              const imgUrl = att.data?.url || (att as any).url || WIDGET_FALLBACK_IMAGE_SVG;
+                              return (
+                                <div key={idx} className="rounded-xl overflow-hidden border border-white/20 bg-white">
+                                  <img
+                                    src={imgUrl}
+                                    alt={att.data?.caption || 'Image'}
+                                    referrerPolicy="no-referrer"
+                                    onError={(e) => {
+                                      const target = e.currentTarget;
+                                      const src = target.getAttribute('src') || '';
+                                      if (src.startsWith('http') && !src.includes('/api/facebook/proxy-media')) {
+                                        target.src = `/api/facebook/proxy-media?url=${encodeURIComponent(src)}`;
+                                        return;
+                                      }
+                                      if (src !== WIDGET_FALLBACK_IMAGE_SVG) {
+                                        target.src = WIDGET_FALLBACK_IMAGE_SVG;
+                                      }
+                                    }}
+                                    className="w-full max-h-40 object-cover block"
+                                  />
                                 </div>
-                              </div>
-                            );
-                          }
+                              );
+                            }
+
+                            if (att.type === 'audio') {
+                              const audUrl = att.data?.url || (att as any).url || '';
+                              const transcriptText = att.data?.transcript || msg.text || '';
+                              const isPlaying = playingWidgetAudioId === msg.id;
+                              return (
+                                <div
+                                  key={idx}
+                                  className={`p-2 rounded-xl flex items-center gap-2 ${
+                                    isCustomerMe ? 'bg-white/20 text-white' : 'bg-indigo-50 text-indigo-950 border border-indigo-200'
+                                  }`}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => handlePlayWidgetAudio(msg.id, audUrl, transcriptText)}
+                                    className="w-7 h-7 rounded-full bg-white text-[#0084FF] flex items-center justify-center shrink-0 cursor-pointer shadow-2xs"
+                                  >
+                                    {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
+                                  </button>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="text-[10px] font-bold flex items-center gap-1">
+                                      <Volume2 className="w-3 h-3" />
+                                      <span>សារសម្លេង ({att.data?.duration || '0:04'})</span>
+                                    </div>
+                                    {att.data?.transcript && (
+                                      <p className="text-[10px] opacity-90 truncate">"{att.data.transcript}"</p>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            }
 
                           if (att.type === 'product' && att.data) {
                             return (
@@ -847,10 +1155,11 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
                             );
                           }
 
-                          return null;
-                        })}
-                      </div>
-                    )}
+                            return null;
+                          })}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <div className="flex items-center gap-1 mt-0.5 px-1 text-[9px] text-slate-400">
                     <span>{msg.timestamp}</span>
@@ -890,6 +1199,27 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
             ))}
           </div>
 
+          {/* Active Voice Recording Status inside Customer Messenger Widget */}
+          {isRecordingWidgetVoice && (
+            <div className="bg-rose-50 border-t border-rose-200 px-3 py-1.5 flex items-center justify-between gap-2 text-[11px] shrink-0">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-600 animate-ping shrink-0" />
+                <span className="font-bold text-rose-800 truncate">
+                  {widgetLiveTranscript
+                    ? `កំពុងនិយាយ៖ "${widgetLiveTranscript}"`
+                    : `🎙️ កំពុងថតសម្លេង (0:${String(widgetRecordingSeconds).padStart(2, '0')})...`}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleSendCustomerVoiceSound}
+                className="px-2 py-0.5 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded text-[10px] shrink-0 cursor-pointer"
+              >
+                បញ្ឈប់ & ផ្ញើ
+              </button>
+            </div>
+          )}
+
           {/* Customer Messenger Input Form with Photo & Voice Sound buttons */}
           <form
             onSubmit={handleSubmit}
@@ -906,16 +1236,28 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
             <button
               type="button"
               onClick={handleSendCustomerVoiceSound}
-              className="w-8 h-8 rounded-full bg-indigo-50 hover:bg-indigo-100 text-indigo-600 flex items-center justify-center shrink-0 transition-colors cursor-pointer"
-              title="ផ្ញើសារសម្លេង (Voice Sound) ពីអតិថិជនចូលផេក"
+              className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
+                isRecordingWidgetVoice
+                  ? 'bg-rose-600 text-white animate-pulse'
+                  : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-600'
+              }`}
+              title={
+                isRecordingWidgetVoice
+                  ? 'ចុចដើម្បីបញ្ឈប់ និងផ្ញើសារសម្លេងចូលផេក'
+                  : 'ចុចថតសារសម្លេង (Voice) ពីអតិថិជនចូលផេក'
+              }
             >
-              <Volume2 className="w-4 h-4" />
+              {isRecordingWidgetVoice ? <Square className="w-3.5 h-3.5" /> : <Mic className="w-4 h-4" />}
             </button>
             <input
               type="text"
               value={customerInput}
               onChange={(e) => setCustomerInput(e.target.value)}
-              placeholder="វាយសារ, ផ្ញើរូប ឬសម្លេងចូលផេក..."
+              placeholder={
+                isRecordingWidgetVoice
+                  ? 'កំពុងថតសម្លេង... ចុចប៊ូតុងក្រហមដើម្បីផ្ញើ'
+                  : 'វាយសារ, ផ្ញើរូប ឬចុចម៉ៃក្រូហ្វូនថតសម្លេង...'
+              }
               className="flex-1 bg-slate-100 border border-slate-200 rounded-full px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:border-[#0084FF] focus:bg-white"
             />
             <button

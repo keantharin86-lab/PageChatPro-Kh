@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Sidebar, ActiveViewType } from './components/Sidebar';
 import { ConversationList } from './components/ConversationList';
 import { ChatWindow } from './components/ChatWindow';
@@ -19,7 +19,6 @@ import { GoogleDriveView } from './components/GoogleDriveView';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { MobileAppView } from './components/MobileAppView';
-import { CustomerMessengerWidget } from './components/CustomerMessengerWidget';
 import { ConversationPdfExportModal } from './components/ConversationPdfExportModal';
 import { useOnlineStatus } from './hooks/usePWAInstall';
 import {
@@ -28,7 +27,13 @@ import {
   exportDesktopDatabaseFile,
 } from './utils/offlineDb';
 import { autoBackupStoreDataToDrive } from './services/googleDriveAuth';
-import { Menu, WifiOff, Edit3, Save, Smartphone, User, X } from 'lucide-react';
+import { Menu, WifiOff, Edit3, Save, Smartphone, User, X, MessageSquare, ArrowLeft, RefreshCw } from 'lucide-react';
+import {
+  resolveCustomerOriginalPageAvatar,
+  resolvePageOriginalAvatar,
+  buildClientFallbackAvatarDataUrl,
+  isGenericStockCustomerAvatar,
+} from './utils/avatarUtils';
 import { 
   INITIAL_PAGES, 
   INITIAL_PRODUCTS, 
@@ -191,6 +196,209 @@ const mergeOrdersCatalog = (primaryList: Order[], secondaryList: Order[]): Order
   return Array.from(map.values());
 };
 
+const mergeChatMessagesList = (primaryMsgs: ChatMessage[] = [], secondaryMsgs: ChatMessage[] = []): ChatMessage[] => {
+  const msgMap = new Map<string, ChatMessage>();
+  const orderIds: string[] = [];
+
+  for (const m of primaryMsgs) {
+    if (!m || !m.id) continue;
+    msgMap.set(m.id, m);
+    orderIds.push(m.id);
+  }
+
+  for (const m of secondaryMsgs) {
+    if (!m || !m.id) continue;
+    if (!msgMap.has(m.id)) {
+      msgMap.set(m.id, m);
+      orderIds.push(m.id);
+    } else {
+      const existing = msgMap.get(m.id)!;
+      const mergedAttachments = (existing.attachments || m.attachments || []).map((att: any, idx: number) => {
+        const otherAtt = m.attachments?.[idx] || existing.attachments?.[idx];
+        const bestUrl =
+          att?.data?.url && att.data.url.length > 0
+            ? att.data.url
+            : otherAtt?.data?.url || '';
+        const bestTranscript =
+          att?.data?.transcript || otherAtt?.data?.transcript || '';
+        return {
+          ...otherAtt,
+          ...att,
+          data: {
+            ...(otherAtt?.data || {}),
+            ...(att?.data || {}),
+            url: bestUrl,
+            ...(bestTranscript ? { transcript: bestTranscript } : {}),
+          },
+        };
+      });
+      msgMap.set(m.id, {
+        ...m,
+        ...existing,
+        attachments: mergedAttachments.length > 0 ? mergedAttachments : existing.attachments || m.attachments,
+      });
+    }
+  }
+
+  return orderIds.map((id) => msgMap.get(id)!).filter(Boolean);
+};
+
+const REPETITIVE_AUTO_SEED_NAMES = new Set([
+  'សុខ ស្រីរ័ត្ន (Messenger Live)',
+  'កែវ វិបុល (Facebook Shopper)',
+  'គឹម ស្រីពៅ (Messenger Live)',
+  'សួស ចាន់ថន (Messenger Live)',
+  'ហេង គន្ធា (Facebook Shopper)',
+  'សុខ រស្មី (Messenger Live)',
+  'ចាន់ ថារី (Facebook)',
+  'វណ្ណៈ ពិសិដ្ឋ (Live)',
+  'លី ស្រីនិច (Messenger)',
+  'គីម ហេង (Facebook Shopper)',
+  'ស៊ីនួន មាលា (Live Customer)',
+  'ម៉េង ហុង (FB Live)',
+]);
+
+const isRepetitiveAutoSeededThread = (t: ChatThread | any): boolean => {
+  if (!t || !t.id) return true;
+  const tid = String(t.id);
+  const custId = String(t.customer?.id || '');
+  const custPsid = String(t.customer?.psid || '');
+  const custName = String(t.customer?.name || '').trim();
+  const firstMsgText = String(t.messages?.[0]?.text || t.lastMessage || '').trim();
+
+  if (/^fb_th_.*_[12]_\d+$/.test(tid)) return true;
+  if (/^fb_usr_\d+_[12]$/.test(custId) || /^fb_psid_\d+_[12]$/.test(custPsid)) return true;
+  if (REPETITIVE_AUTO_SEED_NAMES.has(custName)) return true;
+  if (
+    firstMsgText.includes('ចង់សួរថាម៉ូដថ្មីនេះមានក្នុងស្តុកអត់បង? តម្លៃប៉ុន្មានដែរចា៎?') ||
+    firstMsgText.includes('បងសុំកុម្ម៉ង់ ១ ឈុតមកភ្នំពេញ (ទួលគោក) លេខទូរស័ព្ទ 012 889 977 សុំលេខកុង ABA / KHQR ផងបង!') ||
+    firstMsgText.includes('ចង់សួរថារ៉ូបហូលពណ៌ផ្កាឈូកមាន Size L ដែរទេបង?') ||
+    firstMsgText.includes('បងចង់សួរថាកាស Sonos Pro នេះបើកុម្ម៉ង់ឥឡូវ អាចដឹក Grab មកទួលគោកបានទេ?') ||
+    firstMsgText.includes('បងសុំលេខកុង ABA មកប្អូនវេលុយទិញសេរ៉ូម Botanica មួយឈុត')
+  ) {
+    return true;
+  }
+  return false;
+};
+
+const getOnlineCustomerDedupeKey = (t: ChatThread): string => {
+  const psid = String(t?.customer?.psid || '').trim();
+  if (psid && !psid.startsWith('fb_psid_')) return `psid:${psid}`;
+  const name = String(t?.customer?.name || '').trim().toLowerCase();
+  const pageId = String(t?.pageId || '');
+  if (name && name !== 'facebook customer') return `name:${pageId}:${name}`;
+  return `id:${t.id}`;
+};
+
+const mergeChatThreadsCatalog = (primaryList: ChatThread[], secondaryList: ChatThread[]): ChatThread[] => {
+  const map = new Map<string, ChatThread>();
+  const customerKeyToThreadId = new Map<string, string>();
+
+  for (const t of primaryList) {
+    if (!t || !t.id || isRepetitiveAutoSeededThread(t)) continue;
+    const norm = normalizeThreadLive(t);
+    const cKey = getOnlineCustomerDedupeKey(norm);
+    const existingTid = customerKeyToThreadId.get(cKey);
+    if (!existingTid) {
+      map.set(norm.id, norm);
+      customerKeyToThreadId.set(cKey, norm.id);
+    } else {
+      const existing = map.get(existingTid)!;
+      const mergedMessages = mergeChatMessagesList(existing.messages || [], norm.messages || []);
+      const lastMsg = mergedMessages[mergedMessages.length - 1];
+      map.set(existingTid, {
+        ...norm,
+        ...existing,
+        id: existingTid,
+        lastMessage: lastMsg?.text || existing.lastMessage || norm.lastMessage,
+        lastMessageTime: lastMsg?.timestamp || existing.lastMessageTime || norm.lastMessageTime,
+        messages: mergedMessages,
+      });
+    }
+  }
+
+  for (const t of secondaryList) {
+    if (!t || !t.id || isRepetitiveAutoSeededThread(t)) continue;
+    const norm = normalizeThreadLive(t);
+    const cKey = getOnlineCustomerDedupeKey(norm);
+    const matchedTid = map.has(norm.id) ? norm.id : customerKeyToThreadId.get(cKey);
+    if (!matchedTid) {
+      map.set(norm.id, norm);
+      customerKeyToThreadId.set(cKey, norm.id);
+    } else {
+      const existing = map.get(matchedTid)!;
+      const mergedMessages = mergeChatMessagesList(existing.messages || [], norm.messages || []);
+      const lastMsg = mergedMessages[mergedMessages.length - 1];
+      const existingTime = existing.lastActivityAt || 0;
+      const incomingTime = norm.lastActivityAt || 0;
+      const latestThread = incomingTime > existingTime ? norm : existing;
+      map.set(matchedTid, {
+        ...norm,
+        ...existing,
+        id: matchedTid,
+        lastMessage: lastMsg?.text || latestThread.lastMessage || existing.lastMessage,
+        lastMessageTime: lastMsg?.timestamp || latestThread.lastMessageTime || existing.lastMessageTime,
+        lastActivityAt: Math.max(existingTime, incomingTime) || Date.now(),
+        orderIds: Array.from(new Set([...(existing.orderIds || []), ...(norm.orderIds || [])])),
+        messages: mergedMessages,
+      });
+    }
+  }
+
+  return Array.from(map.values());
+};
+
+const getThreadsContentSignature = (list: ChatThread[]): string =>
+  (list || [])
+    .map(
+      (t) =>
+        `${t.id}:${t.unreadCount}:${t.status}:${t.archived ? 1 : 0}:${t.lastMessage}:${
+          t.messages?.length || 0
+        }:${t.messages?.[t.messages.length - 1]?.id || ''}:${
+          t.messages?.[t.messages.length - 1]?.text || ''
+        }`
+    )
+    .join('|');
+
+const createPlayableReplyWavDataUrl = (durationSec = 3): string => {
+  try {
+    const sampleRate = 8000;
+    const numSamples = Math.max(1, Math.floor(sampleRate * durationSec));
+    const buffer = new ArrayBuffer(44 + numSamples * 2);
+    const view = new DataView(buffer);
+    const writeStr = (offset: number, str: string) => {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    };
+    writeStr(0, 'RIFF');
+    view.setUint32(4, 36 + numSamples * 2, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, 'data');
+    view.setUint32(40, numSamples * 2, true);
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / sampleRate;
+      const env = Math.sin(Math.min(1, t * 6) * (Math.PI / 2)) * Math.max(0, 1 - t / durationSec);
+      const freq = 240 + 45 * Math.sin(2 * Math.PI * 2.5 * t);
+      const s = Math.sin(2 * Math.PI * freq * t) * env * 0.6;
+      view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, s)) * 12000, true);
+    }
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+    return `data:audio/wav;base64,${btoa(binary)}`;
+  } catch {
+    return '';
+  }
+};
+
+
 const DEFAULT_FALLBACK_PAGE: PageAccount = {
   id: 'page_default',
   name: 'ទំព័រហាងរបស់អ្នក (ភ្ជាប់ផេកថ្មី)',
@@ -215,114 +423,41 @@ const normalizePageLive = (p?: PageAccount): PageAccount => {
   };
 };
 
-const normalizeThreadLive = (t: ChatThread): ChatThread => ({
-  ...t,
-  customer: {
-    ...t.customer,
-    psid: t.customer.psid || `fb_psid_${t.customer.id}`,
-    isRealFacebookUser: true,
-    platform: t.customer.platform || 'messenger',
-  },
-  messages: (t.messages || []).map((m) => ({
-    ...m,
-    deliveryStatus: m.deliveryStatus === 'sent_local' || !m.deliveryStatus ? 'sent_meta' : m.deliveryStatus,
-    isLiveMeta: true,
-  })),
-});
-
-const createLiveMessengerThreadsForPage = (page: PageAccount): ChatThread[] => {
-  const now = new Date();
-  const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
-  const baseTs = Date.now();
-  const shortPageName = page.name.split(' - ')[0] || page.name;
-
-  const thread1Id = `fb_th_${page.id}_1_${baseTs}`;
-  const thread2Id = `fb_th_${page.id}_2_${baseTs + 1}`;
-
-  const msg1Text = `ជំរាបសួរបង! ខ្ញុំឃើញផេក "${shortPageName}" លើ Facebook Messenger ចង់សួរថាម៉ូដថ្មីនេះមានក្នុងស្តុកអត់បង? តម្លៃប៉ុន្មានដែរចា៎?`;
-  const msg2Text = `បងសុំកុម្ម៉ង់ ១ ឈុតមកភ្នំពេញ (ទួលគោក) លេខទូរស័ព្ទ 012 889 977 សុំលេខកុង ABA / KHQR ផងបង!`;
-
-  return [
-    {
-      id: thread1Id,
-      pageId: page.id,
-      customer: {
-        id: `fb_usr_${baseTs}_1`,
-        psid: `fb_psid_${baseTs}_1`,
-        isRealFacebookUser: true,
-        name: 'សុខ ស្រីរ័ត្ន (Messenger Live)',
-        avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80',
-        platform: page.platform || 'messenger',
-        phone: '012 889 977',
-        province: 'ភ្នំពេញ',
-        address: 'ផ្លូវ 315 ខណ្ឌទួលគោក ភ្នំពេញ',
-        tags: ['Facebook Live', 'ភ្ញៀវថ្មី', shortPageName],
-        totalOrders: 0,
-        totalSpent: 0,
-        notes: `អតិថិជនឆាតចូលផ្ទាល់ពីផេក ${page.name}`,
-        createdAt: new Date().toISOString().split('T')[0],
-      },
-      unreadCount: 1,
-      status: 'needs_reply',
-      lastMessage: msg1Text,
-      lastMessageTime: timeStr,
-      orderIds: [],
-      messages: [
-        {
-          id: `msg_${baseTs}_1`,
-          sender: 'customer',
-          senderName: 'សុខ ស្រីរ័ត្ន (Messenger Live)',
-          text: msg1Text,
-          timestamp: timeStr,
-          deliveryStatus: 'sent_meta',
-          isLiveMeta: true,
-        },
-      ],
+const normalizeThreadLive = (t: ChatThread): ChatThread => {
+  const psid = t.customer.psid || `fb_psid_${t.customer.id}`;
+  const resolvedAvatar = isGenericStockCustomerAvatar(t.customer.avatarUrl)
+    ? resolveCustomerOriginalPageAvatar({ ...t.customer, psid }, { id: t.pageId })
+    : t.customer.avatarUrl;
+  return {
+    ...t,
+    customer: {
+      ...t.customer,
+      psid,
+      avatarUrl: resolvedAvatar,
+      isRealFacebookUser: true,
+      platform: t.customer.platform || 'messenger',
     },
-    {
-      id: thread2Id,
-      pageId: page.id,
-      customer: {
-        id: `fb_usr_${baseTs}_2`,
-        psid: `fb_psid_${baseTs}_2`,
-        isRealFacebookUser: true,
-        name: 'កែវ វិបុល (Facebook Shopper)',
-        avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=300&q=80',
-        platform: page.platform || 'messenger',
-        phone: '098 765 432',
-        province: 'សៀមរាប',
-        address: 'សង្កាត់ស្វាយដង្គំ ក្រុងសៀមរាប',
-        tags: ['Facebook Live', 'សុំ KHQR', shortPageName],
-        totalOrders: 0,
-        totalSpent: 0,
-        notes: `អតិថិជនឆាតចូលផ្ទាល់ពីផេក ${page.name}`,
-        createdAt: new Date().toISOString().split('T')[0],
-      },
-      unreadCount: 1,
-      status: 'needs_reply',
-      lastMessage: msg2Text,
-      lastMessageTime: timeStr,
-      orderIds: [],
-      messages: [
-        {
-          id: `msg_${baseTs}_2`,
-          sender: 'customer',
-          senderName: 'កែវ វិបុល (Facebook Shopper)',
-          text: msg2Text,
-          timestamp: timeStr,
-          deliveryStatus: 'sent_meta',
-          isLiveMeta: true,
-        },
-      ],
-    },
-  ];
+    messages: (t.messages || []).map((m) => ({
+      ...m,
+      deliveryStatus: m.deliveryStatus === 'sent_local' || !m.deliveryStatus ? 'sent_meta' : m.deliveryStatus,
+      isLiveMeta: true,
+    })),
+  };
 };
+
+const createLiveMessengerThreadsForPage = (_page: PageAccount): ChatThread[] => {
+  // Never auto-generate repetitive fake customer messages
+  return [];
+};
+
+let userExplicitlyClearedAllChatsInSession = false;
 
 const ensureAllPagesHaveLiveThreads = (
   threadsList: ChatThread[],
   _pagesList: PageAccount[]
 ): ChatThread[] => {
-  return threadsList.map(normalizeThreadLive);
+  // Keep only clean, deduplicated Online customer threads; never auto-seed repetitive demo threads
+  return mergeChatThreadsCatalog(threadsList, []);
 };
 
 export default function App() {
@@ -377,17 +512,16 @@ export default function App() {
 
   const [threads, setThreads] = useState<ChatThread[]>(() => {
     try {
-      if (localStorage.getItem('pagechat_inbox_cleared_all_v1') !== 'true') {
-        localStorage.setItem('pagechat_inbox_cleared_all_v1', 'true');
-        localStorage.setItem('pagechat_threads', '[]');
-        localStorage.removeItem('pagechat_selected_thread_id');
+      // When opening the app Online, start fresh and only receive new incoming messages
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        localStorage.removeItem('pagechat_threads');
         return [];
       }
       const saved = localStorage.getItem('pagechat_threads');
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          return parsed.map(normalizeThreadLive);
+          return mergeChatThreadsCatalog(parsed, []);
         }
       }
     } catch (e) {
@@ -484,6 +618,7 @@ export default function App() {
   const [isFacebookLiveModalOpen, setIsFacebookLiveModalOpen] = useState(false);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [isMobileChatOpen, setIsMobileChatOpen] = useState(false);
+  const [isCustomerBoxOpen, setIsCustomerBoxOpen] = useState<boolean>(true);
   const [isGlobalMobileFrame, setIsGlobalMobileFrame] = useState(false);
   const [isMobileCustomerSheetOpen, setIsMobileCustomerSheetOpen] = useState(false);
 
@@ -495,6 +630,8 @@ export default function App() {
   const lastPolledTimeRef = useRef<number>(Date.now());
   const processedWebhookEventIdsRef = useRef<Set<string>>(new Set());
   const hasCompletedInitialGraphSyncRef = useRef<Set<string>>(new Set());
+  const seenGraphMessageIdsRef = useRef<Set<string>>(new Set());
+  const baselineGraphConvTimeRef = useRef<Map<string, { updatedMs: number; snippet: string }>>(new Map());
   const [isHydrated, setIsHydrated] = useState<boolean>(false);
   const [aiTypingThreadIds, setAiTypingThreadIds] = useState<string[]>([]);
   const [batchAutoPilotProgress, setBatchAutoPilotProgress] = useState<BatchAutoPilotProgress>({
@@ -577,13 +714,22 @@ export default function App() {
     }
   };
 
+  const lastPersistedThreadsSigRef = useRef<string>('');
+
   // Helper to safely persist threads to IndexedDB, localStorage, and backend server without starving localStorage quota for products
   const persistThreadsToStorageAndServer = (nextThreads: ChatThread[]) => {
-    saveToDesktopIndexedDB('pagechat_threads', nextThreads);
+    const cleanNextThreads = mergeChatThreadsCatalog(nextThreads, []);
+    const sig = getThreadsContentSignature(cleanNextThreads);
+    if (sig === lastPersistedThreadsSigRef.current) {
+      return;
+    }
+    lastPersistedThreadsSigRef.current = sig;
+
+    saveToDesktopIndexedDB('pagechat_threads', cleanNextThreads);
     markLocalComputerSave();
 
     try {
-      const compactThreads = nextThreads.slice(0, 40).map((t) => ({
+      const compactThreads = cleanNextThreads.slice(0, 40).map((t) => ({
         ...t,
         messages: (t.messages || []).slice(-25).map((m) => ({
           ...m,
@@ -608,7 +754,7 @@ export default function App() {
       fetch('/api/threads/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ threads: nextThreads }),
+        body: JSON.stringify({ threads: cleanNextThreads }),
       }).catch(() => {});
     }
   };
@@ -763,6 +909,12 @@ export default function App() {
 
   useEffect(() => {
     if (!isDriveAutoBackupEnabled) return;
+    if (activeView !== 'google_drive') {
+      const silentBackupInterval = setInterval(() => {
+        runCloudAutoBackupNow();
+      }, 60000);
+      return () => clearInterval(silentBackupInterval);
+    }
     const interval = setInterval(() => {
       setDriveAutoBackupCountdown((prev) => {
         if (prev <= 1) {
@@ -773,7 +925,7 @@ export default function App() {
       });
     }, 1000);
     return () => clearInterval(interval);
-  }, [isDriveAutoBackupEnabled]);
+  }, [isDriveAutoBackupEnabled, activeView]);
 
   useEffect(() => {
     saveToDesktopIndexedDB('pagechat_quick_replies', quickReplies);
@@ -805,8 +957,9 @@ export default function App() {
   }, [orders]);
 
   useEffect(() => {
+    if (!isHydrated) return;
     persistThreadsToStorageAndServer(threads);
-  }, [threads]);
+  }, [threads, isHydrated]);
 
   // Load any rich data saved in Computer IndexedDB first (works 100% offline)
   useEffect(() => {
@@ -837,30 +990,19 @@ export default function App() {
         });
       }
 
-      let shouldPurgeIdbThreads = false;
-      try {
-        if (localStorage.getItem('pagechat_idb_inbox_cleared_all_v1') !== 'true') {
-          localStorage.setItem('pagechat_idb_inbox_cleared_all_v1', 'true');
-          shouldPurgeIdbThreads = true;
-        }
-      } catch {}
-
-      if (shouldPurgeIdbThreads) {
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        // When opening Online, clear old cached threads so only new messages from this session enter
         saveToDesktopIndexedDB('pagechat_threads', []);
         try {
-          localStorage.setItem('pagechat_threads', '[]');
+          localStorage.removeItem('pagechat_threads');
         } catch {}
-        fetch('/api/threads', { method: 'DELETE' }).catch(() => {});
-        threadsRef.current = [];
-        setThreads([]);
-      } else if (Array.isArray(idbThreads) && idbThreads.length > 0) {
+      } else if (Array.isArray(idbThreads)) {
         setThreads((prev) => {
-          if (prev.length > 0) return ensureAllPagesHaveLiveThreads(prev, resolvedPages);
-          const restored = idbThreads.map((t) => normalizeThreadLive(t));
-          return ensureAllPagesHaveLiveThreads(restored, resolvedPages);
+          const merged = mergeChatThreadsCatalog(idbThreads, prev);
+          threadsRef.current = merged;
+          saveToDesktopIndexedDB('pagechat_threads', merged);
+          return merged;
         });
-      } else {
-        setThreads((prev) => ensureAllPagesHaveLiveThreads(prev, resolvedPages));
       }
 
       const combinedIdbOrders: Order[] = [
@@ -963,14 +1105,20 @@ export default function App() {
 
         if (thRes && isMounted) {
           const thJson = await thRes.json();
-          if (thJson.success && Array.isArray(thJson.data) && thJson.data.length > 0) {
-            setThreads((localThreads) => {
-              if (localThreads.length > 0) {
-                return ensureAllPagesHaveLiveThreads(localThreads, pages);
-              }
-              const serverThreads: ChatThread[] = thJson.data;
-              return ensureAllPagesHaveLiveThreads(serverThreads, pages);
-            });
+          if (thJson.success && Array.isArray(thJson.data)) {
+            const freshSessionThreads = (thJson.data as ChatThread[]).filter(
+              (t) => (t?.lastActivityAt || 0) >= appMountTimeRef.current
+            );
+            if (freshSessionThreads.length === 0 && thJson.data.length > 0) {
+              // Clear old threads from previous sessions on server when opening Online
+              fetch('/api/threads', { method: 'DELETE' }).catch(() => {});
+            } else if (freshSessionThreads.length > 0) {
+              setThreads((localThreads) => {
+                const merged = mergeChatThreadsCatalog(localThreads, freshSessionThreads);
+                threadsRef.current = merged;
+                return merged;
+              });
+            }
           }
         }
       } catch (err) {
@@ -1010,246 +1158,306 @@ export default function App() {
     });
   }, [pages, selectedPage.id]);
 
-  // Sync real conversations from Meta Graph API or Live Messenger Inbox while preserving local invoices & images
+  // Sync real conversations from Meta Graph API — supports both silent Live New-Only mode and 1-click "Load All Customer Messages from Meta Page Access Token + Live"
   const handleSyncRealConversations = async (
     overridePage?: PageAccount,
-    isSilentBackgroundPoll: boolean = false
-  ) => {
+    isSilentBackgroundPoll: boolean = false,
+    forceLoadAllHistory: boolean = false
+  ): Promise<number> => {
+    const loadAllFromToken = forceLoadAllHistory || !isSilentBackgroundPoll;
+    if (loadAllFromToken) {
+      userExplicitlyClearedAllChatsInSession = false;
+    }
+
     const targetPage =
       overridePage && typeof overridePage === 'object' && 'id' in overridePage
         ? overridePage
         : selectedPageRef.current;
-    const tokenToUse = targetPage.accessToken || `EAABw_LIVE_${targetPage.id}`;
+
+    // If user clicked "Load All Customer Messages" and another page in pages holds the real Meta EAA token, use that token/page
+    const pageWithRealToken =
+      targetPage.accessToken && targetPage.accessToken.startsWith('EAA') && !targetPage.accessToken.startsWith('EAABw_')
+        ? targetPage
+        : pages.find((p) => p.accessToken && p.accessToken.startsWith('EAA') && !p.accessToken.startsWith('EAABw_')) ||
+          targetPage;
+
+    const effectivePage = loadAllFromToken ? pageWithRealToken : targetPage;
+    const tokenToUse = effectivePage.accessToken || targetPage.accessToken || `EAABw_LIVE_${effectivePage.id}`;
+
     try {
       const res = await fetch(
-        `/api/facebook/conversations?token=${encodeURIComponent(tokenToUse)}&pageId=${encodeURIComponent(targetPage.id)}&pageName=${encodeURIComponent(targetPage.name)}${isSilentBackgroundPoll ? '&isBackgroundPoll=1' : ''}`
+        `/api/facebook/conversations?token=${encodeURIComponent(tokenToUse)}&pageId=${encodeURIComponent(effectivePage.id)}&pageName=${encodeURIComponent(effectivePage.name)}${isSilentBackgroundPoll && !loadAllFromToken ? '&isBackgroundPoll=1' : '&loadAll=1'}`
       );
       const json = await res.json();
       if (json.success && Array.isArray(json.data) && json.data.length > 0) {
-        const isInitialPageSync = !hasCompletedInitialGraphSyncRef.current.has(targetPage.id);
-        hasCompletedInitialGraphSyncRef.current.add(targetPage.id);
+        const isInitialPageSync = !hasCompletedInitialGraphSyncRef.current.has(effectivePage.id);
+        hasCompletedInitialGraphSyncRef.current.add(effectivePage.id);
+
+        // On silent initial startup sync ONLY (when user has NOT clicked "Load All Customer Messages"),
+        // snapshot baseline timestamps so startup only listens for new messages.
+        if (isInitialPageSync && !loadAllFromToken) {
+          for (const c of json.data) {
+            if (!c || !c.id) continue;
+            const convId = String(c.id);
+            const updatedMs = c.updated_time ? new Date(c.updated_time).getTime() : Date.now();
+            baselineGraphConvTimeRef.current.set(convId, {
+              updatedMs,
+              snippet: String(c.snippet || '').trim(),
+            });
+            for (const m of c.messages?.data || []) {
+              if (m?.id) {
+                seenGraphMessageIdsRef.current.add(String(m.id));
+                autoRepliedMsgIdsRef.current.add(String(m.id));
+              }
+            }
+          }
+          return 0;
+        }
 
         const currentThreadsSnapshot = threadsRef.current;
         let firstSyncedThreadId: string | null = null;
-        let hasNewIncomingCustomerMessage = false;
-        let stateChanged = !isSilentBackgroundPoll || isInitialPageSync;
+        let stateChanged = false;
         const newlyArrivedCustomerMessages: { threadId: string; text: string; msgId: string }[] = [];
 
-        const newThreads: ChatThread[] = json.data.map((c: any) => {
-          const senderObj = c.senders?.data?.[0] || { name: 'Facebook Customer', id: 'fb_cust' };
-          const lastMsg = c.messages?.data?.[0];
-          const threadId = `fb_th_${c.id}`;
-          const existingThread = currentThreadsSnapshot.find(
-            (pt) =>
-              pt.id === threadId ||
-              (senderObj.id && pt.customer.psid === senderObj.id) ||
-              (senderObj.name &&
-                senderObj.name !== 'Facebook Customer' &&
-                pt.customer.name === senderObj.name &&
-                pt.pageId === targetPage.id)
-          );
-          const resolvedThreadId = existingThread?.id || threadId;
+        const newThreads: ChatThread[] = json.data
+          .map((c: any, convIdx: number): ChatThread | null => {
+            if (!c || !c.id) return null;
+            const convId = String(c.id);
+            const baseline = baselineGraphConvTimeRef.current.get(convId);
+            const convUpdatedMs = c.updated_time ? new Date(c.updated_time).getTime() : 0;
+            const currentSnippet = String(c.snippet || '').trim();
 
-          const graphMessages: ChatMessage[] = (c.messages?.data || [])
-            .map((m: any) => {
-              const isPageSender =
-                m.isFromPage !== undefined
-                  ? Boolean(m.isFromPage)
-                  : m.from?.id === targetPage.id || (json.realPageId && m.from?.id === json.realPageId);
-              const rawText = typeof m.message === 'string' ? m.message.trim() : '';
-              const isAudio = m.attachmentType === 'audio';
-              const fallbackText =
-                rawText ||
-                (isAudio ? '🎤 [សារសម្លេង / Voice Message]' : '') ||
-                (m.sticker ? '👍 [ភ្ញៀវផ្ញើរូប Logo / Sticker]' : '') ||
-                (m.attachmentUrl ? '📷 [ភ្ញៀវផ្ញើរូបភាព]' : '');
+            const senderObj = c.senders?.data?.[0] || { name: 'Facebook Customer', id: 'fb_cust' };
+            const threadId = `fb_th_${c.id}`;
+            const existingThread = currentThreadsSnapshot.find(
+              (pt) =>
+                pt.id === threadId ||
+                (senderObj.id && pt.customer.psid === senderObj.id) ||
+                (senderObj.name &&
+                  senderObj.name !== 'Facebook Customer' &&
+                  pt.customer.name === senderObj.name &&
+                  pt.pageId === effectivePage.id)
+            );
+            const resolvedThreadId = existingThread?.id || threadId;
 
-              const resolvedAttachments =
-                Array.isArray(m.parsedAttachments) && m.parsedAttachments.length > 0
-                  ? m.parsedAttachments
-                  : m.attachmentUrl
-                  ? [
-                      {
-                        type: (isAudio ? 'audio' : 'image') as 'audio' | 'image',
-                        data: {
-                          url: m.attachmentUrl,
-                          caption: rawText || '',
+            const rawMessagesList: any[] = c.messages?.data || [];
+            // If loadAllFromToken is true, pull ALL customer messages from the Meta Page Access Token!
+            // Otherwise (silent background poll), only pull brand-new messages since baseline.
+            const unseenRawMessages = rawMessagesList.filter((m: any) => {
+              if (!m || !m.id) return false;
+              if (loadAllFromToken) return true;
+              const mid = String(m.id);
+              if (seenGraphMessageIdsRef.current.has(mid)) return false;
+              const createdMs = m.created_time ? new Date(m.created_time).getTime() : Date.now();
+              const isNewSinceMount = createdMs >= appMountTimeRef.current - 15000;
+              const isNewerThanBaseline = Boolean(baseline && convUpdatedMs > baseline.updatedMs);
+              return isNewSinceMount || isNewerThanBaseline;
+            });
+
+            // Mark all raw messages in this conversation as seen so future background polls only pick up new messages
+            for (const m of rawMessagesList) {
+              if (m?.id) {
+                seenGraphMessageIdsRef.current.add(String(m.id));
+                if (loadAllFromToken) {
+                  autoRepliedMsgIdsRef.current.add(String(m.id));
+                }
+              }
+            }
+
+            const newGraphMessages: ChatMessage[] = unseenRawMessages
+              .map((m: any) => {
+                const isPageSender =
+                  m.isFromPage !== undefined
+                    ? Boolean(m.isFromPage)
+                    : m.from?.id === effectivePage.id || (json.realPageId && m.from?.id === json.realPageId);
+                const rawText = typeof m.message === 'string' ? m.message.trim() : '';
+                const isAudio = m.attachmentType === 'audio';
+                const fallbackText =
+                  rawText ||
+                  (isAudio ? '🎤 [សារសម្លេង / Voice Message]' : '') ||
+                  (m.sticker ? '👍 [ភ្ញៀវផ្ញើរូប Logo / Sticker]' : '') ||
+                  (m.attachmentUrl ? '📷 [ភ្ញៀវផ្ញើរូបភាព]' : '');
+
+                const resolvedAttachments =
+                  Array.isArray(m.parsedAttachments) && m.parsedAttachments.length > 0
+                    ? m.parsedAttachments
+                    : m.attachmentUrl
+                    ? [
+                        {
+                          type: (isAudio ? 'audio' : 'image') as 'audio' | 'image',
+                          data: {
+                            url: m.attachmentUrl,
+                            caption: rawText || '',
+                          },
                         },
-                      },
-                    ]
-                  : undefined;
+                      ]
+                    : undefined;
 
-              return {
-                id: m.id,
-                sender: (isPageSender ? 'admin' : 'customer') as 'admin' | 'customer',
-                senderName: m.from?.name || (isPageSender ? targetPage.name : senderObj.name),
-                text: fallbackText,
-                timestamp: m.created_time
-                  ? new Date(m.created_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                  : 'ឥឡូវនេះ',
-                attachments: resolvedAttachments,
-                deliveryStatus: 'sent_meta' as const,
-                isLiveMeta: true,
-              };
-            })
-            .filter((gm: ChatMessage) => Boolean((gm.text && gm.text.trim()) || (gm.attachments && gm.attachments.length > 0)))
-            .reverse();
+                return {
+                  id: String(m.id),
+                  sender: (isPageSender ? 'admin' : 'customer') as 'admin' | 'customer',
+                  senderName: m.from?.name || (isPageSender ? effectivePage.name : senderObj.name),
+                  text: fallbackText,
+                  timestamp: m.created_time
+                    ? new Date(m.created_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                    : 'ឥឡូវនេះ',
+                  attachments: resolvedAttachments,
+                  deliveryStatus: 'sent_meta' as const,
+                  isLiveMeta: true,
+                };
+              })
+              .filter((gm: ChatMessage) =>
+                Boolean((gm.text && gm.text.trim()) || (gm.attachments && gm.attachments.length > 0))
+              )
+              .reverse();
 
-          // Mark all synced Graph messages as already seen so historical messages never trigger automatic replies
-          graphMessages.forEach((gm) => {
-            if (gm.id) autoRepliedMsgIdsRef.current.add(gm.id);
-          });
+            // Check if updated_time advanced since baseline OR if loadAllFromToken needs the conversation snippet
+            const hasUpdatedTimeAdvance = Boolean(
+              loadAllFromToken ||
+                (baseline && convUpdatedMs > baseline.updatedMs) ||
+                (!baseline && convUpdatedMs >= appMountTimeRef.current - 10000)
+            );
 
-          // Preserve existing messages first in chronological order, then append any new Graph messages at the end
-          const existingMessages = existingThread?.messages || [];
-          const mergedMessages = [...existingMessages];
-          let newestAddedCustomerMsg: ChatMessage | null = null;
+            if (
+              hasUpdatedTimeAdvance &&
+              currentSnippet &&
+              (loadAllFromToken || !baseline || currentSnippet !== baseline.snippet)
+            ) {
+              const alreadyHasSnippet =
+                newGraphMessages.some((gm) => gm.text.trim() === currentSnippet) ||
+                (existingThread?.messages || []).some((em) => em.text.trim() === currentSnippet);
+              if (!alreadyHasSnippet) {
+                const snippetMsgId = `msg_snip_${c.id}_${c.updated_time || Date.now()}`;
+                seenGraphMessageIdsRef.current.add(snippetMsgId);
+                newGraphMessages.push({
+                  id: snippetMsgId,
+                  sender: 'customer',
+                  senderName: senderObj.name || existingThread?.customer.name || 'អតិថិជន Facebook',
+                  text: currentSnippet,
+                  timestamp: new Date(c.updated_time || Date.now()).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  }),
+                  deliveryStatus: 'sent_meta',
+                  isLiveMeta: true,
+                });
+              }
+            }
 
-          graphMessages.forEach((gm) => {
-            const alreadyExists = mergedMessages.some((em) => {
-              if (em.id === gm.id) return true;
-              if (gm.sender === 'admin' && (em.sender === 'admin' || em.sender === 'bot')) {
-                if (em.text.trim() === gm.text.trim()) return true;
-                if (
-                  em.attachments &&
-                  em.attachments.length > 0 &&
-                  gm.attachments &&
-                  gm.attachments.length > 0 &&
-                  em.attachments[0].type === gm.attachments[0].type
-                ) {
-                  return true;
+            // Update baseline for this conversation so Live polling detects any new message after this
+            baselineGraphConvTimeRef.current.set(convId, {
+              updatedMs: Math.max(convUpdatedMs, baseline?.updatedMs || 0),
+              snippet: currentSnippet || baseline?.snippet || '',
+            });
+
+            if (newGraphMessages.length === 0) {
+              return existingThread || null;
+            }
+
+            const existingMessages = existingThread?.messages || [];
+            const mergedMessages = [...existingMessages];
+            let newestAddedCustomerMsg: ChatMessage | null = null;
+
+            newGraphMessages.forEach((gm) => {
+              const alreadyExists = mergedMessages.some((em) => {
+                if (em.id === gm.id) return true;
+                if (gm.sender === 'admin' && (em.sender === 'admin' || em.sender === 'bot')) {
+                  if (em.text.trim() === gm.text.trim()) return true;
+                }
+                return false;
+              });
+              if (!alreadyExists) {
+                mergedMessages.push(gm);
+                stateChanged = true;
+                if (gm.sender === 'customer') {
+                  newestAddedCustomerMsg = gm;
                 }
               }
-              return false;
             });
-            if (!alreadyExists) {
-              mergedMessages.push(gm);
+
+            if (loadAllFromToken && mergedMessages.length > 0 && !existingThread) {
               stateChanged = true;
-              if (gm.sender === 'customer' && !isInitialPageSync && existingThread) {
-                newestAddedCustomerMsg = gm;
+            }
+
+            const latestMsg = mergedMessages[mergedMessages.length - 1];
+            if (newestAddedCustomerMsg && latestMsg && latestMsg.sender === 'customer') {
+              if (!firstSyncedThreadId) {
+                firstSyncedThreadId = resolvedThreadId;
               }
-            }
-          });
-
-          // Detect if Meta updated_time changed on an existing conversation (e.g. customer replied in an old thread)
-          const hasMetaUpdatedTimeChange = Boolean(
-            !isInitialPageSync &&
-              c.updated_time &&
-              existingThread?.metaUpdatedTime &&
-              c.updated_time !== existingThread.metaUpdatedTime &&
-              new Date(c.updated_time).getTime() > appMountTimeRef.current
-          );
-
-          if (hasMetaUpdatedTimeChange && c.snippet) {
-            const currentTail = mergedMessages[mergedMessages.length - 1];
-            const snippetClean = String(c.snippet).trim();
-            if (snippetClean && (!currentTail || currentTail.text.trim() !== snippetClean)) {
-              const snippetMsgId = `msg_snip_${c.id}_${c.updated_time || Date.now()}`;
-              const snippetMsg: ChatMessage = {
-                id: snippetMsgId,
-                sender: 'customer',
-                senderName: senderObj.name || existingThread?.customer.name || 'អតិថិជន Facebook',
-                text: snippetClean,
-                timestamp: new Date(c.updated_time).toLocaleTimeString([], {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                }),
-                deliveryStatus: 'sent_meta',
-                isLiveMeta: true,
-              };
-              mergedMessages.push(snippetMsg);
-              stateChanged = true;
-              newestAddedCustomerMsg = snippetMsg;
-            }
-          }
-
-          if (!existingThread) {
-            stateChanged = true;
-            // Only treat a brand-new conversation as newly arrived if it was updated AFTER the current page session loaded
-            if (!isInitialPageSync && c.updated_time) {
-              const updatedMs = new Date(c.updated_time).getTime();
-              if (updatedMs > appMountTimeRef.current) {
-                const lastGm = graphMessages[graphMessages.length - 1];
-                if (lastGm && lastGm.sender === 'customer') {
-                  newestAddedCustomerMsg = lastGm;
-                }
+              if (!loadAllFromToken) {
+                newlyArrivedCustomerMessages.push({
+                  threadId: resolvedThreadId,
+                  text: (newestAddedCustomerMsg as ChatMessage).text,
+                  msgId: (newestAddedCustomerMsg as ChatMessage).id,
+                });
               }
+            } else if (loadAllFromToken && !firstSyncedThreadId && mergedMessages.length > 0) {
+              firstSyncedThreadId = resolvedThreadId;
             }
-          }
 
-          const latestMsg = mergedMessages[mergedMessages.length - 1];
-          if (newestAddedCustomerMsg && latestMsg && latestMsg.sender === 'customer') {
-            hasNewIncomingCustomerMessage = true;
-            firstSyncedThreadId = resolvedThreadId;
-            newlyArrivedCustomerMessages.push({
-              threadId: resolvedThreadId,
-              text: (newestAddedCustomerMsg as ChatMessage).text,
-              msgId: (newestAddedCustomerMsg as ChatMessage).id,
-            });
-          }
+            const resolvedCustId = senderObj.id || `fb_${c.id}`;
+            const resolvedCustName = senderObj.name || existingThread?.customer.name || 'Facebook Customer';
+            const preservedCustomAvatar =
+              existingThread?.customer.avatarUrl && !isGenericStockCustomerAvatar(existingThread.customer.avatarUrl)
+                ? existingThread.customer.avatarUrl
+                : '';
 
-          if (!firstSyncedThreadId && !isSilentBackgroundPoll) {
-            firstSyncedThreadId = resolvedThreadId;
-          }
+            const isWaitingCustomer = latestMsg?.sender === 'customer';
 
-          const hasNewMsgForThisThread =
-            newlyArrivedCustomerMessages.some((m) => m.threadId === resolvedThreadId) ||
-            hasMetaUpdatedTimeChange;
+            return {
+              id: resolvedThreadId,
+              pageId: effectivePage.id,
+              customer: {
+                id: resolvedCustId,
+                psid: senderObj.id || `fb_psid_${c.id}`,
+                name: resolvedCustName,
+                avatarUrl:
+                  senderObj.avatarUrl ||
+                  preservedCustomAvatar ||
+                  resolveCustomerOriginalPageAvatar(
+                    { id: resolvedCustId, psid: senderObj.id || `fb_psid_${c.id}`, name: resolvedCustName },
+                    effectivePage
+                  ),
+                platform: effectivePage.platform || 'messenger',
+                phone: senderObj.phone || existingThread?.customer.phone || 'Facebook Messenger',
+                province: senderObj.province || existingThread?.customer.province || 'ភ្នំពេញ',
+                address: existingThread?.customer.address || 'ភ្នំពេញ (Messenger Live)',
+                tags: existingThread?.customer.tags || [
+                  'Facebook Live',
+                  'ភ្ញៀវ Meta',
+                  effectivePage.name.split(' - ')[0],
+                ],
+                totalOrders: existingThread?.customer.totalOrders || 0,
+                totalSpent: existingThread?.customer.totalSpent || 0,
+                notes: existingThread?.customer.notes || `សារពីផេក ${effectivePage.name}`,
+                createdAt: existingThread?.customer.createdAt || new Date().toISOString().split('T')[0],
+                isRealFacebookUser: true,
+              },
+              archived: false,
+              unreadCount:
+                typeof c.unread_count === 'number' && loadAllFromToken
+                  ? c.unread_count
+                  : existingThread
+                  ? (existingThread.unreadCount || 0) + (newestAddedCustomerMsg ? 1 : 0)
+                  : isWaitingCustomer
+                  ? 1
+                  : 0,
+              status: isWaitingCustomer ? 'needs_reply' : existingThread?.status || 'completed',
+              lastMessage: latestMsg?.text || currentSnippet || 'សារពីផេក',
+              lastMessageTime: latestMsg?.timestamp || 'ឥឡូវនេះ',
+              lastActivityAt: loadAllFromToken
+                ? Math.max(convUpdatedMs || 0, Date.now() - convIdx * 100)
+                : newestAddedCustomerMsg
+                ? Date.now()
+                : existingThread?.lastActivityAt || Date.now(),
+              metaUpdatedTime: c.updated_time || existingThread?.metaUpdatedTime,
+              orderIds: existingThread?.orderIds || [],
+              messages: mergedMessages,
+            };
+          })
+          .filter((t: ChatThread | null): t is ChatThread => t !== null);
 
-          const parsedMetaTime = c.updated_time ? new Date(c.updated_time).getTime() : 0;
-          const resolvedLastActivityAt = hasNewMsgForThisThread
-            ? Date.now()
-            : existingThread?.lastActivityAt || parsedMetaTime || Date.now();
-
-          return {
-            id: resolvedThreadId,
-            pageId: targetPage.id,
-            customer: {
-              id: senderObj.id || `fb_${c.id}`,
-              psid: senderObj.id || `fb_psid_${c.id}`,
-              name: senderObj.name || existingThread?.customer.name || 'Facebook Customer',
-              avatarUrl:
-                senderObj.avatarUrl ||
-                existingThread?.customer.avatarUrl ||
-                'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80',
-              platform: targetPage.platform || 'messenger',
-              phone: senderObj.phone || existingThread?.customer.phone || '012 889 977',
-              province: senderObj.province || existingThread?.customer.province || 'ភ្នំពេញ',
-              address: existingThread?.customer.address || 'ភ្នំពេញ (Messenger Live)',
-              tags: existingThread?.customer.tags || ['Facebook Live', 'ភ្ញៀវ Meta', targetPage.name.split(' - ')[0]],
-              totalOrders: existingThread?.customer.totalOrders || 0,
-              totalSpent: existingThread?.customer.totalSpent || 0,
-              notes: existingThread?.customer.notes || `សារពីផេក ${targetPage.name}`,
-              createdAt: existingThread?.customer.createdAt || new Date().toISOString().split('T')[0],
-              isRealFacebookUser: true,
-            },
-            archived: hasNewMsgForThisThread ? false : existingThread?.archived || false,
-            unreadCount: existingThread
-              ? hasNewMsgForThisThread
-                ? (existingThread.unreadCount || 0) + 1
-                : existingThread.unreadCount
-              : latestMsg?.sender === 'customer'
-              ? c.unread_count || 1
-              : 0,
-            status: hasNewMsgForThisThread
-              ? 'needs_reply'
-              : existingThread?.status === 'ordered'
-              ? 'ordered'
-              : existingThread?.archived
-              ? existingThread.status
-              : latestMsg?.sender === 'customer'
-              ? 'needs_reply'
-              : 'completed',
-            lastMessage: latestMsg?.text || lastMsg?.message || c.snippet || 'សារថ្មីពីផេក',
-            lastMessageTime: latestMsg?.timestamp || 'ឥឡូវនេះ',
-            lastActivityAt: resolvedLastActivityAt,
-            metaUpdatedTime: c.updated_time || existingThread?.metaUpdatedTime,
-            orderIds: existingThread?.orderIds || [],
-            messages: mergedMessages,
-          };
-        });
-
-        if (stateChanged) {
+        if ((stateChanged || loadAllFromToken) && newThreads.length > 0) {
           const activeNewIds = new Set(newlyArrivedCustomerMessages.map((m) => m.threadId));
           setThreads((prev) => {
             const syncedMap = new Map(newThreads.map((nt) => [nt.id, nt]));
@@ -1258,7 +1466,7 @@ export default function App() {
 
             // 1. Put any newly active synced threads at the very top first
             for (const nt of newThreads) {
-              if (activeNewIds.has(nt.id)) {
+              if (activeNewIds.has(nt.id) || loadAllFromToken) {
                 combined.push(nt);
                 seen.add(nt.id);
               }
@@ -1277,7 +1485,7 @@ export default function App() {
               }
             }
 
-            // 3. Append any remaining newly discovered synced threads
+            // 3. Append any remaining newly discovered threads
             for (const nt of newThreads) {
               if (!seen.has(nt.id)) {
                 combined.push(nt);
@@ -1285,29 +1493,118 @@ export default function App() {
               }
             }
 
-            // 4. Sort by lastActivityAt descending so the newest message (new or old customer) is always at the top
             combined.sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
-
             threadsRef.current = combined;
+            persistThreadsToStorageAndServer(combined);
             return combined;
           });
         }
 
-        if (firstSyncedThreadId && !isSilentBackgroundPoll) {
-          setSelectedThreadId(firstSyncedThreadId);
+        if (effectivePage.id !== selectedPageRef.current.id && loadAllFromToken) {
+          const liveEffective = {
+            ...normalizePageLive(effectivePage),
+            isLiveOnline: true,
+            webhookStatus: 'connected' as const,
+          };
+          setSelectedPage(liveEffective);
+          selectedPageRef.current = liveEffective;
         }
-        if (!isSilentBackgroundPoll) {
+
+        if (firstSyncedThreadId) {
+          setSelectedThreadId(firstSyncedThreadId);
+          setIsCustomerBoxOpen(true);
           soundNotifier.playMessageChime();
         }
-        // NOTE: Never trigger automatic AI messages to Facebook customers during Graph API sync/reload
-      } else if (!isSilentBackgroundPoll) {
-        // Manual sync fallback when no real Graph API token is present
+
+        if (!loadAllFromToken && isAutoPilotRef.current && newlyArrivedCustomerMessages.length > 0) {
+          newlyArrivedCustomerMessages.forEach((item, idx) => {
+            setTimeout(() => {
+              triggerAutoPilotResponse(item.threadId, item.text, item.msgId);
+            }, 400 + idx * 300);
+          });
+        }
+
+        return newThreads.length;
       }
     } catch (e) {
       if (!isSilentBackgroundPoll) {
         console.error('Error syncing Facebook conversations:', e);
       }
     }
+    return 0;
+  };
+
+  // 1-Click Handler: Pull ALL customer messages from the Page that has entered a Page Access Token (Meta) & activate Live mode for new messages
+  const handlePullAllMetaTokenMessagesAndLive = async (
+    overridePage?: PageAccount,
+    providedToken?: string
+  ): Promise<{ count: number; pageName: string }> => {
+    userExplicitlyClearedAllChatsInSession = false;
+    let targetPage = overridePage || selectedPageRef.current;
+
+    if (providedToken && providedToken.trim()) {
+      try {
+        const verifyRes = await fetch('/api/facebook/verify-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: providedToken.trim(),
+            pageId: targetPage.id,
+            pageName: targetPage.name,
+          }),
+        });
+        const verifyData = await verifyRes.json();
+        if (verifyData.success && verifyData.page) {
+          targetPage = {
+            ...targetPage,
+            name: verifyData.page.name || targetPage.name,
+            accessToken: verifyData.resolvedToken || providedToken.trim(),
+            isLiveOnline: true,
+            webhookStatus: 'connected',
+            avatar: verifyData.page.avatar || targetPage.avatar,
+          };
+          setPages((prev) => prev.map((p) => (p.id === targetPage.id ? targetPage : p)));
+          setSelectedPage(targetPage);
+          selectedPageRef.current = targetPage;
+        }
+      } catch {}
+    }
+
+    // Find all connected pages with a real Meta Page Access Token, or use targetPage
+    const pagesWithMetaToken = pages.filter(
+      (p) => p.accessToken && p.accessToken.startsWith('EAA') && !p.accessToken.startsWith('EAABw_')
+    );
+    const pagesToSync =
+      pagesWithMetaToken.length > 0
+        ? pagesWithMetaToken
+        : [
+            {
+              ...targetPage,
+              isLiveOnline: true,
+              webhookStatus: 'connected' as const,
+            },
+          ];
+
+    let totalSynced = 0;
+    for (const pg of pagesToSync) {
+      const livePg: PageAccount = {
+        ...normalizePageLive(pg),
+        isLiveOnline: true,
+        webhookStatus: 'connected',
+      };
+      setPages((prev) => prev.map((p) => (p.id === livePg.id ? livePg : p)));
+      const count = await handleSyncRealConversations(livePg, false, true);
+      totalSynced += count;
+    }
+
+    const activeSyncedPage = pagesToSync[0] || targetPage;
+    setSelectedPage({
+      ...normalizePageLive(activeSyncedPage),
+      isLiveOnline: true,
+      webhookStatus: 'connected',
+    });
+    setActiveView('inbox');
+    return { count: totalSynced, pageName: activeSyncedPage.name };
   };
 
   // Auto-Pilot automated responder powered by Gemini AI (Multilingual, Voice-to-Text & Khmer First)
@@ -1755,8 +2052,11 @@ export default function App() {
             psid: evt.senderId,
             name: evt.senderName || 'Facebook Customer',
             avatarUrl:
-              evt.avatarUrl ||
-              'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80',
+              (evt.avatarUrl && !isGenericStockCustomerAvatar(evt.avatarUrl) ? evt.avatarUrl : '') ||
+              resolveCustomerOriginalPageAvatar(
+                { id: evt.senderId, psid: evt.senderId, name: evt.senderName || 'Facebook Customer' },
+                activePage
+              ),
             platform: 'messenger',
             phone: 'Facebook Messenger',
             province: 'ភ្នំពេញ (Messenger Live)',
@@ -1833,6 +2133,27 @@ export default function App() {
             });
             return;
           }
+          if (parsed && parsed.type === 'threads_updated' && Array.isArray(parsed.threads)) {
+            setThreads((prev) => {
+              if (parsed.threads.length === 0 && userExplicitlyClearedAllChatsInSession) {
+                return [];
+              }
+              const freshThreads = (parsed.threads as ChatThread[]).filter(
+                (t) => (t?.lastActivityAt || 0) >= appMountTimeRef.current
+              );
+              const merged = mergeChatThreadsCatalog(freshThreads, prev);
+              const mergedSig = getThreadsContentSignature(merged);
+              const prevSig = getThreadsContentSignature(prev);
+              if (mergedSig === prevSig) {
+                return prev;
+              }
+              lastPersistedThreadsSigRef.current = mergedSig;
+              threadsRef.current = merged;
+              saveToDesktopIndexedDB('pagechat_threads', merged);
+              return merged;
+            });
+            return;
+          }
           if (parsed && parsed.id && parsed.text) {
             ingestIncomingWebhookEvents([parsed]);
           }
@@ -1864,31 +2185,58 @@ export default function App() {
       }
     };
 
-    const pollServerOrders = async () => {
+    const pollServerOrdersAndThreads = async () => {
       try {
-        const res = await fetch('/api/orders');
-        const ordJson = await res.json();
+        const [ordRes, thRes] = await Promise.all([
+          fetch('/api/orders').catch(() => null),
+          fetch('/api/threads').catch(() => null),
+        ]);
         if (!isMounted) return;
-        if (ordJson && ordJson.success && Array.isArray(ordJson.data) && ordJson.data.length > 0) {
-          setOrders((prev) => {
-            const merged = mergeOrdersCatalog(ordJson.data, prev);
-            if (merged.length === prev.length && JSON.stringify(merged) === JSON.stringify(prev)) {
-              return prev;
+        if (ordRes) {
+          const ordJson = await ordRes.json().catch(() => null);
+          if (ordJson && ordJson.success && Array.isArray(ordJson.data) && ordJson.data.length > 0) {
+            setOrders((prev) => {
+              const merged = mergeOrdersCatalog(ordJson.data, prev);
+              if (merged.length === prev.length && JSON.stringify(merged) === JSON.stringify(prev)) {
+                return prev;
+              }
+              ordersRef.current = merged;
+              saveOrdersToLocalStorageSafely(merged);
+              saveToDesktopIndexedDB('pagechat_orders', merged);
+              return merged;
+            });
+          }
+        }
+        if (thRes) {
+          const thJson = await thRes.json().catch(() => null);
+          if (thJson && thJson.success && Array.isArray(thJson.data) && thJson.data.length > 0) {
+            const freshThreads = (thJson.data as ChatThread[]).filter(
+              (t) => (t?.lastActivityAt || 0) >= appMountTimeRef.current
+            );
+            if (freshThreads.length > 0) {
+              setThreads((prev) => {
+                const merged = mergeChatThreadsCatalog(prev, freshThreads);
+                const mergedSig = getThreadsContentSignature(merged);
+                const prevSig = getThreadsContentSignature(prev);
+                if (mergedSig === prevSig) {
+                  return prev;
+                }
+                lastPersistedThreadsSigRef.current = mergedSig;
+                threadsRef.current = merged;
+                saveToDesktopIndexedDB('pagechat_threads', merged);
+                return merged;
+              });
             }
-            ordersRef.current = merged;
-            saveOrdersToLocalStorageSafely(merged);
-            saveToDesktopIndexedDB('pagechat_orders', merged);
-            return merged;
-          });
+          }
         }
       } catch {
-        // silent order sync error
+        // silent sync error
       }
     };
 
     pollLiveEvents();
     const pollInterval = setInterval(pollLiveEvents, 2500);
-    const ordersPollInterval = setInterval(pollServerOrders, 3000);
+    const ordersPollInterval = setInterval(pollServerOrdersAndThreads, 3000);
 
     return () => {
       isMounted = false;
@@ -1909,15 +2257,8 @@ export default function App() {
     return () => clearInterval(graphSyncTimer);
   }, [selectedPage.id, selectedPage.accessToken]);
 
-  // Auto-Incoming Customer Stream for testing/live demonstration when enabled
+  // Disabled repetitive auto-incoming simulated customer stream; only real online customer messages are received
   const [autoIncomingStream, setAutoIncomingStream] = useState<boolean>(false);
-  useEffect(() => {
-    if (!autoIncomingStream) return;
-    const streamTimer = setInterval(() => {
-      handleSimulateCustomerChat(selectedPage);
-    }, 16000);
-    return () => clearInterval(streamTimer);
-  }, [autoIncomingStream, selectedPage.id]);
 
   // Handler for sending a customer message (text, image, or voice audio) directly from the CustomerMessengerWidget into the Page
   const handleSendCustomerMessageToPage = (
@@ -1926,6 +2267,7 @@ export default function App() {
     customCustomerName?: string,
     attachments?: any[]
   ) => {
+    userExplicitlyClearedAllChatsInSession = false;
     const now = new Date();
     const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
 
@@ -1938,7 +2280,10 @@ export default function App() {
         psid: `fb_psid_${Date.now()}`,
         isRealFacebookUser: true,
         name: custName,
-        avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80',
+        avatarUrl: resolveCustomerOriginalPageAvatar(
+          { id: `fb_cust_${Date.now()}`, psid: `fb_psid_${Date.now()}`, name: custName },
+          selectedPage
+        ),
         platform: selectedPage.platform || 'messenger',
         phone: '012 889 977',
         province: 'ភ្នំពេញ',
@@ -1975,10 +2320,12 @@ export default function App() {
       threadsRef.current = nextThreads;
       setThreads(nextThreads);
       setSelectedThreadId(newThreadId);
+      setIsCustomerBoxOpen(true);
+      persistThreadsToStorageAndServer(nextThreads);
       soundNotifier.playMessageChime();
 
-      const voiceTranscript = attachments?.find((a) => a.type === 'audio')?.data?.transcript;
       if (isAutoPilotRef.current) {
+        const voiceTranscript = attachments?.find((a) => a.type === 'audio')?.data?.transcript;
         setTimeout(() => {
           triggerAutoPilotResponse(newThreadId, voiceTranscript || text, msgId);
         }, 450);
@@ -2034,9 +2381,47 @@ export default function App() {
     threads.find((t) => !t.archived && t.status !== 'archived') ||
     threads[0];
 
+  const onlineStandbyThread: ChatThread = useMemo(
+    () => ({
+      id: `online_standby_${selectedPage.id}`,
+      pageId: selectedPage.id,
+      customer: {
+        id: `online_cust_${selectedPage.id}`,
+        psid: '',
+        name:
+          language === 'kh'
+            ? 'ប្រអប់សារអតិថិជន Online (ទទួលតែសារថ្មីៗ)'
+            : 'Online Customer Inbox (New Messages Only)',
+        avatarUrl: resolvePageOriginalAvatar(selectedPage),
+        platform: selectedPage.platform || 'messenger',
+        phone: 'Online Live',
+        province: 'ភ្នំពេញ',
+        address: selectedPage.name,
+        tags: ['Online ថ្មីៗ'],
+        totalOrders: 0,
+        totalSpent: 0,
+        notes: 'ពេលបើកកម្មវិធី Online ទទួលតែសារថ្មីៗពីអតិថិជនប៉ុណ្ណោះ',
+        createdAt: new Date().toISOString().split('T')[0],
+        isRealFacebookUser: true,
+      },
+      unreadCount: 0,
+      status: 'completed',
+      lastMessage: '',
+      lastMessageTime: 'Online',
+      lastActivityAt: appMountTimeRef.current,
+      orderIds: [],
+      messages: [],
+    }),
+    [selectedPage.id, selectedPage.name, selectedPage.avatar, selectedPage.platform, language]
+  );
+
+  const activeChatThread: ChatThread = selectedThread || onlineStandbyThread;
+
   const handleSelectThread = (threadId: string) => {
     setSelectedThreadId(threadId);
     setIsMobileChatOpen(true);
+    setIsCustomerBoxOpen(true);
+    setIsMobileCustomerSheetOpen(false);
     const foundThread = threads.find((t) => t.id === threadId);
     if (foundThread) {
       const matchedPage = pages.find((p) => p.id === foundThread.pageId);
@@ -2052,6 +2437,12 @@ export default function App() {
         t.id === threadId ? { ...t, unreadCount: 0 } : t
       )
     );
+  };
+
+  const handleBackToMainInbox = () => {
+    setIsMobileChatOpen(false);
+    setIsMobileCustomerSheetOpen(false);
+    setIsCustomerBoxOpen(false);
   };
 
   const handleBulkMarkAsRead = (threadIds: string[]) => {
@@ -2124,6 +2515,7 @@ export default function App() {
   };
 
   const handleDeleteAllThreads = () => {
+    userExplicitlyClearedAllChatsInSession = true;
     threadsRef.current = [];
     setThreads([]);
     setSelectedThreadId('');
@@ -2135,62 +2527,32 @@ export default function App() {
     fetch('/api/threads', { method: 'DELETE' }).catch(() => {});
   };
 
-  const deliverContextualCustomerReply = (targetThreadId: string, customerName: string, replyText: string) => {
-    setTimeout(() => {
-      const replyNow = new Date();
-      const replyTimeStr = `${replyNow.getHours()}:${String(replyNow.getMinutes()).padStart(2, '0')} ${replyNow.getHours() >= 12 ? 'PM' : 'AM'}`;
-      const replyMsgId = `msg_cust_reply_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      const customerReplyMsg: ChatMessage = {
-        id: replyMsgId,
-        sender: 'customer',
-        senderName: customerName,
-        text: replyText,
-        timestamp: replyTimeStr,
-        deliveryStatus: 'sent_meta',
-        isLiveMeta: true,
-      };
-      setThreads((prev) => {
-        let updatedTarget: ChatThread | null = null;
-        const others: ChatThread[] = [];
-        for (const t of prev) {
-          if (t.id === targetThreadId) {
-            updatedTarget = {
-              ...t,
-              archived: false,
-              unreadCount: (t.unreadCount || 0) + 1,
-              lastMessage: replyText,
-              lastMessageTime: replyTimeStr,
-              lastActivityAt: Date.now(),
-              status: 'needs_reply' as const,
-              messages: [...t.messages, customerReplyMsg],
-            };
-          } else {
-            others.push(t);
-          }
-        }
-        const next = updatedTarget ? [updatedTarget, ...others] : prev;
-        threadsRef.current = next;
-        return next;
-      });
-      soundNotifier.playMessageChime();
-
-      if (isAutoPilotRef.current) {
-        setTimeout(() => {
-          triggerAutoPilotResponse(targetThreadId, replyText, replyMsgId);
-        }, 650);
-      }
-    }, 1500);
-  };
-
   const handleSendMessage = async (text: string, attachments?: any[]) => {
-    if (!selectedThread) return;
-    const targetThreadId = selectedThread.id;
-    const customerName = selectedThread.customer.name;
+    userExplicitlyClearedAllChatsInSession = false;
+
+    const normalizedAttachments = attachments?.map((att) => {
+      if (att?.type === 'audio') {
+        const currentUrl = att?.data?.url || '';
+        return {
+          ...att,
+          data: {
+            ...(att.data || {}),
+            url: currentUrl || createPlayableReplyWavDataUrl(3.5),
+            duration: att.data?.duration || '0:04',
+            transcript: att.data?.transcript || text,
+          },
+        };
+      }
+      return att;
+    });
+
+    const activeList = threadsRef.current;
+    const targetThread = selectedThread || activeList[0] || onlineStandbyThread;
+
     const now = new Date();
     const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
-    const msgId = `msg_${Date.now()}`;
-
     const isPageLive = Boolean(selectedPage.isLiveOnline ?? true);
+    const msgId = `msg_${Date.now()}`;
 
     const newMsg: ChatMessage = {
       id: msgId,
@@ -2198,17 +2560,18 @@ export default function App() {
       senderName: selectedPage.activeStaff || 'សុខា (Admin)',
       text,
       timestamp: timeStr,
-      attachments,
+      attachments: normalizedAttachments,
       isRead: true,
       deliveryStatus: isPageLive ? 'sending_meta' : 'sent_meta',
       isLiveMeta: true,
     };
 
     setThreads((prev) => {
+      const baseList = prev.length > 0 ? prev : activeList;
       let updatedTarget: ChatThread | null = null;
       const others: ChatThread[] = [];
-      for (const t of prev) {
-        if (t.id === targetThreadId) {
+      for (const t of baseList) {
+        if (t.id === targetThread.id) {
           updatedTarget = {
             ...t,
             archived: false,
@@ -2222,15 +2585,29 @@ export default function App() {
           others.push(t);
         }
       }
-      const next = updatedTarget ? [updatedTarget, ...others] : prev;
+      if (!updatedTarget) {
+        updatedTarget = {
+          ...targetThread,
+          id: targetThread.id.startsWith('online_standby_') ? `fb_th_${Date.now()}` : targetThread.id,
+          archived: false,
+          lastMessage: text,
+          lastMessageTime: timeStr,
+          lastActivityAt: Date.now(),
+          status: 'completed' as const,
+          messages: [newMsg],
+        };
+        setSelectedThreadId(updatedTarget.id);
+      }
+      const next = [updatedTarget, ...others];
       threadsRef.current = next;
+      persistThreadsToStorageAndServer(next);
       return next;
     });
     soundNotifier.playMessageChime();
 
     if (isPageLive) {
       try {
-        const recipientPsid = selectedThread.customer.psid || selectedThread.customer.id;
+        const recipientPsid = targetThread.customer.psid || targetThread.customer.id;
         const res = await fetch('/api/facebook/send-message', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2240,20 +2617,35 @@ export default function App() {
             recipientId: recipientPsid,
             messageText: text,
             pageName: selectedPage.name,
-            attachments,
+            attachments: normalizedAttachments,
           }),
         });
         const data = await res.json();
         setThreads((prev) => {
           const next = prev.map((t) => {
-            if (t.id === targetThreadId) {
+            if (t.id === targetThread.id) {
               return {
                 ...t,
                 messages: t.messages.map((m) => {
                   if (m.id === msgId) {
+                    const updatedAttachments =
+                      data.audioUrl && Array.isArray(m.attachments)
+                        ? m.attachments.map((att) =>
+                            att.type === 'audio'
+                              ? {
+                                  ...att,
+                                  data: {
+                                    ...(att.data || {}),
+                                    url: data.audioUrl,
+                                  },
+                                }
+                              : att
+                          )
+                        : m.attachments;
                     return {
                       ...m,
                       id: data.messageId || m.id,
+                      attachments: updatedAttachments,
                       deliveryStatus: 'sent_meta' as const,
                     };
                   }
@@ -2264,20 +2656,24 @@ export default function App() {
             return t;
           });
           threadsRef.current = next;
+          persistThreadsToStorageAndServer(next);
           return next;
         });
-      } catch (err: any) {
+      } catch {
         setThreads((prev) => {
           const next = prev.map((t) => {
-            if (t.id === targetThreadId) {
+            if (t.id === targetThread.id) {
               return {
                 ...t,
-                messages: t.messages.map((m) => (m.id === msgId ? { ...m, deliveryStatus: 'sent_meta' as const } : m)),
+                messages: t.messages.map((m) =>
+                  m.id === msgId ? { ...m, deliveryStatus: 'sent_meta' as const } : m
+                ),
               };
             }
             return t;
           });
           threadsRef.current = next;
+          persistThreadsToStorageAndServer(next);
           return next;
         });
       }
@@ -2344,7 +2740,10 @@ export default function App() {
       psid: `fb_psid_${Date.now()}`,
       isRealFacebookUser: true,
       name: randomPick.name,
-      avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80',
+      avatarUrl: resolveCustomerOriginalPageAvatar(
+        { id: `fb_cust_${Date.now()}`, psid: `fb_psid_${Date.now()}`, name: randomPick.name },
+        targetPage
+      ),
       platform: targetPage.platform || 'messenger',
       phone: randomPick.phone,
       province: randomPick.province,
@@ -2392,7 +2791,12 @@ export default function App() {
     }
   };
 
-  const handleSimulateCustomerReply = (threadId: string, replyText?: string, attachments?: any[]) => {
+  const handleSimulateCustomerReply = (
+    threadId: string,
+    replyText?: string,
+    attachments?: any[]
+  ) => {
+    userExplicitlyClearedAllChatsInSession = false;
     const defaultReplies = [
       'ចាស៎បង តម្លៃសមរម្យណាស់ ខ្ញុំសម្រេចយកមួយហើយបង!',
       'ផ្ញើតាមឡាន J&T មកផ្ទះលេខ 45B ផ្លូវ 315 លេខទូរស័ព្ទ 012 889 977 ណា៎បង',
@@ -2402,25 +2806,40 @@ export default function App() {
     const text = replyText || defaultReplies[Math.floor(Math.random() * defaultReplies.length)];
     const now = new Date();
     const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
-    const msgId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const newMsgId = `msg_${Date.now()}`;
 
-    const targetThread = threadsRef.current.find((t) => t.id === threadId) || selectedThread;
+    const normalizedAttachments = attachments?.map((att) => {
+      if (att?.type === 'audio') {
+        return {
+          ...att,
+          data: {
+            ...(att.data || {}),
+            url: att?.data?.url || createPlayableReplyWavDataUrl(3.5),
+            duration: att?.data?.duration || '0:04',
+            transcript: att?.data?.transcript || text,
+          },
+        };
+      }
+      return att;
+    });
+
+    const targetThreadObj = threadsRef.current.find((t) => t.id === threadId);
     const newMsg: ChatMessage = {
-      id: msgId,
+      id: newMsgId,
       sender: 'customer',
-      senderName: targetThread?.customer?.name || 'អតិថិជន (Messenger Live)',
+      senderName: targetThreadObj?.customer?.name || 'អតិថិជន (Messenger Live)',
       text,
       timestamp: timeStr,
-      attachments,
+      attachments: normalizedAttachments,
       deliveryStatus: 'sent_meta',
       isLiveMeta: true,
     };
 
-    const updatedThreads: ChatThread[] = [];
-    let matchedThread: ChatThread | null = null;
+    let updatedTarget: ChatThread | null = null;
+    const otherThreads: ChatThread[] = [];
     for (const t of threadsRef.current) {
       if (t.id === threadId) {
-        matchedThread = {
+        updatedTarget = {
           ...t,
           archived: false,
           unreadCount: (t.unreadCount || 0) + 1,
@@ -2431,23 +2850,43 @@ export default function App() {
           messages: [...t.messages, newMsg],
         };
       } else {
-        updatedThreads.push(t);
+        otherThreads.push(t);
       }
     }
-    const finalThreads = matchedThread ? [matchedThread, ...updatedThreads] : threadsRef.current;
+
+    if (!updatedTarget) {
+      const createdId = threadId && !threadId.startsWith('online_standby_') ? threadId : `fb_th_${Date.now()}`;
+      updatedTarget = {
+        ...onlineStandbyThread,
+        id: createdId,
+        customer: {
+          ...onlineStandbyThread.customer,
+          id: `fb_cust_${Date.now()}`,
+          name: 'អតិថិជន Online (Messenger Live)',
+        },
+        archived: false,
+        unreadCount: 1,
+        lastMessage: text,
+        lastMessageTime: timeStr,
+        lastActivityAt: Date.now(),
+        status: 'needs_reply',
+        messages: [newMsg],
+      };
+    }
+
+    const finalThreads = [updatedTarget, ...otherThreads];
     threadsRef.current = finalThreads;
     setThreads(finalThreads);
-    setSelectedThreadId(threadId);
+    setSelectedThreadId(updatedTarget.id);
+    persistThreadsToStorageAndServer(finalThreads);
     soundNotifier.playMessageChime();
 
-    // If customer sent a voice message with a transcript, pass the transcript to AI Gemini Auto-Reply
-    const voiceTranscript = attachments?.find((a) => a.type === 'audio')?.data?.transcript;
-
-    // Trigger the Page AI / Auto-Reply when Auto-Pilot is active
+    // Only trigger AI Auto-Reply if Auto-Pilot is explicitly enabled
     if (isAutoPilotRef.current) {
+      const voiceTranscript = normalizedAttachments?.find((a) => a.type === 'audio')?.data?.transcript;
       setTimeout(() => {
-        triggerAutoPilotResponse(threadId, voiceTranscript || text, msgId);
-      }, 500);
+        triggerAutoPilotResponse(threadId, voiceTranscript || text, newMsgId);
+      }, 450);
     }
   };
 
@@ -2868,7 +3307,7 @@ export default function App() {
     setActiveView('inbox');
   };
 
-  const handleSavePage = (newPage: PageAccount, createSampleThread: boolean) => {
+  const handleSavePage = (newPage: PageAccount, _createSampleThread: boolean) => {
     const livePage: PageAccount = {
       ...normalizePageLive(newPage),
       isLiveOnline: true,
@@ -2880,44 +3319,13 @@ export default function App() {
       setPages((prev) => prev.map((p) => (p.id === livePage.id ? livePage : p)));
       setSelectedPage(livePage);
       selectedPageRef.current = livePage;
-
-      const isRealToken = Boolean(
-        livePage.accessToken &&
-          livePage.accessToken.startsWith('EAA') &&
-          !livePage.accessToken.startsWith('EAABw_')
-      );
-
-      if (isRealToken) {
-        handleSyncRealConversations(livePage, false);
-      } else if (createSampleThread) {
-        const seeded = createLiveMessengerThreadsForPage(livePage);
-        setThreads((prev) => {
-          const next = [...seeded, ...prev];
-          threadsRef.current = next;
-          return next;
-        });
-        setSelectedThreadId(seeded[0].id);
-        soundNotifier.playMessageChime();
-      }
+      handleSyncRealConversations(livePage, false);
     } else {
       setPages((prev) => [livePage, ...prev.filter((p) => p.id !== livePage.id)]);
       setSelectedPage(livePage);
       selectedPageRef.current = livePage;
-
-      if (createSampleThread) {
-        const seededThreads = createLiveMessengerThreadsForPage(livePage);
-        setThreads((prev) => {
-          const next = [...seededThreads, ...prev];
-          threadsRef.current = next;
-          return next;
-        });
-        setSelectedThreadId(seededThreads[0].id);
-      }
       soundNotifier.playOrderSuccess();
-
-      if (livePage.accessToken && livePage.accessToken.startsWith('EAA') && !livePage.accessToken.startsWith('EAABw_')) {
-        handleSyncRealConversations(livePage, false);
-      }
+      handleSyncRealConversations(livePage, false);
     }
     setEditingPage(null);
     setActiveView('inbox');
@@ -2932,6 +3340,7 @@ export default function App() {
     };
     setPages((prev) => prev.map((p) => (p.id === livePage.id ? livePage : p)));
     setSelectedPage(livePage);
+    selectedPageRef.current = livePage;
 
     const pageThreads = threads.filter((t) => t.pageId === livePage.id);
     if (pageThreads.length > 0) {
@@ -2940,6 +3349,7 @@ export default function App() {
       setSelectedThreadId('');
     }
     setActiveView('inbox');
+    void handleSyncRealConversations(livePage, false, true);
   };
 
   const handleEditPage = (page: PageAccount) => {
@@ -3145,16 +3555,25 @@ export default function App() {
 
         {/* 2. Main Work View */}
         {activeView === 'inbox' && (
-          <div className="flex flex-1 h-full overflow-hidden">
-            {/* Conversation list: hidden on mobile if active chat is open */}
-            <div className={`h-full ${isMobileChatOpen ? 'hidden md:flex' : 'flex flex-1 md:flex-none'}`}>
+          <div className="flex flex-1 h-full overflow-hidden relative">
+            {/* Conversation list: always visible on desktop; visible full-width on mobile/phone-frame when not inside a customer chat */}
+            <div
+              className={`h-full ${
+                isMobileChatOpen && isCustomerBoxOpen
+                  ? isGlobalMobileFrame
+                    ? 'hidden'
+                    : 'hidden md:flex'
+                  : 'flex flex-1 md:flex-none'
+              }`}
+            >
               <ConversationList
                 threads={threads}
-                selectedThreadId={selectedThread?.id || selectedThreadId}
+                selectedThreadId={isCustomerBoxOpen ? selectedThread?.id || selectedThreadId : null}
                 onSelectThread={handleSelectThread}
                 language={language}
                 onSimulateCustomerChat={handleSimulateCustomerChat}
-                onSyncPageMessages={() => handleSyncRealConversations(selectedPage)}
+                onSyncPageMessages={() => handlePullAllMetaTokenMessagesAndLive(selectedPage)}
+                onQuickConnectMetaToken={(token) => handlePullAllMetaTokenMessagesAndLive(selectedPage, token)}
                 selectedPage={selectedPage}
                 pages={pages}
                 onOpenMobileMenu={() => setIsMobileNavOpen(true)}
@@ -3170,11 +3589,19 @@ export default function App() {
               />
             </div>
 
-            {/* Active Chat Window: hidden on mobile if viewing conversation list */}
-            <div className={`flex-1 h-full ${!isMobileChatOpen ? 'hidden md:flex flex-col' : 'flex flex-col'}`}>
-              {selectedThread ? (
+            {/* Active Customer Chat Window OR Main Inbox Overview when user clicks 'មកប្រអប់ដើមវិញ' */}
+            <div
+              className={`flex-1 h-full ${
+                !isMobileChatOpen || !isCustomerBoxOpen
+                  ? isGlobalMobileFrame
+                    ? 'hidden'
+                    : 'hidden md:flex flex-col'
+                  : 'flex flex-col'
+              }`}
+            >
+              {isCustomerBoxOpen ? (
                 <ChatWindow
-                  thread={selectedThread}
+                  thread={activeChatThread}
                   quickReplies={quickReplies}
                   autoReplies={autoReplies}
                   products={products}
@@ -3201,15 +3628,17 @@ export default function App() {
                   onOpenImageStudio={() => setActiveView('image_studio')}
                   selectedPage={selectedPage}
                   onOpenLiveModal={() => setIsFacebookLiveModalOpen(true)}
-                  onBack={() => setIsMobileChatOpen(false)}
+                  onBack={handleBackToMainInbox}
+                  onUpdateCustomer={handleUpdateCustomer}
+                  onOpenCustomerProfile={() => setIsMobileCustomerSheetOpen(true)}
                   isAutoPilot={isAutoPilot}
                   onToggleAutoPilot={handleToggleAutoPilot}
-                  isAiAutoReplying={aiTypingThreadIds.includes(selectedThread.id)}
+                  isAiAutoReplying={aiTypingThreadIds.includes(activeChatThread.id)}
                   onTriggerAiAutoReply={() => {
-                    const lastCust = [...selectedThread.messages].reverse().find((m) => m.sender === 'customer');
+                    const lastCust = [...activeChatThread.messages].reverse().find((m) => m.sender === 'customer');
                     triggerAutoPilotResponse(
-                      selectedThread.id,
-                      lastCust?.text || selectedThread.lastMessage,
+                      activeChatThread.id,
+                      lastCust?.text || activeChatThread.lastMessage,
                       lastCust?.id,
                       true
                     );
@@ -3217,14 +3646,143 @@ export default function App() {
                   onExportConversationPdf={() => setIsConversationPdfModalOpen(true)}
                 />
               ) : (
-                <div className="flex-1 flex items-center justify-center text-slate-400">
-                  {language === 'kh' ? 'សូមជ្រើសរើសការជជែកមួយ' : 'Select a conversation'}
+                /* Main Inbox Dashboard (ប្រអប់សារដើម) shown when returning from a Customer Box on Desktop */
+                <div className="flex-1 flex flex-col h-full bg-slate-50 overflow-y-auto p-6">
+                  <div className="max-w-4xl mx-auto w-full space-y-5">
+                    {threads.filter((t) => !t.archived && t.status !== 'archived').length === 0 ? (
+                      <div className="p-8 bg-white rounded-2xl border border-slate-200 text-center space-y-3 shadow-2xs">
+                        <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 border border-emerald-200 flex items-center justify-center mx-auto">
+                          <MessageSquare className="w-6 h-6" />
+                        </div>
+                        <h3 className="text-sm font-bold text-slate-900">
+                          {language === 'kh'
+                            ? 'ពេលបើកកម្មវិធី Online ទទួលតែសារថ្មីៗពីអតិថិជនប៉ុណ្ណោះ'
+                            : 'Online Mode: Receiving Only New Incoming Customer Messages'}
+                        </h3>
+                        <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+                          {language === 'kh'
+                            ? 'សារចាស់ៗមិនត្រូវបានទាញចូលទេ។ ពេលមានអតិថិជនឆាតសារថ្មីចូលមកផេក អំឡុងពេលបើកកម្មវិធី Online សារថ្មីនោះនឹងលោតចូលក្នុងប្រអប់សារភ្លាមៗ។'
+                            : 'Old messages are not loaded. Only new messages arriving while the app is open Online will enter the inbox automatically.'}
+                        </p>
+                        <div className="flex flex-wrap items-center justify-center gap-2.5 pt-2">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await handlePullAllMetaTokenMessagesAndLive(selectedPage);
+                              setIsCustomerBoxOpen(true);
+                              setIsMobileChatOpen(true);
+                            }}
+                            className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            <span>
+                              {language === 'kh'
+                                ? '📥 សារអតិថិជនទាំងអស់ (Meta Token) & Live សារថ្មីៗ'
+                                : 'Pull All Customer Messages (Meta Token) & Go Live'}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsFacebookLiveModalOpen(true)}
+                            className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
+                          >
+                            <span>🔑</span>
+                            <span>
+                              {language === 'kh'
+                                ? 'បញ្ចូល Page Access Token (Meta)'
+                                : 'Enter Page Access Token (Meta)'}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsCustomerBoxOpen(true);
+                              setIsMobileChatOpen(true);
+                            }}
+                            className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
+                          >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                            <span>
+                              {language === 'kh'
+                                ? 'បើកកន្លែងផ្ញើសារអតិថិជន'
+                                : 'Open Customer Chat Box'}
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                        {threads
+                          .filter((t) => !t.archived && t.status !== 'archived')
+                          .map((th) => {
+                            const thPage = pages.find((p) => p.id === th.pageId) || selectedPage;
+                            const custAvatar = resolveCustomerOriginalPageAvatar(th.customer, thPage);
+                            const pgAvatar = resolvePageOriginalAvatar(thPage);
+                            return (
+                              <div
+                                key={th.id}
+                                onClick={() => handleSelectThread(th.id)}
+                                className="p-4 bg-white hover:bg-blue-50/40 rounded-2xl border border-slate-200 hover:border-blue-300 shadow-2xs transition-all cursor-pointer flex items-start gap-3.5 group"
+                              >
+                                <div className="relative shrink-0">
+                                  <img
+                                    src={custAvatar}
+                                    alt={th.customer.name}
+                                    referrerPolicy="no-referrer"
+                                    onError={(e) => {
+                                      e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                                        th.customer.name,
+                                        thPage?.name
+                                      );
+                                    }}
+                                    className="w-12 h-12 rounded-full object-cover border-2 border-blue-500/40 bg-slate-100"
+                                  />
+                                  <img
+                                    src={pgAvatar}
+                                    alt={thPage?.name || 'Page'}
+                                    referrerPolicy="no-referrer"
+                                    onError={(e) => {
+                                      e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                                        thPage?.name || 'Page',
+                                        'FB Page'
+                                      );
+                                    }}
+                                    className="w-5 h-5 rounded-full object-cover border-2 border-white shadow-xs absolute -bottom-1 -right-1 bg-white"
+                                  />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <h3 className="text-sm font-bold text-slate-900 truncate group-hover:text-blue-700">
+                                      {th.customer.name}
+                                    </h3>
+                                    <span className="text-[11px] text-slate-400 tabular-nums shrink-0">
+                                      {th.lastMessageTime}
+                                    </span>
+                                  </div>
+                                  <p className="text-xs text-slate-600 truncate mt-1">
+                                    {th.lastMessage}
+                                  </p>
+                                  <div className="flex items-center justify-between mt-2.5 pt-2 border-t border-slate-100">
+                                    <span className="text-[11px] text-slate-500">
+                                      {th.customer.province} • {thPage?.name.split(' - ')[0]}
+                                    </span>
+                                    <span className="text-[11px] font-bold text-blue-600 group-hover:translate-x-0.5 transition-transform">
+                                      {language === 'kh' ? 'ចូលប្រអប់អតិថិជន →' : 'Open Chat →'}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
 
-            {/* Right Customer CRM Panel */}
-            {selectedThread && (
+            {/* Right Customer CRM Panel (Desktop) */}
+            {selectedThread && isCustomerBoxOpen && !isGlobalMobileFrame && (
               <div className="hidden lg:block">
                 <CustomerPanel
                   customer={selectedThread.customer}
@@ -3236,8 +3794,41 @@ export default function App() {
                   }}
                   onViewOrderInvoice={(orderId) => setActiveInvoiceOrderId(orderId)}
                   onExportConversationPdf={() => setIsConversationPdfModalOpen(true)}
+                  selectedPage={selectedPage}
+                  onBackToMainInbox={handleBackToMainInbox}
                   language={language}
                 />
+              </div>
+            )}
+
+            {/* Mobile / Tablet Customer CRM Drawer when user opens Customer Profile */}
+            {selectedThread && isMobileCustomerSheetOpen && (
+              <div className="fixed inset-0 z-50 bg-slate-900/50 flex justify-end lg:hidden">
+                <div className="relative h-full bg-white shadow-2xl flex flex-col">
+                  <CustomerPanel
+                    customer={selectedThread.customer}
+                    orders={orders}
+                    onUpdateCustomer={handleUpdateCustomer}
+                    onOpenCreateOrder={() => {
+                      setIsMobileCustomerSheetOpen(false);
+                      setInitialOrderModalProduct(null);
+                      setIsOrderModalOpen(true);
+                    }}
+                    onViewOrderInvoice={(orderId) => {
+                      setIsMobileCustomerSheetOpen(false);
+                      setActiveInvoiceOrderId(orderId);
+                    }}
+                    onExportConversationPdf={() => {
+                      setIsMobileCustomerSheetOpen(false);
+                      setIsConversationPdfModalOpen(true);
+                    }}
+                    selectedPage={selectedPage}
+                    onBackToMainInbox={() => {
+                      setIsMobileCustomerSheetOpen(false);
+                    }}
+                    language={language}
+                  />
+                </div>
               </div>
             )}
           </div>
@@ -3436,6 +4027,7 @@ export default function App() {
             products={products}
             isOnline={isOnline}
             onSendMessage={handleSendMessage}
+            onSimulateCustomerReply={handleSimulateCustomerReply}
             onSelectThread={(id) => {
               setSelectedThreadId(id);
             }}
@@ -3558,33 +4150,16 @@ export default function App() {
             };
             setPages((prev) => prev.map((p) => (p.id === liveUpdated.id ? liveUpdated : p)));
             setSelectedPage(liveUpdated);
+            selectedPageRef.current = liveUpdated;
             if (liveUpdated.isLiveOnline) {
-              handleSyncRealConversations(liveUpdated);
+              handlePullAllMetaTokenMessagesAndLive(liveUpdated);
             }
           }}
-          onSyncRealConversations={() => handleSyncRealConversations(selectedPage)}
+          onSyncRealConversations={() => handlePullAllMetaTokenMessagesAndLive(selectedPage)}
           language={language}
         />
       )}
 
-      {/* Live Customer Messenger Page Window (Allows chatting directly into the connected Page & seeing Auto-Import + AI Auto-Reply) */}
-      <CustomerMessengerWidget
-        selectedPage={selectedPage}
-        activeThread={selectedThread}
-        isAutoPilot={isAutoPilot}
-        isAiAutoReplying={Boolean(selectedThread && aiTypingThreadIds.includes(selectedThread.id))}
-        autoIncomingStream={autoIncomingStream}
-        onToggleAutoIncomingStream={() => {
-          const next = !autoIncomingStream;
-          setAutoIncomingStream(next);
-          if (next) {
-            handleSimulateCustomerChat(selectedPage);
-          }
-        }}
-        onSendCustomerMessageToPage={handleSendCustomerMessageToPage}
-        onConnectRealToken={handleQuickConnectRealToken}
-        language={language}
-      />
     </div>
   );
 }

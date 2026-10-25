@@ -12,6 +12,11 @@ import {
   X
 } from 'lucide-react';
 import { ChatThread, ThreadStatus, PlatformType, PageAccount, BatchAutoPilotProgress } from '../types';
+import {
+  resolveCustomerOriginalPageAvatar,
+  resolvePageOriginalAvatar,
+  buildClientFallbackAvatarDataUrl,
+} from '../utils/avatarUtils';
 
 interface ConversationListProps {
   threads: ChatThread[];
@@ -19,7 +24,8 @@ interface ConversationListProps {
   onSelectThread: (threadId: string) => void;
   language: 'kh' | 'en';
   onSimulateCustomerChat: () => void;
-  onSyncPageMessages?: () => void;
+  onSyncPageMessages?: () => Promise<any> | void;
+  onQuickConnectMetaToken?: (token: string) => Promise<any>;
   selectedPage?: PageAccount;
   pages?: PageAccount[];
   onOpenMobileMenu?: () => void;
@@ -41,6 +47,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   language,
   onSimulateCustomerChat,
   onSyncPageMessages,
+  onQuickConnectMetaToken,
   selectedPage,
   pages = [],
   onOpenMobileMenu,
@@ -59,19 +66,64 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   const [platformFilter, setPlatformFilter] = useState<PlatformType | 'all'>('all');
   const [pageScope, setPageScope] = useState<'current' | 'all'>('all');
   const [isSyncingPage, setIsSyncingPage] = useState(false);
+  const [showInlineTokenBox, setShowInlineTokenBox] = useState(false);
+  const [inlineTokenInput, setInlineTokenInput] = useState('');
   const [selectedThreadIds, setSelectedThreadIds] = useState<string[]>([]);
   const [bulkFeedback, setBulkFeedback] = useState<string | null>(null);
   const listContainerRef = useRef<HTMLDivElement>(null);
   const prevTopThreadKeyRef = useRef<string>('');
 
-  const handleSyncClick = () => {
+  const hasRealMetaToken = Boolean(
+    (selectedPage?.accessToken &&
+      selectedPage.accessToken.startsWith('EAA') &&
+      !selectedPage.accessToken.startsWith('EAABw_')) ||
+      pages.some((p) => p.accessToken && p.accessToken.startsWith('EAA') && !p.accessToken.startsWith('EAABw_'))
+  );
+
+  const handleSyncClick = async () => {
     setIsSyncingPage(true);
-    if (onSyncPageMessages) {
-      onSyncPageMessages();
-    } else {
-      onSimulateCustomerChat();
+    setStatusFilter('all');
+    try {
+      if (onSyncPageMessages) {
+        const result = await onSyncPageMessages();
+        const pulledCount = typeof result?.count === 'number' ? result.count : 0;
+        showTemporaryFeedback(
+          pulledCount > 0
+            ? language === 'kh'
+              ? `បានទាញយកសារអតិថិជនទាំងអស់ (${pulledCount} ឆាត) & កំពុង Live សារថ្មីៗ!`
+              : `Pulled ${pulledCount} customer chats & Live active!`
+            : language === 'kh'
+            ? 'កំពុងភ្ជាប់សារអតិថិជនទាំងអស់ពី Meta Token & Live សារថ្មីៗ'
+            : 'Synced Meta Page Token & Live for new messages'
+        );
+      }
+    } finally {
+      setTimeout(() => setIsSyncingPage(false), 500);
     }
-    setTimeout(() => setIsSyncingPage(false), 600);
+  };
+
+  const handleInlineTokenConnectAndPull = async () => {
+    const trimmed = inlineTokenInput.trim();
+    if (!trimmed) return;
+    setIsSyncingPage(true);
+    setStatusFilter('all');
+    try {
+      if (onQuickConnectMetaToken) {
+        const res = await onQuickConnectMetaToken(trimmed);
+        const pulledCount = typeof res?.count === 'number' ? res.count : 0;
+        setInlineTokenInput('');
+        setShowInlineTokenBox(false);
+        showTemporaryFeedback(
+          language === 'kh'
+            ? `បានភ្ជាប់ Token & ទាញយកសារអតិថិជន (${pulledCount} ឆាត) + Live សារថ្មីៗ!`
+            : `Token connected & pulled ${pulledCount} customer chats + Live!`
+        );
+      } else if (onSyncPageMessages) {
+        await onSyncPageMessages();
+      }
+    } finally {
+      setIsSyncingPage(false);
+    }
   };
 
   const statusTabs: { id: ThreadStatus; labelKh: string; labelEn: string }[] = [
@@ -154,10 +206,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   useEffect(() => {
     const topThread = filteredThreads[0];
     if (!topThread) return;
-    const topKey = `${topThread.id}_${topThread.lastActivityAt || 0}_${topThread.messages?.length || 0}`;
+    const topKey = `${topThread.id}_${topThread.messages?.length || 0}_${topThread.lastMessage || ''}`;
     if (prevTopThreadKeyRef.current && prevTopThreadKeyRef.current !== topKey) {
       if (listContainerRef.current) {
-        listContainerRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+        listContainerRef.current.scrollTop = 0;
       }
     }
     prevTopThreadKeyRef.current = topKey;
@@ -317,25 +369,6 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               </button>
             )}
 
-            <button
-              type="button"
-              onClick={handleSyncClick}
-              className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md transition-colors shadow-2xs cursor-pointer"
-              title={language === 'kh' ? 'ទាញយកសារថ្មីពីផេក (Sync Page Messages)' : 'Sync messages from page'}
-            >
-              <RefreshCw className={`w-3 h-3 ${isSyncingPage ? 'animate-spin' : ''}`} />
-              <span>{language === 'kh' ? 'ទាញសារផេក' : 'Sync'}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onSimulateCustomerChat()}
-              className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200/80 rounded-md transition-colors shadow-2xs cursor-pointer"
-              title={language === 'kh' ? 'សាកល្បងទទួលសារ Messenger Live ថ្មី' : 'Simulate incoming customer message on Messenger Live'}
-            >
-              <span>+ សារថ្មី</span>
-            </button>
-
             {threads.length > 0 && onDeleteAllThreads && (
               <button
                 type="button"
@@ -377,6 +410,89 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             </button>
           </div>
         )}
+
+        {/* 1-Click Button: Pull All Customer Messages from Meta Page Access Token & Go Live with New Messages */}
+        <div className="mb-2.5 space-y-1.5">
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={handleSyncClick}
+              disabled={isSyncingPage}
+              className="flex-1 py-1.5 px-2.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-[11px] font-bold shadow-2xs flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-60"
+              title={
+                language === 'kh'
+                  ? 'ចុចដើម្បីទាញយកសារអតិថិជនទាំងអស់ចូលក្នុងផេកដែលបានបញ្ចូល Page Access Token (Meta) ដើម្បីយកសារមកប្រើ និង Live ជាមួយសារថ្មីៗ'
+                  : 'Pull all customer messages from Page Access Token (Meta) into this Page & stay Live with new messages'
+              }
+            >
+              <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${isSyncingPage ? 'animate-spin' : ''}`} />
+              <span className="truncate">
+                {language === 'kh'
+                  ? 'សារអតិថិជនទាំងអស់ (Meta Token) & Live សារថ្មីៗ'
+                  : 'All Customer Messages (Meta Token) & Live'}
+              </span>
+              <span className="px-1.5 py-0.2 rounded-full bg-white/20 text-[9px] font-extrabold shrink-0">
+                {hasRealMetaToken ? 'META LIVE' : 'LIVE'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowInlineTokenBox((prev) => !prev)}
+              className={`px-2 py-1.5 rounded-lg border text-[11px] font-bold transition-colors shrink-0 cursor-pointer flex items-center gap-1 ${
+                showInlineTokenBox || hasRealMetaToken
+                  ? 'bg-indigo-50 text-indigo-700 border-indigo-300 hover:bg-indigo-100'
+                  : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'
+              }`}
+              title={
+                language === 'kh'
+                  ? 'បញ្ចូល Page Access Token (Meta) ដើម្បីទាញយកសារអតិថិជនទាំងអស់ចូលផេក'
+                  : 'Enter Page Access Token (Meta)'
+              }
+            >
+              <span>🔑</span>
+              <span>{language === 'kh' ? 'Token' : 'Token'}</span>
+            </button>
+          </div>
+
+          {showInlineTokenBox && (
+            <div className="p-2 bg-indigo-50/90 border border-indigo-200 rounded-lg space-y-1.5">
+              <div className="flex items-center justify-between text-[10px] font-bold text-indigo-900">
+                <span>
+                  {language === 'kh'
+                    ? `បញ្ចូល Page Access Token (Meta) សម្រាប់ផេក "${selectedPage?.name.split(' - ')[0] || 'Page'}"៖`
+                    : 'Paste Page Access Token (Meta):'}
+                </span>
+                {onOpenLiveOnlineModal && (
+                  <button
+                    type="button"
+                    onClick={onOpenLiveOnlineModal}
+                    className="text-blue-600 underline cursor-pointer"
+                  >
+                    {language === 'kh' ? 'ផ្ទាំងពេញ' : 'Full Setup'}
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="password"
+                  value={inlineTokenInput}
+                  onChange={(e) => setInlineTokenInput(e.target.value)}
+                  placeholder="EAABw... (Page Access Token Meta)"
+                  className="flex-1 px-2.5 py-1 text-xs font-mono bg-white border border-indigo-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleInlineTokenConnectAndPull}
+                  disabled={isSyncingPage || !inlineTokenInput.trim()}
+                  className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-[11px] font-bold rounded-md cursor-pointer shrink-0"
+                >
+                  {language === 'kh' ? 'ភ្ជាប់ & យកសារទាំងអស់' : 'Connect & Pull All'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* Search Bar */}
         <div className="relative">
@@ -698,28 +814,51 @@ export const ConversationList: React.FC<ConversationListProps> = ({
       <div ref={listContainerRef} className="flex-1 overflow-y-auto divide-y divide-slate-100">
         {filteredThreads.length === 0 ? (
           <div className="p-8 text-center text-slate-400">
-            <MessageCircle className="w-10 h-10 mx-auto text-slate-300 mb-2 stroke-[1.5]" />
-            <p className="text-sm font-medium text-slate-600">
+            <MessageCircle className="w-10 h-10 mx-auto text-emerald-500 mb-2 stroke-[1.5]" />
+            <p className="text-sm font-semibold text-slate-700">
               {statusFilter === 'archived'
                 ? language === 'kh'
                   ? 'មិនមានការជជែកក្នុងបណ្ណសារទេ'
                   : 'No archived conversations'
                 : language === 'kh'
-                ? 'មិនមានសារជជែកក្នុងតម្រងនេះទេ'
-                : 'No conversations found'}
+                ? 'រង់ចាំទទួលតែសារថ្មីៗពីអតិថិជន Online'
+                : 'Waiting for new incoming Online messages'}
             </p>
             {statusFilter !== 'archived' && (
-              <button
-                type="button"
-                onClick={() => {
-                  setStatusFilter('all');
-                  setSearchQuery('');
-                  onSimulateCustomerChat();
-                }}
-                className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
-              >
-                <span>+ {language === 'kh' ? 'ទទួលសារ Messenger Live ថ្មី' : 'New Messenger Live Chat'}</span>
-              </button>
+              <div className="mt-2 space-y-2.5">
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  {language === 'kh'
+                    ? 'ពេលអតិថិជនឆាតសារថ្មីចូលមក នឹងបង្ហាញនៅទីនេះភ្លាមៗ ឬចុចប៊ូតុងខាងក្រោមដើម្បីទាញយកសារអតិថិជនទាំងអស់ពី Page Access Token (Meta) មកប្រើ៖'
+                    : 'New customer messages appear here automatically, or click below to pull all customer messages from your Meta Page Access Token:'}
+                </p>
+                <div className="flex flex-col gap-1.5 items-center pt-1">
+                  <button
+                    type="button"
+                    onClick={handleSyncClick}
+                    disabled={isSyncingPage}
+                    className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer disabled:opacity-60"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isSyncingPage ? 'animate-spin' : ''}`} />
+                    <span>
+                      {language === 'kh'
+                        ? '📥 សារអតិថិជនទាំងអស់ (Meta Token) & Live សារថ្មីៗ'
+                        : 'Pull All Customer Messages (Meta Token) & Go Live'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowInlineTokenBox(true)}
+                    className="px-3 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>🔑</span>
+                    <span>
+                      {language === 'kh'
+                        ? 'បញ្ចូល Page Access Token (Meta)'
+                        : 'Enter Page Access Token (Meta)'}
+                    </span>
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         ) : (
@@ -754,18 +893,48 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                   />
                 </div>
 
-                {/* Customer Avatar & Platform badge */}
-                <div className="relative shrink-0">
-                  <img
-                    src={thread.customer.avatarUrl}
-                    alt={thread.customer.name}
-                    referrerPolicy="no-referrer"
-                    className="w-11 h-11 rounded-full object-cover border border-slate-200"
-                  />
-                  <div className="absolute -bottom-1 -right-1">
-                    {getPlatformBadge(thread.customer.platform)}
-                  </div>
-                </div>
+                {/* Dual Original Profile Avatar from Facebook Page (រូបដើមអតិថិជន + រូបដើមផេក) */}
+                {(() => {
+                  const threadPage = pages.find((p) => p.id === thread.pageId) || selectedPage;
+                  const custAvatar = resolveCustomerOriginalPageAvatar(thread.customer, threadPage);
+                  const pageAvatar = resolvePageOriginalAvatar(threadPage);
+                  return (
+                    <div
+                      className="relative shrink-0"
+                      title={`រូប Profile ដើមពីផេក ${threadPage?.name || 'Facebook Page'}`}
+                    >
+                      <img
+                        src={custAvatar}
+                        alt={thread.customer.name}
+                        referrerPolicy="no-referrer"
+                        onError={(e) => {
+                          e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                            thread.customer.name,
+                            threadPage?.name
+                          );
+                        }}
+                        className="w-11 h-11 rounded-full object-cover border-2 border-blue-500/30 shadow-2xs bg-slate-100"
+                      />
+                      {/* Dual Page Original Avatar Badge */}
+                      <img
+                        src={pageAvatar}
+                        alt={threadPage?.name || 'Page'}
+                        referrerPolicy="no-referrer"
+                        onError={(e) => {
+                          e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                            threadPage?.name || 'Page',
+                            'FB Page'
+                          );
+                        }}
+                        className="w-5 h-5 rounded-full object-cover border-2 border-white shadow-xs absolute -bottom-1 -right-1 bg-white"
+                        title={`ផេក៖ ${threadPage?.name || 'Facebook Page'}`}
+                      />
+                      <div className="absolute -top-1 -left-1 scale-90">
+                        {getPlatformBadge(thread.customer.platform)}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Content */}
                 <div className="flex-1 min-w-0">

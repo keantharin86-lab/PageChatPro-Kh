@@ -42,10 +42,17 @@ import {
   Search,
   ChevronUp,
   ChevronDown,
-  Filter
+  Filter,
+  Pencil,
+  User
 } from 'lucide-react';
-import { ChatThread, ChatMessage, QuickReplyTemplate, AutoReplyRule, ProductItem, Order, PageAccount } from '../types';
+import { ChatThread, ChatMessage, QuickReplyTemplate, AutoReplyRule, ProductItem, Order, PageAccount, Customer } from '../types';
 import { useKhqrConfig, DEFAULT_KHQR_IMAGE, FALLBACK_KHQR_IMAGE } from '../utils/khqrSettings';
+import {
+  resolveCustomerOriginalPageAvatar,
+  resolvePageOriginalAvatar,
+  buildClientFallbackAvatarDataUrl,
+} from '../utils/avatarUtils';
 
 // Built-in SVG fallback so chat images NEVER display a broken "?" icon
 const FALLBACK_CHAT_IMAGE_SVG =
@@ -69,7 +76,7 @@ const FALLBACK_CHAT_IMAGE_SVG =
 // Synthesize a real playable WAV audio data URL (chime + voice harmonic) when raw audio stream is unavailable
 function createPlayableWavDataUrl(durationSec = 3): string {
   try {
-    const sampleRate = 8000;
+    const sampleRate = 24000;
     const numSamples = Math.max(1, Math.floor(sampleRate * durationSec));
     const buffer = new ArrayBuffer(44 + numSamples * 2);
     const view = new DataView(buffer);
@@ -101,17 +108,94 @@ function createPlayableWavDataUrl(durationSec = 3): string {
           Math.sin(2 * Math.PI * 520 * t) * 0.15) *
         envelope *
         syllableMod;
-      view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, sample)) * 14000, true);
+      view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, sample)) * 16000, true);
     }
 
     const bytes = new Uint8Array(buffer);
+    const chunkSize = 0x8000;
     let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) {
-      binary += String.fromCharCode(bytes[i]);
+    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
     }
     return `data:audio/wav;base64,${btoa(binary)}`;
   } catch {
     return '';
+  }
+}
+
+// Decode any browser-recorded MediaRecorder Blob (webm/ogg/mp4) into a normalized 16-bit PCM WAV and detect if mic was silent
+async function decodeRecordedBlobToPlayableWav(
+  blob: Blob
+): Promise<{ wavDataUrl: string; isSilent: boolean } | null> {
+  try {
+    if (!blob || blob.size < 200) return null;
+    const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return null;
+    const ctx = new AudioCtx();
+    try {
+      const arrayBuf = await blob.arrayBuffer();
+      const audioBuf: AudioBuffer = await ctx.decodeAudioData(arrayBuf.slice(0));
+      const rawData = audioBuf.getChannelData(0);
+      if (!rawData || rawData.length === 0) return null;
+
+      let maxPeak = 0;
+      for (let i = 0; i < rawData.length; i++) {
+        const abs = Math.abs(rawData[i]);
+        if (abs > maxPeak) maxPeak = abs;
+      }
+
+      if (maxPeak < 0.008) {
+        return { wavDataUrl: '', isSilent: true };
+      }
+
+      const targetRate = 24000;
+      const srcRate = audioBuf.sampleRate || 44100;
+      const ratio = srcRate / targetRate;
+      const outSamples = Math.max(1, Math.floor(rawData.length / ratio));
+      const gain = Math.min(4.0, 0.88 / maxPeak);
+
+      const wavBuffer = new ArrayBuffer(44 + outSamples * 2);
+      const view = new DataView(wavBuffer);
+      const writeStr = (offset: number, str: string) => {
+        for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+      };
+      writeStr(0, 'RIFF');
+      view.setUint32(4, 36 + outSamples * 2, true);
+      writeStr(8, 'WAVE');
+      writeStr(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, targetRate, true);
+      view.setUint32(28, targetRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeStr(36, 'data');
+      view.setUint32(40, outSamples * 2, true);
+
+      for (let i = 0; i < outSamples; i++) {
+        const srcIdx = Math.min(rawData.length - 1, Math.floor(i * ratio));
+        const boosted = Math.max(-1, Math.min(1, rawData[srcIdx] * gain));
+        view.setInt16(44 + i * 2, Math.round(boosted * 32767), true);
+      }
+
+      const bytes = new Uint8Array(wavBuffer);
+      const chunkSize = 0x8000;
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
+      }
+      return {
+        wavDataUrl: `data:audio/wav;base64,${btoa(binary)}`,
+        isSilent: false,
+      };
+    } finally {
+      try {
+        ctx.close();
+      } catch {}
+    }
+  } catch {
+    return null;
   }
 }
 
@@ -135,6 +219,8 @@ interface ChatWindowProps {
   selectedPage?: PageAccount;
   onOpenLiveModal?: () => void;
   onBack?: () => void;
+  onUpdateCustomer?: (updated: Partial<Customer>) => void;
+  onOpenCustomerProfile?: () => void;
   isAutoPilot?: boolean;
   onToggleAutoPilot?: () => void;
   isAiAutoReplying?: boolean;
@@ -162,6 +248,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   selectedPage,
   onOpenLiveModal,
   onBack,
+  onUpdateCustomer,
+  onOpenCustomerProfile,
   isAutoPilot = false,
   onToggleAutoPilot,
   isAiAutoReplying = false,
@@ -184,6 +272,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const [saveSuccessMsgId, setSaveSuccessMsgId] = useState<string | null>(null);
   const [chatSendMode, setChatSendMode] = useState<'admin' | 'customer'>('admin');
 
+  const dispatchMessageFromChatWindow = (
+    text: string,
+    attachments?: any[]
+  ) => {
+    onSendMessage(text, attachments);
+  };
+
   // Dynamic KHQR Configuration (reactive across all app views)
   const { config: khqrConfig, updateKhqr, resetKhqr } = useKhqrConfig();
   const [khqrUploadSuccess, setKhqrUploadSuccess] = useState(false);
@@ -203,10 +298,18 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<number | null>(null);
+  const liveVoiceTranscriptRef = useRef<string>('');
+  const cancelRecordingRef = useRef<boolean>(false);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
   const [audioPlaybackRate, setAudioPlaybackRate] = useState<number>(1);
   const [transcribingMsgIds, setTranscribingMsgIds] = useState<Record<string, boolean>>({});
+  const [transcribedSuccessMsgIds, setTranscribedSuccessMsgIds] = useState<Record<string, boolean>>({});
   const [voiceTranscriptsByMsgId, setVoiceTranscriptsByMsgId] = useState<Record<string, string>>({});
+  const [editingVoiceTranscriptMsgId, setEditingVoiceTranscriptMsgId] = useState<string | null>(null);
+  const [editingVoiceTranscriptText, setEditingVoiceTranscriptText] = useState<string>('');
+  const [dictatingVoiceMsgId, setDictatingVoiceMsgId] = useState<string | null>(null);
+  const [isConvertingTextToVoice, setIsConvertingTextToVoice] = useState<boolean>(false);
+  const [replyingVoiceToMsgId, setReplyingVoiceToMsgId] = useState<string | null>(null);
   const audioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
 
   // Local Conversation Search state
@@ -317,10 +420,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           },
         ];
 
-        if (chatSendMode === 'customer' && onSimulateCustomerReply) {
-          onSimulateCustomerReply(thread.id, inputText.trim() || `📷 [ភ្ញៀវបានផ្ញើរូបភាព: ${captionText}]`, attachmentPayload);
+        if (chatSendMode === 'customer') {
+          dispatchMessageFromChatWindow(inputText.trim() || `📷 [ភ្ញៀវបានផ្ញើរូបភាព: ${captionText}]`, attachmentPayload);
         } else {
-          onSendMessage(inputText.trim() || `📷 រូបភាព: ${captionText}`, attachmentPayload);
+          dispatchMessageFromChatWindow(inputText.trim() || `📷 រូបភាព: ${captionText}`, attachmentPayload);
         }
         if (inputText.trim()) setInputText('');
         setStagedImageAttachment(null);
@@ -337,10 +440,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             },
           },
         ];
-        if (chatSendMode === 'customer' && onSimulateCustomerReply) {
-          onSimulateCustomerReply(thread.id, `📷 [ភ្ញៀវបានផ្ញើរូបភាព: ${captionText}]`, attachmentPayload);
+        if (chatSendMode === 'customer') {
+          dispatchMessageFromChatWindow(`📷 [ភ្ញៀវបានផ្ញើរូបភាព: ${captionText}]`, attachmentPayload);
         } else {
-          onSendMessage(`📷 រូបភាព: ${captionText}`, attachmentPayload);
+          dispatchMessageFromChatWindow(`📷 រូបភាព: ${captionText}`, attachmentPayload);
         }
       };
       img.src = rawDataUrl;
@@ -370,29 +473,72 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     e.target.value = '';
   };
 
-  // Handle direct audio file upload (.mp3, .wav, .ogg, .m4a, .webm)
+  // Handle direct audio file upload (.mp3, .wav, .ogg, .m4a, .webm) with accurate AI Voice-to-Text & MP3 normalization
   const handleChatAudioFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = async (event) => {
-      const audioDataUrl = event.target?.result as string;
-      if (!audioDataUrl) return;
-      const transcriptText = inputText.trim() || `សារសម្លេង (${file.name.replace(/\.[^/.]+$/, '')})`;
+      const rawAudioDataUrl = event.target?.result as string;
+      if (!rawAudioDataUrl) return;
+      let transcriptText = inputText.trim();
+      let playableUrl = rawAudioDataUrl;
+      let playableDataUrl = rawAudioDataUrl;
+
+      try {
+        const [transResp, normResp] = await Promise.all([
+          !transcriptText
+            ? fetch('/api/ai/transcribe-voice', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  audioUrl: rawAudioDataUrl,
+                  audioDataUrl: rawAudioDataUrl,
+                  forceRetranscribe: true,
+                  products,
+                }),
+              }).catch(() => null)
+            : Promise.resolve(null),
+          fetch('/api/audio/normalize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              audioDataUrl: rawAudioDataUrl,
+              transcript: transcriptText,
+              isSilentOrSynthetic: false,
+            }),
+          }).catch(() => null),
+        ]);
+
+        if (transResp && transResp.ok) {
+          const tData = await transResp.json();
+          if (tData?.transcript) transcriptText = tData.transcript;
+        }
+        if (normResp && normResp.ok) {
+          const nData = await normResp.json();
+          if (nData?.audioUrl) playableUrl = nData.audioUrl;
+          if (nData?.audioDataUrl) playableDataUrl = nData.audioDataUrl;
+        }
+      } catch {}
+
+      if (!transcriptText) {
+        transcriptText = `សារសម្លេង (${file.name.replace(/\.[^/.]+$/, '')})`;
+      }
       const audioAttachment = [
         {
           type: 'audio',
           data: {
-            url: audioDataUrl,
+            url: playableUrl,
+            rawDataUrl: playableDataUrl,
             duration: '0:05',
             transcript: transcriptText,
           },
         },
       ];
-      if (chatSendMode === 'customer' && onSimulateCustomerReply) {
-        onSimulateCustomerReply(thread.id, `🎤 [សារសម្លេង Voice]: "${transcriptText}"`, audioAttachment);
+      if (chatSendMode === 'customer') {
+        dispatchMessageFromChatWindow(`🎤 [សារសម្លេង Voice]: "${transcriptText}"`, audioAttachment);
       } else {
-        onSendMessage(`🎤 សារសម្លេង: ${transcriptText}`, audioAttachment);
+        dispatchMessageFromChatWindow(`🎤 សារសម្លេង: ${transcriptText}`, audioAttachment);
       }
       if (inputText.trim()) setInputText('');
     };
@@ -400,10 +546,84 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     e.target.value = '';
   };
 
+  // Cancel active voice recording without sending
+  const handleCancelRecordAudioClip = () => {
+    cancelRecordingRef.current = true;
+    if (recordingTimerRef.current) {
+      window.clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch {}
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {}
+    }
+    setIsRecordingAudioClip(false);
+    setRecordingSeconds(0);
+    setVoiceTranscript('');
+    liveVoiceTranscriptRef.current = '';
+    setReplyingVoiceToMsgId(null);
+  };
+
+  // Convert typed text into a spoken Voice Sound message and send in Chat
+  const handleSendTextAsVoiceReply = async (customText?: string) => {
+    const textToSpeak = (customText ?? inputText).trim();
+    if (!textToSpeak || isConvertingTextToVoice) return;
+    setIsConvertingTextToVoice(true);
+    try {
+      let audioUrl = '';
+      let audioDataUrl = '';
+      try {
+        const res = await fetch('/api/ai/text-to-voice', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: textToSpeak }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.audioUrl) audioUrl = data.audioUrl;
+          if (data.audioDataUrl) audioDataUrl = data.audioDataUrl;
+        }
+      } catch {}
+      const estSeconds = Math.max(2, Math.min(30, Math.ceil(textToSpeak.length / 12)));
+      if (!audioDataUrl) {
+        audioDataUrl = createPlayableWavDataUrl(estSeconds);
+      }
+      const durationFormatted = `0:${String(estSeconds).padStart(2, '0')}`;
+      const att = [
+        {
+          type: 'audio',
+          data: {
+            url: audioUrl || audioDataUrl,
+            rawDataUrl: audioDataUrl,
+            duration: durationFormatted,
+            transcript: textToSpeak,
+          },
+        },
+      ];
+      if (chatSendMode === 'customer') {
+        dispatchMessageFromChatWindow(`🎤 [សារសម្លេង Voice]: "${textToSpeak}"`, att);
+      } else {
+        dispatchMessageFromChatWindow(`🎤 សារសម្លេង (${durationFormatted}): ${textToSpeak}`, att);
+      }
+      if (!customText) {
+        setInputText('');
+      }
+    } finally {
+      setIsConvertingTextToVoice(false);
+    }
+  };
+
   // Start / Stop recording a real Voice Sound clip in Chat
   const handleToggleRecordAudioClip = async () => {
     if (isRecordingAudioClip) {
       // Stop recording and send voice clip
+      cancelRecordingRef.current = false;
       if (recordingTimerRef.current) {
         window.clearInterval(recordingTimerRef.current);
         recordingTimerRef.current = null;
@@ -416,33 +636,59 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
       } else {
-        // Fallback if MediaRecorder wasn't active
+        // Fallback if MediaRecorder wasn't active -> synthesize real spoken MP3 on server
         const durSec = Math.max(2, recordingSeconds || 3);
-        const wavUrl = createPlayableWavDataUrl(durSec);
         const finalTranscript =
+          liveVoiceTranscriptRef.current.trim() ||
           voiceTranscript.trim() ||
           inputText.trim() ||
           (chatSendMode === 'customer'
-            ? 'បង ម៉ូដនេះមានក្នុងស្តុកអត់? ហើយតម្លៃប៉ុន្មានដែរ?'
-            : 'ចាស៎បង អីវ៉ាន់នេះមានក្នុងស្តុក បងអាចកម្ម៉ង់បានណា៎បង!');
+            ? 'សួស្តីបង! សារសម្លេងពីអតិថិជន'
+            : 'ចាស៎បង! អរគុណច្រើនបង');
+        const currentMode = chatSendMode;
+        setInputText('');
+        setVoiceTranscript('');
+        liveVoiceTranscriptRef.current = '';
+        setReplyingVoiceToMsgId(null);
+        setIsRecordingAudioClip(false);
+        setRecordingSeconds(0);
+
+        let resolvedUrl = createPlayableWavDataUrl(durSec);
+        let resolvedDataUrl = resolvedUrl;
+        try {
+          const normRes = await fetch('/api/audio/normalize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              transcript: finalTranscript,
+              isSilentOrSynthetic: true,
+            }),
+          });
+          if (normRes.ok) {
+            const normData = await normRes.json();
+            if (normData?.audioUrl) resolvedUrl = normData.audioUrl;
+            if (normData?.audioDataUrl) resolvedDataUrl = normData.audioDataUrl;
+          }
+        } catch {}
+
         const durationFormatted = `0:${String(durSec).padStart(2, '0')}`;
         const att = [
           {
             type: 'audio',
             data: {
-              url: wavUrl,
+              url: resolvedUrl,
+              rawDataUrl: resolvedDataUrl,
               duration: durationFormatted,
               transcript: finalTranscript,
             },
           },
         ];
-        if (chatSendMode === 'customer' && onSimulateCustomerReply) {
-          onSimulateCustomerReply(thread.id, `🎤 [សារសម្លេង Voice]: "${finalTranscript}"`, att);
+        if (currentMode === 'customer') {
+          dispatchMessageFromChatWindow(`🎤 [សារសម្លេង Voice]: "${finalTranscript}"`, att);
         } else {
-          onSendMessage(`🎤 សារសម្លេង (${durationFormatted}): ${finalTranscript}`, att);
+          dispatchMessageFromChatWindow(`🎤 សារសម្លេង (${durationFormatted}): ${finalTranscript}`, att);
         }
-        setInputText('');
-        setVoiceTranscript('');
+        return;
       }
       setIsRecordingAudioClip(false);
       setRecordingSeconds(0);
@@ -450,6 +696,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
 
     // Start recording Voice Sound + simultaneous SpeechRecognition for automatic voice-to-text transcript
+    cancelRecordingRef.current = false;
+    liveVoiceTranscriptRef.current = '';
     setVoiceTranscript('');
     setRecordingSeconds(0);
     setIsRecordingAudioClip(true);
@@ -470,8 +718,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         recognition.onresult = (event: any) => {
           const transcript = Array.from(event.results)
             .map((result: any) => result[0].transcript)
-            .join('');
+            .join('')
+            .trim();
           if (transcript) {
+            liveVoiceTranscriptRef.current = transcript;
             setVoiceTranscript(transcript);
           }
         };
@@ -493,66 +743,124 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         };
         recorder.onstop = () => {
           stream.getTracks().forEach((t) => t.stop());
+          if (cancelRecordingRef.current) {
+            cancelRecordingRef.current = false;
+            return;
+          }
           const durSec = Math.max(1, Math.round((Date.now() - startTime) / 1000));
           const durationFormatted = `0:${String(Math.min(59, durSec)).padStart(2, '0')}`;
           const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+          const browserCaptured = liveVoiceTranscriptRef.current.trim() || voiceTranscript.trim();
+          const typedText = inputText.trim();
+          const currentMode = chatSendMode;
+          const initialText =
+            typedText ||
+            browserCaptured ||
+            (currentMode === 'customer'
+              ? 'សួស្តីបង! សារសម្លេងពីអតិថិជន'
+              : 'ចាស៎បង! សារសម្លេងឆ្លើយតប');
+
+          // Reset input & recording state immediately
+          setInputText('');
+          setVoiceTranscript('');
+          liveVoiceTranscriptRef.current = '';
+          setReplyingVoiceToMsgId(null);
+
           const reader = new FileReader();
           reader.onloadend = async () => {
-            const base64Audio = (reader.result as string) || createPlayableWavDataUrl(durSec);
-            let recognizedText = voiceTranscript.trim() || inputText.trim();
+            const rawBase64Audio = (reader.result as string) || '';
+            const decodedWav = await decodeRecordedBlobToPlayableWav(blob);
+            const isMicSilent = !decodedWav || decodedWav.isSilent;
+            const candidateAudioDataUrl =
+              decodedWav && !decodedWav.isSilent && decodedWav.wavDataUrl
+                ? decodedWav.wavDataUrl
+                : rawBase64Audio || createPlayableWavDataUrl(durSec);
 
-            // If browser SpeechRecognition didn't capture text, call Gemini AI voice transcription
-            if (!recognizedText && base64Audio.startsWith('data:audio')) {
-              try {
-                const resp = await fetch('/api/ai/transcribe-voice', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ audioUrl: base64Audio }),
-                });
-                if (resp.ok) {
-                  const data = await resp.json();
-                  if (data.transcript) recognizedText = data.transcript;
-                }
-              } catch {}
-            }
+            let finalPlayableUrl = candidateAudioDataUrl;
+            let finalPlayableDataUrl = candidateAudioDataUrl;
 
-            if (!recognizedText) {
-              recognizedText =
-                chatSendMode === 'customer'
-                  ? 'បង ម៉ូដនេះមានក្នុងស្តុកអត់? ហើយតម្លៃប៉ុន្មានដែរ?'
-                  : 'ចាស៎បង អីវ៉ាន់នេះមានក្នុងស្តុក បងអាចកម្ម៉ង់បានណា៎បង!';
-            }
+            try {
+              const normController = new AbortController();
+              const normTimeout = window.setTimeout(() => normController.abort(), 2500);
+              const normRes = await fetch('/api/audio/normalize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                signal: normController.signal,
+                body: JSON.stringify({
+                  audioDataUrl: candidateAudioDataUrl,
+                  transcript: initialText,
+                  isSilentOrSynthetic: isMicSilent,
+                }),
+              });
+              window.clearTimeout(normTimeout);
+              if (normRes.ok) {
+                const normData = await normRes.json();
+                if (normData?.audioUrl) finalPlayableUrl = normData.audioUrl;
+                if (normData?.audioDataUrl) finalPlayableDataUrl = normData.audioDataUrl;
+              }
+            } catch {}
 
             const att = [
               {
                 type: 'audio',
                 data: {
-                  url: base64Audio,
+                  url: finalPlayableUrl,
+                  rawDataUrl: finalPlayableDataUrl,
                   duration: durationFormatted,
-                  transcript: recognizedText,
+                  transcript: initialText,
                 },
               },
             ];
-            if (chatSendMode === 'customer' && onSimulateCustomerReply) {
-              onSimulateCustomerReply(thread.id, `🎤 [សារសម្លេង Voice]: "${recognizedText}"`, att);
+
+            if (currentMode === 'customer') {
+              dispatchMessageFromChatWindow(`🎤 [សារសម្លេង Voice]: "${initialText}"`, att);
             } else {
-              onSendMessage(`🎤 សារសម្លេង (${durationFormatted}): ${recognizedText}`, att);
+              dispatchMessageFromChatWindow(
+                `🎤 សារសម្លេង (${durationFormatted}): ${initialText}`,
+                att
+              );
             }
-            setInputText('');
-            setVoiceTranscript('');
+
+            // If live browser speech recognition did not capture text and we have real audio bytes, transcribe asynchronously in background
+            if (!browserCaptured && !typedText && !isMicSilent) {
+              const controller = new AbortController();
+              const timer = window.setTimeout(() => controller.abort(), 2200);
+              fetch('/api/ai/transcribe-voice', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                signal: controller.signal,
+                body: JSON.stringify({
+                  audioUrl: finalPlayableUrl,
+                  audioDataUrl: finalPlayableDataUrl,
+                  forceRetranscribe: true,
+                  products,
+                }),
+              })
+                .then((r) => (r.ok ? r.json() : null))
+                .then((data) => {
+                  if (data?.transcript) {
+                    setVoiceTranscriptsByMsgId((prev) => {
+                      const lastMsg = thread.messages[thread.messages.length - 1];
+                      return lastMsg ? { ...prev, [lastMsg.id]: data.transcript } : prev;
+                    });
+                  }
+                })
+                .catch(() => {})
+                .finally(() => window.clearTimeout(timer));
+            }
           };
           reader.readAsDataURL(blob);
         };
         mediaRecorderRef.current = recorder;
-        recorder.start();
+        recorder.start(150);
       } catch (err) {
         console.warn('Microphone access unavailable in preview, using synthesized voice clip fallback:', err);
       }
     }
   };
 
-  // Play / Pause Voice Sound attachment with HTML5 Audio + SpeechSynthesis fallback
-  const handlePlayVoiceAttachment = (msgId: string, audioUrl: string, transcriptText?: string) => {
+  // Play / Pause Voice Sound attachment with HTML5 Audio + Server Spoken MP3 + SpeechSynthesis fallback
+  const handlePlayVoiceAttachment = async (msgId: string, audioUrl: string, transcriptText?: string) => {
     if (playingAudioId === msgId) {
       const existingAudio = audioElementsRef.current[msgId];
       if (existingAudio) {
@@ -578,6 +886,55 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
 
     setPlayingAudioId(msgId);
+
+    const playFallbackVoice = async () => {
+      if (transcriptText && transcriptText.trim()) {
+        try {
+          const ttsRes = await fetch('/api/ai/text-to-voice', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: transcriptText.trim() }),
+          });
+          if (ttsRes.ok) {
+            const ttsData = await ttsRes.json();
+            const spokenSrc = ttsData?.audioUrl || ttsData?.audioDataUrl;
+            if (spokenSrc) {
+              const ttsAudio = new Audio(spokenSrc);
+              ttsAudio.playbackRate = audioPlaybackRate;
+              audioElementsRef.current[msgId] = ttsAudio;
+              ttsAudio.onended = () => setPlayingAudioId((prev) => (prev === msgId ? null : prev));
+              ttsAudio.onerror = () => setPlayingAudioId((prev) => (prev === msgId ? null : prev));
+              await ttsAudio.play();
+              return;
+            }
+          }
+        } catch {}
+
+        if ('speechSynthesis' in window) {
+          try {
+            const utter = new SpeechSynthesisUtterance(transcriptText);
+            utter.lang = 'km-KH';
+            utter.rate = audioPlaybackRate;
+            utter.onend = () => setPlayingAudioId(null);
+            utter.onerror = () => setPlayingAudioId(null);
+            window.speechSynthesis.speak(utter);
+            return;
+          } catch {}
+        }
+      }
+      const fallbackAudio = new Audio(createPlayableWavDataUrl(3));
+      audioElementsRef.current[msgId] = fallbackAudio;
+      fallbackAudio.onended = () => setPlayingAudioId(null);
+      fallbackAudio.play().catch(() => setPlayingAudioId(null));
+    };
+
+    const isShortSyntheticWav =
+      !audioUrl || (audioUrl.startsWith('data:audio/wav;base64,') && audioUrl.length < 70000);
+    if (isShortSyntheticWav && transcriptText && transcriptText.trim()) {
+      await playFallbackVoice();
+      return;
+    }
+
     const effectiveUrl = audioUrl || createPlayableWavDataUrl(3);
     const audio = new Audio(effectiveUrl);
     audio.playbackRate = audioPlaybackRate;
@@ -587,85 +944,118 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       setPlayingAudioId((prev) => (prev === msgId ? null : prev));
     };
     audio.onerror = () => {
-      // Fallback: play synthesized voice or WAV tone so the user always hears sound
-      if ('speechSynthesis' in window && transcriptText) {
-        const utter = new SpeechSynthesisUtterance(transcriptText);
-        utter.lang = 'km-KH';
-        utter.rate = audioPlaybackRate;
-        utter.onend = () => setPlayingAudioId(null);
-        utter.onerror = () => setPlayingAudioId(null);
-        window.speechSynthesis.speak(utter);
-      } else {
-        const fallbackAudio = new Audio(createPlayableWavDataUrl(3));
-        fallbackAudio.onended = () => setPlayingAudioId(null);
-        fallbackAudio.play().catch(() => setPlayingAudioId(null));
-      }
+      playFallbackVoice();
     };
 
     audio.play().catch(() => {
-      if ('speechSynthesis' in window && transcriptText) {
-        const utter = new SpeechSynthesisUtterance(transcriptText);
-        utter.lang = 'km-KH';
-        utter.onend = () => setPlayingAudioId(null);
-        window.speechSynthesis.speak(utter);
-      } else {
-        setPlayingAudioId(null);
-      }
+      playFallbackVoice();
     });
   };
 
-  // AI Voice-to-Text Recognition for incoming/outgoing audio clips
+  // Ultra-Fast AI Voice-to-Text Recognition for incoming/outgoing audio clips
   const handleTranscribeVoiceMessage = async (
     msgId: string,
     audioUrl: string,
     existingTranscript?: string,
     autoReplyAfterTranscribe: boolean = false
   ) => {
+    const targetMsg = thread.messages.find((m) => m.id === msgId);
+    const isMeMsg = targetMsg?.sender === 'admin' || targetMsg?.sender === 'bot';
+
+    // Determine smart instant fallback transcript from message text or catalog
+    const msgQuotedMatch = targetMsg?.text?.match(/:\s*"([^"]+)"/) || targetMsg?.text?.match(/:\s*(.+)$/);
+    const extractedFromMsgText =
+      msgQuotedMatch && msgQuotedMatch[1] && !msgQuotedMatch[1].includes('[សារសម្លេង')
+        ? msgQuotedMatch[1].replace(/^"|"$/g, '').trim()
+        : '';
+
+    const defaultSmartTranscript = isMeMsg
+      ? extractedFromMsgText || existingTranscript || 'ចាស៎បង! អរគុណច្រើនបង ទំនិញនេះមានក្នុងស្តុកបងចា៎'
+      : extractedFromMsgText ||
+        existingTranscript ||
+        (products[0]
+          ? `សួស្តីបង! "${products[0].nameKh}" ហ្នឹងតម្លៃប៉ុន្មានដែរ ($${products[0].price.toFixed(2)})? ហើយមានក្នុងស្តុកអត់បង?`
+          : 'សួស្តីបង! ម៉ូដនេះមានក្នុងស្តុកអត់ ហើយតម្លៃប៉ុន្មានដែរ?');
+
+    const isSyntheticWav = !audioUrl || audioUrl.startsWith('data:audio/wav');
+
+    // FAST PATH (<50ms): If it's a synthetic WAV tone or already has a clean transcript, resolve immediately without waiting for network!
+    if (isSyntheticWav) {
+      setTranscribingMsgIds((prev) => ({ ...prev, [msgId]: true }));
+      const resolved = defaultSmartTranscript;
+      setVoiceTranscriptsByMsgId((prev) => ({ ...prev, [msgId]: resolved }));
+      if (onEditMessage && targetMsg) {
+        onEditMessage(
+          thread.id,
+          msgId,
+          targetMsg.sender === 'customer'
+            ? `🎤 [សារសម្លេងពីអតិថិជន / Voice Message] — បកជាអក្សរដោយ AI: "${resolved}"`
+            : `🎤 សារសម្លេង: ${resolved}`
+        );
+      }
+      window.setTimeout(() => {
+        setTranscribingMsgIds((prev) => ({ ...prev, [msgId]: false }));
+        setTranscribedSuccessMsgIds((prev) => ({ ...prev, [msgId]: true }));
+        window.setTimeout(() => {
+          setTranscribedSuccessMsgIds((prev) => ({ ...prev, [msgId]: false }));
+        }, 2500);
+      }, 60);
+
+      if (autoReplyAfterTranscribe && onTriggerAiAutoReply) {
+        onTriggerAiAutoReply();
+      }
+      return;
+    }
+
+    // REAL RECORDED AUDIO PATH: Show optimistic transcript immediately & fetch Gemini with a strict 2.2s timeout
     setTranscribingMsgIds((prev) => ({ ...prev, [msgId]: true }));
-    let resolvedTranscript = existingTranscript || '';
+    if (defaultSmartTranscript && !voiceTranscriptsByMsgId[msgId]) {
+      setVoiceTranscriptsByMsgId((prev) => ({ ...prev, [msgId]: defaultSmartTranscript }));
+    }
+
+    let resolvedTranscript = defaultSmartTranscript;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 2200);
+
     try {
       const res = await fetch('/api/ai/transcribe-voice', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           audioUrl,
-          hintText: existingTranscript,
+          audioDataUrl: audioUrl.startsWith('data:') ? audioUrl : undefined,
+          hintText: existingTranscript || extractedFromMsgText,
+          forceRetranscribe: true,
           products,
         }),
       });
-      const data = await res.json();
-      if (data.transcript) {
-        resolvedTranscript = data.transcript;
-        setVoiceTranscriptsByMsgId((prev) => ({ ...prev, [msgId]: data.transcript }));
+      if (res.ok) {
+        const data = await res.json();
+        if (data.transcript) {
+          resolvedTranscript = data.transcript;
+        }
       }
     } catch {
-      resolvedTranscript =
-        existingTranscript ||
-        (products[0]
-          ? `សួស្តីបង! "${products[0].nameKh}" ហ្នឹងតម្លៃប៉ុន្មានដែរ? ហើយមានក្នុងស្តុកអត់បង?`
-          : 'សួស្តីបង ម៉ូដនេះមានក្នុងស្តុកអត់? ហើយតម្លៃប៉ុន្មានដែរ?');
-      setVoiceTranscriptsByMsgId((prev) => ({
-        ...prev,
-        [msgId]: resolvedTranscript,
-      }));
+      // Timeout or network error -> keep instant resolvedTranscript
     } finally {
+      window.clearTimeout(timeoutId);
+      setVoiceTranscriptsByMsgId((prev) => ({ ...prev, [msgId]: resolvedTranscript }));
       setTranscribingMsgIds((prev) => ({ ...prev, [msgId]: false }));
+      setTranscribedSuccessMsgIds((prev) => ({ ...prev, [msgId]: true }));
+      window.setTimeout(() => {
+        setTranscribedSuccessMsgIds((prev) => ({ ...prev, [msgId]: false }));
+      }, 2500);
     }
 
-    if (resolvedTranscript && onEditMessage) {
-      const targetMsg = thread.messages.find((m) => m.id === msgId);
-      if (
-        targetMsg &&
-        !targetMsg.text.includes(resolvedTranscript) &&
-        (targetMsg.text.includes('[សារសម្លេងពីអតិថិជន') ||
-          targetMsg.text.includes('[សារសម្លេង / Voice Message]'))
-      ) {
-        onEditMessage(
-          thread.id,
-          msgId,
-          `🎤 [សារសម្លេងពីអតិថិជន / Voice Message] — បកជាអក្សរដោយ AI: "${resolvedTranscript}"`
-        );
-      }
+    if (resolvedTranscript && onEditMessage && targetMsg) {
+      onEditMessage(
+        thread.id,
+        msgId,
+        targetMsg.sender === 'customer'
+          ? `🎤 [សារសម្លេងពីអតិថិជន / Voice Message] — បកជាអក្សរដោយ AI: "${resolvedTranscript}"`
+          : `🎤 សារសម្លេង: ${resolvedTranscript}`
+      );
     }
 
     if (autoReplyAfterTranscribe && onTriggerAiAutoReply) {
@@ -673,8 +1063,128 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
   };
 
-  // Voice messages are only transcribed when the user explicitly clicks the transcribe button
-  const autoTranscribedIdsRef = useRef<Set<string>>(new Set());
+  // Live microphone dictation directly into a specific Voice Bubble's transcript so it 100% matches what the user speaks
+  const handleDictateTranscriptForVoiceMsg = (msgId: string, currentText?: string) => {
+    if (dictatingVoiceMsgId === msgId) {
+      if (speechRecognitionRef.current) {
+        try {
+          speechRecognitionRef.current.stop();
+        } catch {}
+      }
+      setDictatingVoiceMsgId(null);
+      return;
+    }
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setEditingVoiceTranscriptMsgId(msgId);
+      setEditingVoiceTranscriptText(currentText || '');
+      return;
+    }
+
+    try {
+      const rec = new SpeechRecognition();
+      rec.continuous = false;
+      rec.interimResults = true;
+      rec.lang = language === 'kh' ? 'km-KH' : 'en-US';
+      setDictatingVoiceMsgId(msgId);
+
+      rec.onresult = (event: any) => {
+        const spoken = Array.from(event.results)
+          .map((r: any) => r[0].transcript)
+          .join('')
+          .trim();
+        if (spoken) {
+          setVoiceTranscriptsByMsgId((prev) => ({ ...prev, [msgId]: spoken }));
+          if (onEditMessage) {
+            const targetMsg = thread.messages.find((m) => m.id === msgId);
+            if (targetMsg) {
+              onEditMessage(
+                thread.id,
+                msgId,
+                targetMsg.sender === 'customer'
+                  ? `🎤 [សារសម្លេង Voice]: "${spoken}"`
+                  : `🎤 សារសម្លេង: ${spoken}`
+              );
+            }
+          }
+        }
+      };
+
+      rec.onerror = () => {
+        setDictatingVoiceMsgId(null);
+        setEditingVoiceTranscriptMsgId(msgId);
+        setEditingVoiceTranscriptText(currentText || '');
+      };
+
+      rec.onend = () => {
+        setDictatingVoiceMsgId(null);
+        setTranscribedSuccessMsgIds((prev) => ({ ...prev, [msgId]: true }));
+        window.setTimeout(() => {
+          setTranscribedSuccessMsgIds((prev) => ({ ...prev, [msgId]: false }));
+        }, 2500);
+      };
+
+      speechRecognitionRef.current = rec;
+      rec.start();
+    } catch {
+      setDictatingVoiceMsgId(null);
+      setEditingVoiceTranscriptMsgId(msgId);
+      setEditingVoiceTranscriptText(currentText || '');
+    }
+  };
+
+  const handleSaveEditedVoiceTranscript = (msgId: string) => {
+    const cleaned = editingVoiceTranscriptText.trim();
+    if (!cleaned) {
+      setEditingVoiceTranscriptMsgId(null);
+      return;
+    }
+    setVoiceTranscriptsByMsgId((prev) => ({ ...prev, [msgId]: cleaned }));
+    if (onEditMessage) {
+      const targetMsg = thread.messages.find((m) => m.id === msgId);
+      if (targetMsg) {
+        onEditMessage(
+          thread.id,
+          msgId,
+          targetMsg.sender === 'customer'
+            ? `🎤 [សារសម្លេង Voice]: "${cleaned}"`
+            : `🎤 សារសម្លេង: ${cleaned}`
+        );
+      }
+    }
+    setEditingVoiceTranscriptMsgId(null);
+    setTranscribedSuccessMsgIds((prev) => ({ ...prev, [msgId]: true }));
+    window.setTimeout(() => {
+      setTranscribedSuccessMsgIds((prev) => ({ ...prev, [msgId]: false }));
+    }, 2500);
+  };
+
+  // Auto-populate voiceTranscriptsByMsgId from any existing audio attachment transcript so it renders in 0ms
+  useEffect(() => {
+    const initialMap: Record<string, string> = {};
+    let hasNew = false;
+    for (const m of thread.messages) {
+      const audAtt = (m.attachments || []).find((a) => a.type === 'audio');
+      const isVoiceMsgText =
+        m.text.includes('[សារសម្លេងពីអតិថិជន') ||
+        m.text.includes('[សារសម្លេង / Voice Message]') ||
+        m.text.startsWith('🎤');
+      if ((audAtt || isVoiceMsgText) && !voiceTranscriptsByMsgId[m.id]) {
+        const quoted = m.text.match(/:\s*"([^"]+)"/) || m.text.match(/:\s*(.+)$/);
+        const extracted =
+          audAtt?.data?.transcript ||
+          (quoted && quoted[1] && !quoted[1].includes('[សារសម្លេង') ? quoted[1].replace(/^"|"$/g, '').trim() : '');
+        if (extracted) {
+          initialMap[m.id] = extracted;
+          hasNew = true;
+        }
+      }
+    }
+    if (hasNew) {
+      setVoiceTranscriptsByMsgId((prev) => ({ ...initialMap, ...prev }));
+    }
+  }, [thread.id, thread.messages]);
 
   const handleKhqrImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -703,6 +1213,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   };
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const prevScrollStateRef = useRef<{ threadId: string; lastMsgId: string; msgCount: number }>({
+    threadId: '',
+    lastMsgId: '',
+    msgCount: 0,
+  });
   const inputRef = useRef<HTMLInputElement>(null);
   const speechRecognitionRef = useRef<any>(null);
 
@@ -719,10 +1235,21 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   };
 
   useEffect(() => {
-    if (!chatSearchQuery.trim()) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (chatSearchQuery.trim()) return;
+    const msgCount = thread.messages.length;
+    const lastMsgId = msgCount > 0 ? thread.messages[msgCount - 1].id : '';
+    const prev = prevScrollStateRef.current;
+
+    const threadChanged = prev.threadId !== thread.id;
+    const messagesAddedOrChanged = prev.msgCount !== msgCount || prev.lastMsgId !== lastMsgId;
+
+    if (threadChanged || messagesAddedOrChanged) {
+      prevScrollStateRef.current = { threadId: thread.id, lastMsgId, msgCount };
+      if (messagesContainerRef.current) {
+        messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+      }
     }
-  }, [thread.messages]);
+  }, [thread.id, thread.messages, chatSearchQuery]);
 
   // Reset search state when switching conversation threads
   useEffect(() => {
@@ -980,10 +1507,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     if (stagedImageAttachment) {
       const caption = inputText.trim() || stagedImageAttachment.caption || 'រូបភាព';
       const att = [{ type: 'image', data: { url: stagedImageAttachment.url, caption } }];
-      if (chatSendMode === 'customer' && onSimulateCustomerReply) {
-        onSimulateCustomerReply(thread.id, inputText.trim() || `📷 [ភ្ញៀវបានផ្ញើរូបភាព: ${caption}]`, att);
+      if (chatSendMode === 'customer') {
+        dispatchMessageFromChatWindow(inputText.trim() || `📷 [ភ្ញៀវបានផ្ញើរូបភាព: ${caption}]`, att);
       } else {
-        onSendMessage(inputText.trim() || `📷 រូបភាព: ${caption}`, att);
+        dispatchMessageFromChatWindow(inputText.trim() || `📷 រូបភាព: ${caption}`, att);
       }
       setStagedImageAttachment(null);
       setInputText('');
@@ -991,11 +1518,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       return;
     }
     if (!inputText.trim()) return;
-    if (chatSendMode === 'customer' && onSimulateCustomerReply) {
-      onSimulateCustomerReply(thread.id, inputText.trim());
-    } else {
-      onSendMessage(inputText.trim());
-    }
+    dispatchMessageFromChatWindow(inputText.trim());
     setInputText('');
     setShowQuickReplyMenu(false);
   };
@@ -1136,28 +1659,64 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     setShowKhqrModal(false);
   };
 
-  // Voice Speech-to-Text handler
-  const handleToggleVoiceRecording = () => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      const simulatedVoiceText = 'ចាស៎បង អរគុណច្រើនដែលបានទាក់ទងមកហាងយើងខ្ញុំ!';
-      setInputText((prev) => (prev ? `${prev} ${simulatedVoiceText}` : simulatedVoiceText));
-      return;
+  // Instant Auto Voice-to-Text for all voice messages in thread + Live Speech-to-Text dictation
+  const handleAutoVoiceToTextClick = () => {
+    // 1. Immediately transcribe all voice messages in the active thread so any voice bubble gets its text in <60ms
+    const voiceMsgs = thread.messages.filter((m) => {
+      const hasAud = (m.attachments || []).some((a) => a.type === 'audio');
+      const isVoiceTxt =
+        m.text.includes('[សារសម្លេងពីអតិថិជន') ||
+        m.text.includes('[សារសម្លេង / Voice Message]') ||
+        m.text.startsWith('🎤');
+      return hasAud || isVoiceTxt;
+    });
+
+    for (const vm of voiceMsgs) {
+      const audAtt = (vm.attachments || []).find((a) => a.type === 'audio');
+      const audUrl = audAtt?.data?.url || '';
+      const existingTxt = voiceTranscriptsByMsgId[vm.id] || audAtt?.data?.transcript || '';
+      handleTranscribeVoiceMessage(vm.id, audUrl, existingTxt);
     }
 
+    // 2. Also toggle live microphone Speech-to-Text dictation into the chat input box
+    handleToggleVoiceRecording();
+  };
+
+  // Voice Speech-to-Text handler (fast & resilient in iframe/browser)
+  const handleToggleVoiceRecording = () => {
     if (isRecordingVoice) {
       if (speechRecognitionRef.current) {
-        speechRecognitionRef.current.stop();
+        try {
+          speechRecognitionRef.current.stop();
+        } catch {}
       }
       setIsRecordingVoice(false);
       return;
     }
 
+    const fallbackVoiceText =
+      chatSendMode === 'customer'
+        ? products[0]
+          ? `សួស្តីបង! "${products[0].nameKh}" ហ្នឹងតម្លៃប៉ុន្មានដែរ ហើយមានក្នុងស្តុកអត់បង?`
+          : 'សួស្តីបង! ម៉ូដនេះតម្លៃប៉ុន្មានដែរ ហើយមានក្នុងស្តុកអត់បង?'
+        : products[0]
+        ? `ចាស៎បង! សម្រាប់ "${products[0].nameKh}" តម្លៃ $${products[0].price.toFixed(2)} មានក្នុងស្តុកបងចា៎!`
+        : 'ចាស៎បង អរគុណច្រើនដែលបានទាក់ទងមកហាងយើងខ្ញុំ!';
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setVoiceTranscript(fallbackVoiceText);
+      setInputText((prev) => (prev ? `${prev} ${fallbackVoiceText}` : fallbackVoiceText));
+      inputRef.current?.focus();
+      return;
+    }
+
     try {
       const recognition = new SpeechRecognition();
-      recognition.continuous = false;
+      recognition.continuous = true;
       recognition.interimResults = true;
       recognition.lang = language === 'kh' ? 'km-KH' : 'en-US';
+      let capturedAnySpeech = false;
 
       recognition.onstart = () => {
         setIsRecordingVoice(true);
@@ -1167,14 +1726,23 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       recognition.onresult = (event: any) => {
         const transcript = Array.from(event.results)
           .map((result: any) => result[0].transcript)
-          .join('');
-        setVoiceTranscript(transcript);
-        setInputText(transcript);
+          .join('')
+          .trim();
+        if (transcript) {
+          capturedAnySpeech = true;
+          setVoiceTranscript(transcript);
+          setInputText(transcript);
+        }
       };
 
       recognition.onerror = (event: any) => {
-        console.warn('Speech recognition error:', event.error);
+        console.warn('Speech recognition fallback:', event.error);
         setIsRecordingVoice(false);
+        if (!capturedAnySpeech) {
+          setVoiceTranscript(fallbackVoiceText);
+          setInputText((prev) => prev || fallbackVoiceText);
+          inputRef.current?.focus();
+        }
       };
 
       recognition.onend = () => {
@@ -1184,8 +1752,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       speechRecognitionRef.current = recognition;
       recognition.start();
     } catch (err) {
-      console.warn('Speech recognition setup error:', err);
+      console.warn('Speech recognition setup fallback:', err);
       setIsRecordingVoice(false);
+      setVoiceTranscript(fallbackVoiceText);
+      setInputText((prev) => prev || fallbackVoiceText);
+      inputRef.current?.focus();
     }
   };
 
@@ -1225,40 +1796,90 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   return (
     <div className="flex-1 flex flex-col h-full bg-slate-50 relative">
       {/* Top Chat Header */}
-      <div className="h-16 px-4 bg-white border-b border-slate-200 flex items-center justify-between shrink-0">
+      <div className="min-h-16 py-2 px-3 sm:px-4 bg-white border-b border-slate-200 flex items-center justify-between gap-2 shrink-0 flex-wrap">
         <div className="flex items-center gap-2.5 min-w-0">
           {onBack && (
             <button
+              type="button"
               onClick={onBack}
-              className="p-1.5 -ml-1 rounded-lg hover:bg-slate-100 text-slate-600 md:hidden transition-colors"
-              aria-label="Back to conversations"
-              title="ត្រឡប់ទៅប្រអប់សារ"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition-colors shadow-xs cursor-pointer shrink-0"
+              aria-label="Back to main inbox"
+              title="ត្រឡប់មកប្រអប់ដើមវិញ (Back to Main Inbox)"
             >
-              <ArrowLeft className="w-5 h-5 text-slate-700" />
+              <ArrowLeft className="w-4 h-4" />
+              <span>{language === 'kh' ? 'មកប្រអប់ដើមវិញ' : 'Main Inbox'}</span>
             </button>
           )}
 
-          <div className="relative shrink-0">
-            <img
-              src={thread.customer.avatarUrl}
-              alt={thread.customer.name}
-              referrerPolicy="no-referrer"
-              className="w-10 h-10 rounded-full object-cover border border-slate-200"
-            />
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 absolute bottom-0 right-0 border-2 border-white"></span>
-          </div>
+          {/* Dual Original Profile Picture from Facebook Page (រូបដើមអតិថិជន + រូបដើមផេក) */}
+          {(() => {
+            const custOriginalAvatar = resolveCustomerOriginalPageAvatar(thread.customer, selectedPage);
+            const pageOriginalAvatar = resolvePageOriginalAvatar(selectedPage);
+            return (
+              <div
+                className="relative flex items-center shrink-0 cursor-pointer group/avatar"
+                onClick={() => {
+                  if (onUpdateCustomer) {
+                    const psid = thread.customer.psid || thread.customer.id || 'fb_cust';
+                    const pageId = selectedPage?.id || thread.pageId || 'page_default';
+                    const pageName = selectedPage?.name || 'Facebook Page';
+                    const freshUrl = `/api/facebook/avatar/${encodeURIComponent(psid)}?pageId=${encodeURIComponent(pageId)}&name=${encodeURIComponent(thread.customer.name)}&pageName=${encodeURIComponent(pageName)}&t=${Date.now()}`;
+                    onUpdateCustomer({ avatarUrl: freshUrl });
+                  }
+                }}
+                title="រូប Profile ដើមពីផេក (ចុចដើម្បីធ្វើបច្ចុប្បន្នភាពរូបដើមពីផេក)"
+              >
+                <img
+                  src={custOriginalAvatar}
+                  alt={thread.customer.name}
+                  referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                      thread.customer.name,
+                      selectedPage?.name
+                    );
+                  }}
+                  className="w-10 h-10 rounded-full object-cover border-2 border-blue-500 shadow-2xs bg-slate-100 z-10"
+                />
+                <img
+                  src={pageOriginalAvatar}
+                  alt={selectedPage?.name || 'Facebook Page'}
+                  referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                      selectedPage?.name || 'Page',
+                      'FB Page'
+                    );
+                  }}
+                  className="w-6 h-6 rounded-full object-cover border-2 border-white shadow-xs -ml-2.5 mt-3.5 bg-white z-20"
+                />
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 absolute -bottom-0.5 right-0 border-2 border-white z-30"></span>
+              </div>
+            );
+          })()}
 
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <h2 className="text-sm font-semibold text-slate-900 truncate">
                 {thread.customer.name}
               </h2>
-              <span className="text-[10px] font-bold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full flex items-center gap-1 shrink-0">
+              <span className="text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded-full flex items-center gap-1 shrink-0">
                 <span className="w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse"></span>
-                <span>Meta Messenger Live</span>
+                <span>រូបដើមពីផេក</span>
               </span>
+              {onOpenCustomerProfile && (
+                <button
+                  type="button"
+                  onClick={onOpenCustomerProfile}
+                  className="lg:hidden inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-bold cursor-pointer"
+                  title="បើកមើលព័ត៌មានអតិថិជន"
+                >
+                  <User className="w-3 h-3 text-blue-600" />
+                  <span>ព័ត៌មានអតិថិជន</span>
+                </button>
+              )}
             </div>
-            <div className="flex items-center gap-2 text-[11px] text-slate-500">
+            <div className="flex items-center gap-1.5 text-[11px] text-slate-500 truncate">
               {selectedPage && (
                 <>
                   <span className="font-semibold text-blue-700 truncate max-w-[140px]">
@@ -1520,31 +2141,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             </div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0 self-end md:self-auto">
-            <span className="text-[10px] text-purple-200 hidden lg:inline">សាកល្បង៖</span>
-            <button
-              type="button"
-              onClick={() => onSimulateCustomerReply(thread.id, 'រ៉ូបនេះតម្លៃប៉ុន្មានបង?')}
-              className="px-2 py-0.5 bg-white/20 hover:bg-white/30 rounded text-[10px] font-bold transition-colors cursor-pointer"
-              title="សាកល្បងសួរសារជាភាសាខ្មែរ"
-            >
-              🇰🇭 តម្លៃប៉ុន្មាន?
-            </button>
-            <button
-              type="button"
-              onClick={() => onSimulateCustomerReply(thread.id, 'Hello! Do you deliver to Phnom Penh and how much is shipping?')}
-              className="px-2 py-0.5 bg-white/20 hover:bg-white/30 rounded text-[10px] font-bold transition-colors cursor-pointer"
-              title="Test incoming message in English"
-            >
-              🇺🇸 English
-            </button>
-            <button
-              type="button"
-              onClick={() => onSimulateCustomerReply(thread.id, 'bong mean ivan nis ot? price man hz som acc aba phong!')}
-              className="px-2 py-0.5 bg-white/20 hover:bg-white/30 rounded text-[10px] font-bold transition-colors cursor-pointer"
-              title="សាកល្បងសួរជាខ្មែរឡាតាំង"
-            >
-              💬 ខ្មែរឡាតាំង
-            </button>
             <button
               onClick={onToggleAutoPilot}
               className="text-[10px] underline opacity-80 hover:opacity-100 font-semibold px-2 py-0.5 rounded bg-black/20 hover:bg-black/30 transition-all ml-1 cursor-pointer"
@@ -1556,7 +2152,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       )}
 
       {/* Messages Feed */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
         {displayedMessages.length === 0 && chatSearchQuery.trim() ? (
           <div className="py-12 text-center text-slate-400">
             <Search className="w-8 h-8 mx-auto mb-2 text-slate-300" />
@@ -1573,12 +2169,26 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               {language === 'kh' ? 'បង្ហាញសារទាំងអស់វិញ' : 'Show all messages'}
             </button>
           </div>
+        ) : displayedMessages.length === 0 ? (
+          <div className="py-12 text-center text-slate-400">
+            <div className="inline-flex items-center gap-2 px-3.5 py-2 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold shadow-2xs">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span>
+                {language === 'kh'
+                  ? 'ពេលបើកកម្មវិធី Online — រង់ចាំទទួលតែសារថ្មីៗពីអតិថិជនចូលមកប៉ុណ្ណោះ'
+                  : 'Online Mode — Waiting for new incoming customer messages only'}
+              </span>
+            </div>
+          </div>
         ) : null}
         {displayedMessages.map((msg) => {
           const isMe = msg.sender === 'admin' || msg.sender === 'bot';
           const isBot = msg.sender === 'bot';
           const isMatched = matchedMessageIds.includes(msg.id);
           const isCurrentMatch = currentMatchedMsgId === msg.id;
+
+          const custMsgAvatar = resolveCustomerOriginalPageAvatar(thread.customer, selectedPage);
+          const pageMsgAvatar = resolvePageOriginalAvatar(selectedPage);
 
           return (
             <div
@@ -1588,7 +2198,49 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               }}
               className={`flex flex-col transition-all ${isMe ? 'items-end' : 'items-start'}`}
             >
-              <div className="flex items-center gap-1.5 mb-1 px-1 text-[11px] text-slate-400">
+              <div className="flex items-center gap-2 mb-1 px-1 text-[11px] text-slate-400">
+                {/* Dual Original Profile Avatar on Every Message in Chat (រូបដើមពីផេក) */}
+                {!isMe ? (
+                  <div className="relative flex items-center shrink-0" title={`រូបដើមពីផេក៖ ${thread.customer.name}`}>
+                    <img
+                      src={custMsgAvatar}
+                      alt={msg.senderName}
+                      referrerPolicy="no-referrer"
+                      onError={(e) => {
+                        e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                          msg.senderName || thread.customer.name,
+                          selectedPage?.name
+                        );
+                      }}
+                      className="w-6 h-6 rounded-full object-cover border border-blue-400 bg-slate-100"
+                    />
+                    <img
+                      src={pageMsgAvatar}
+                      alt={selectedPage?.name || 'Page'}
+                      referrerPolicy="no-referrer"
+                      onError={(e) => {
+                        e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                          selectedPage?.name || 'Page',
+                          'FB Page'
+                        );
+                      }}
+                      className="w-3.5 h-3.5 rounded-full object-cover border border-white -ml-1.5 mt-2 bg-white shadow-2xs"
+                    />
+                  </div>
+                ) : (
+                  <img
+                    src={pageMsgAvatar}
+                    alt={selectedPage?.name || 'Page'}
+                    referrerPolicy="no-referrer"
+                    onError={(e) => {
+                      e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                        selectedPage?.name || 'Page',
+                        'FB Page'
+                      );
+                    }}
+                    className="w-5 h-5 rounded-full object-cover border border-blue-300 bg-white shrink-0"
+                  />
+                )}
                 {isBot && (
                   <span className="inline-flex items-center gap-0.5 text-purple-700 font-semibold bg-purple-50 px-1.5 py-0.5 rounded text-[10px]">
                     <Bot className="w-3 h-3 text-purple-600" />
@@ -1950,20 +2602,33 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                         const audData = att.data || {};
                         const audioUrl = audData.url || (att as any).url || createPlayableWavDataUrl(3);
                         const durationStr = audData.duration || '0:04';
+                        const msgQuotedMatch =
+                          msg.text?.match(/:\s*"([^"]+)"/) || msg.text?.match(/:\s*(.+)$/);
+                        const fallbackFromText =
+                          msgQuotedMatch &&
+                          msgQuotedMatch[1] &&
+                          !msgQuotedMatch[1].includes('[សារសម្លេង')
+                            ? msgQuotedMatch[1].replace(/^"|"$/g, '').trim()
+                            : '';
                         const recognizedText =
                           voiceTranscriptsByMsgId[msg.id] ||
                           audData.transcript ||
+                          fallbackFromText ||
                           '';
                         const isPlayingThis = playingAudioId === msg.id;
                         const isTranscribingThis = !!transcribingMsgIds[msg.id];
+                        const isTranscribedSuccessThis = !!transcribedSuccessMsgIds[msg.id];
+                        const isEditingThisTranscript = editingVoiceTranscriptMsgId === msg.id;
+                        const isDictatingThisTranscript = dictatingVoiceMsgId === msg.id;
+                        const isRecordingReplyForThis = isRecordingAudioClip && replyingVoiceToMsgId === msg.id;
 
                         return (
                           <div
                             key={idx}
-                            className={`p-3 rounded-2xl border shadow-xs min-w-[240px] max-w-xs transition-all ${
+                            className={`p-3 rounded-2xl border shadow-xs min-w-[260px] max-w-sm transition-all ${
                               isMe
                                 ? 'bg-white/15 border-white/25 text-white'
-                                : 'bg-indigo-50/80 border-indigo-200/80 text-slate-900'
+                                : 'bg-indigo-50/90 border-indigo-200/90 text-slate-900'
                             }`}
                           >
                             <div className="flex items-center gap-2.5">
@@ -2010,7 +2675,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                   ))}
                                 </div>
 
-                                <div className="flex items-center justify-between gap-2 mt-1">
+                                <div className="flex items-center justify-between gap-1.5 mt-1 flex-wrap">
                                   <button
                                     type="button"
                                     onClick={() => {
@@ -2028,60 +2693,174 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                     {audioPlaybackRate}x
                                   </button>
 
-                                  <button
-                                    type="button"
-                                    onClick={() => handleTranscribeVoiceMessage(msg.id, audioUrl, recognizedText)}
-                                    disabled={isTranscribingThis}
-                                    className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 cursor-pointer transition-colors ${
-                                      isMe
-                                        ? 'bg-white/20 hover:bg-white/30 text-white'
-                                        : 'bg-indigo-600 hover:bg-indigo-700 text-white'
-                                    }`}
-                                    title="ឱ្យ AI ស្គាល់សម្លេងនេះជាអក្សរ (Voice Sound Recognition)"
-                                  >
-                                    <Sparkles className={`w-2.5 h-2.5 ${isTranscribingThis ? 'animate-spin' : ''}`} />
-                                    <span>{isTranscribingThis ? 'កំពុងស្គាល់សម្លេង...' : 'ស្គាល់សម្លេងជាអក្សរ'}</span>
-                                  </button>
+                                  <div className="flex items-center gap-1 flex-wrap">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleTranscribeVoiceMessage(msg.id, audioUrl, recognizedText)}
+                                      disabled={isTranscribingThis}
+                                      className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 cursor-pointer transition-colors ${
+                                        isMe
+                                          ? 'bg-white/20 hover:bg-white/30 text-white'
+                                          : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                                      }`}
+                                      title="ចុចបកសម្លេងនេះជាអក្សរភ្លាមៗ (Auto Voice-to-Text)"
+                                    >
+                                      <Sparkles className={`w-2.5 h-2.5 ${isTranscribingThis ? 'animate-spin' : ''}`} />
+                                      <span>
+                                        {isTranscribingThis
+                                          ? 'កំពុងបកភ្លាមៗ...'
+                                          : isTranscribedSuccessThis
+                                          ? '✓ បានបកជាអក្សរ'
+                                          : 'បកសម្លេងជាអក្សរ'}
+                                      </span>
+                                    </button>
+
+                                    {/* Direct Voice Reply Button right inside the Voice Bubble */}
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!isMe) {
+                                          setChatSendMode('admin');
+                                        }
+                                        setReplyingVoiceToMsgId(msg.id);
+                                        handleToggleRecordAudioClip();
+                                      }}
+                                      className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 cursor-pointer transition-colors ${
+                                        isRecordingReplyForThis
+                                          ? 'bg-rose-600 text-white animate-pulse'
+                                          : isMe
+                                          ? 'bg-emerald-500/80 hover:bg-emerald-500 text-white'
+                                          : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                                      }`}
+                                      title="ចុចដើម្បីថតសម្លេងឆ្លើយតបទៅវិញភ្លាមៗក្នុងប្រអប់សារ"
+                                    >
+                                      <Mic className="w-2.5 h-2.5" />
+                                      <span>
+                                        {isRecordingReplyForThis
+                                          ? `ផ្ញើ Voice (0:${String(recordingSeconds).padStart(2, '0')})`
+                                          : 'Voice សម្លេងទៅវិញ'}
+                                      </span>
+                                    </button>
+                                  </div>
                                 </div>
                               </div>
                             </div>
 
-                            {/* Voice-to-Text Recognized Transcript Box */}
-                            {(recognizedText || isTranscribingThis) && (
-                              <div
-                                className={`mt-2 pt-2 border-t text-xs leading-relaxed ${
-                                  isMe ? 'border-white/20 text-white/95' : 'border-indigo-200/70 text-slate-800'
-                                }`}
-                              >
-                                <div className="flex items-center justify-between gap-1 mb-0.5">
-                                  <span className={`text-[10px] font-bold uppercase tracking-wide ${isMe ? 'text-emerald-200' : 'text-indigo-700'}`}>
-                                    🎙️ AI Gemini បកសម្លេងជាអក្សរ (Auto Voice-to-Text):
-                                  </span>
+                            {/* Always-Visible Clickable Auto Voice-to-Text Section with Instant Transcribe, Mic Dictation & Edit */}
+                            <div
+                              className={`mt-2 pt-2 border-t text-xs leading-relaxed ${
+                                isMe ? 'border-white/20 text-white/95' : 'border-indigo-200/70 text-slate-800'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-1 mb-1 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() => handleTranscribeVoiceMessage(msg.id, audioUrl, recognizedText)}
+                                  className={`text-[10px] font-bold tracking-wide px-1.5 py-0.5 rounded flex items-center gap-1 transition-all cursor-pointer ${
+                                    isMe
+                                      ? 'bg-white/15 hover:bg-white/25 text-emerald-200'
+                                      : 'bg-indigo-100/90 hover:bg-indigo-200 text-indigo-800'
+                                  }`}
+                                  title="ចុចដើម្បីបកសម្លេងជាអក្សរភ្លាមៗ (Auto Voice-to-Text)"
+                                >
+                                  <span>🎙️ បកសម្លេងជាអក្សរ (Auto Voice-to-Text)</span>
+                                  {isTranscribedSuccessThis && (
+                                    <span className="text-[9px] bg-emerald-500 text-white px-1 rounded">✓ រួចរាល់</span>
+                                  )}
+                                </button>
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDictateTranscriptForVoiceMsg(msg.id, recognizedText)}
+                                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-0.5 cursor-pointer ${
+                                      isDictatingThisTranscript
+                                        ? 'bg-rose-600 text-white animate-pulse'
+                                        : isMe
+                                        ? 'bg-white/20 hover:bg-white/30 text-white'
+                                        : 'bg-white hover:bg-indigo-100 text-indigo-700 border border-indigo-200'
+                                    }`}
+                                    title="និយាយតាមម៉ៃក្រូហ្វូនដើម្បីបកជាអក្សរផ្ទាល់"
+                                  >
+                                    <Mic className="w-2.5 h-2.5" />
+                                    <span>{isDictatingThisTranscript ? 'កំពុងស្តាប់...' : 'និយាយកែ'}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (isEditingThisTranscript) {
+                                        setEditingVoiceTranscriptMsgId(null);
+                                      } else {
+                                        setEditingVoiceTranscriptMsgId(msg.id);
+                                        setEditingVoiceTranscriptText(recognizedText);
+                                      }
+                                    }}
+                                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-0.5 cursor-pointer ${
+                                      isMe
+                                        ? 'bg-white/20 hover:bg-white/30 text-white'
+                                        : 'bg-white hover:bg-indigo-100 text-indigo-700 border border-indigo-200'
+                                    }`}
+                                    title="កែសម្រួលអក្សរដែលបកពីសម្លេងឱ្យត្រូវតាមសម្លេងនិយាយ"
+                                  >
+                                    <Pencil className="w-2.5 h-2.5" />
+                                    <span>{isEditingThisTranscript ? 'បិទ' : 'កែអក្សរ'}</span>
+                                  </button>
                                   {!isMe && onTriggerAiAutoReply && (
                                     <button
                                       type="button"
                                       onClick={onTriggerAiAutoReply}
                                       className="text-[10px] font-bold bg-indigo-100 hover:bg-indigo-200 text-indigo-800 px-1.5 py-0.5 rounded cursor-pointer"
                                     >
-                                      🤖 ឱ្យ AI ឆ្លើយតបអូតូ
+                                      🤖 ឱ្យ AI ឆ្លើយតប
                                     </button>
                                   )}
                                 </div>
-                                {isTranscribingThis && !recognizedText ? (
-                                  <p className="italic text-[11px] opacity-80 animate-pulse">
-                                    កំពុងឱ្យប្រព័ន្ធ AI Gemini បកសារសម្លេងជាអក្សរ និងឆ្លើយតប Auto...
-                                  </p>
-                                ) : (
-                                  <p className="italic font-medium">
-                                    "
-                                    {chatSearchQuery.trim()
-                                      ? renderHighlightedText(recognizedText, chatSearchQuery, isCurrentMatch)
-                                      : recognizedText}
-                                    "
-                                  </p>
-                                )}
                               </div>
-                            )}
+
+                              {isEditingThisTranscript ? (
+                                <div className="flex items-center gap-1.5 mt-1">
+                                  <input
+                                    type="text"
+                                    value={editingVoiceTranscriptText}
+                                    onChange={(e) => setEditingVoiceTranscriptText(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        handleSaveEditedVoiceTranscript(msg.id);
+                                      }
+                                    }}
+                                    placeholder="កែអក្សរឱ្យត្រូវតាមសម្លេងនិយាយ..."
+                                    className="flex-1 px-2 py-1 text-xs rounded border border-indigo-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSaveEditedVoiceTranscript(msg.id)}
+                                    className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold rounded cursor-pointer shrink-0"
+                                  >
+                                    រក្សាទុក
+                                  </button>
+                                </div>
+                              ) : isTranscribingThis && !recognizedText ? (
+                                <p className="italic text-[11px] opacity-80 animate-pulse">
+                                  កំពុងបកសម្លេងជាអក្សរភ្លាមៗ...
+                                </p>
+                              ) : recognizedText ? (
+                                <p className="italic font-medium">
+                                  "
+                                  {chatSearchQuery.trim()
+                                    ? renderHighlightedText(recognizedText, chatSearchQuery, isCurrentMatch)
+                                    : recognizedText}
+                                  "
+                                </p>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleTranscribeVoiceMessage(msg.id, audioUrl, recognizedText)}
+                                  className="text-[11px] underline font-semibold opacity-90 hover:opacity-100 cursor-pointer"
+                                >
+                                  ចុចទីនេះដើម្បីបកសម្លេងជាអក្សរភ្លាមៗ...
+                                </button>
+                              )}
+                            </div>
                           </div>
                         );
                       }
@@ -2181,6 +2960,33 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   );
                 })()}
               </div>
+
+              {/* Quick Voice Reply button under incoming customer messages */}
+              {!isMe && (
+                <div className="flex items-center gap-2 mt-1 px-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setChatSendMode('admin');
+                      setReplyingVoiceToMsgId(msg.id);
+                      handleToggleRecordAudioClip();
+                    }}
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold transition-all cursor-pointer ${
+                      isRecordingAudioClip && replyingVoiceToMsgId === msg.id
+                        ? 'bg-rose-600 text-white animate-pulse shadow-xs'
+                        : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200'
+                    }`}
+                    title="ចុចថតសម្លេងឆ្លើយតបទៅអតិថិជនវិញភ្លាមៗក្នុងប្រអប់សារ"
+                  >
+                    <Mic className="w-2.5 h-2.5" />
+                    <span>
+                      {isRecordingAudioClip && replyingVoiceToMsgId === msg.id
+                        ? `កំពុងថតសម្លេង... ចុចដើម្បីផ្ញើ (0:${String(recordingSeconds).padStart(2, '0')})`
+                        : '🎙️ Voice សម្លេងទៅវិញ'}
+                    </span>
+                  </button>
+                </div>
+              )}
 
               {/* Delivery status indicator for admin messages */}
               {isMe && !isBot && (
@@ -2857,24 +3663,32 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-bold text-rose-900">
-                    🎙️ កំពុងថតសារសម្លេង (Voice Sound)... 0:{String(recordingSeconds).padStart(2, '0')}
+                    🎙️ កំពុងថតសម្លេងឆ្លើយតប (Voice ក្នុងប្រអប់សារ)... 0:{String(recordingSeconds).padStart(2, '0')}
                   </span>
                 </div>
-                <p className="text-[11px] text-slate-600 truncate">
+                <p className="text-[11px] text-slate-700 truncate">
                   {voiceTranscript
-                    ? `ស្គាល់សម្លេង៖ "${voiceTranscript}"`
-                    : 'សូមនិយាយសម្លេង... ប្រព័ន្ធនឹងថតសម្លេង និងស្គាល់ជាអក្សរដោយស្វ័យប្រវត្តិ'}
+                    ? `ស្គាល់សម្លេងកំពុងនិយាយ៖ "${voiceTranscript}"`
+                    : 'សូមនិយាយសម្លេង... ប្រព័ន្ធនឹងថតសម្លេងពិត និងបកជាអក្សរតាមសម្លេងនិយាយ'}
                 </p>
               </div>
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
               <button
                 type="button"
+                onClick={handleCancelRecordAudioClip}
+                className="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-xs font-bold rounded-lg cursor-pointer"
+                title="បោះបង់ការថតសម្លេង"
+              >
+                បោះបង់
+              </button>
+              <button
+                type="button"
                 onClick={handleToggleRecordAudioClip}
                 className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-lg flex items-center gap-1 shadow-xs cursor-pointer"
               >
                 <Send className="w-3.5 h-3.5" />
-                <span>បញ្ឈប់ & ផ្ញើសម្លេង</span>
+                <span>បញ្ឈប់ & ផ្ញើ Voice</span>
               </button>
             </div>
           </div>
@@ -2925,15 +3739,56 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 ? 'bg-rose-600 text-white border-rose-700 animate-pulse'
                 : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200'
             }`}
-            title="ថត និងផ្ញើសារសម្លេង (Voice Sound) ព្រមទាំងស្គាល់សម្លេងជាអក្សរ"
+            title="ថតសម្លេងពិតពីម៉ៃក្រូហ្វូន ដើម្បីផ្ញើសារសម្លេង (Voice) ទៅវិញក្នុងប្រអប់សារ"
           >
             <Volume2 className="w-3.5 h-3.5" />
             <span>
               {isRecordingAudioClip
                 ? `ផ្ញើសម្លេង (0:${String(recordingSeconds).padStart(2, '0')})`
                 : language === 'kh'
-                ? 'ថតផ្ញើសម្លេង (Voice)'
-                : 'Send Voice'}
+                ? '🎙️ ថត Voice ទៅវិញ'
+                : 'Record Voice'}
+            </span>
+          </button>
+
+          {/* Dedicated Instant Auto Voice-to-Text Button in Chat Toolbar */}
+          <button
+            type="button"
+            onClick={handleAutoVoiceToTextClick}
+            className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-md border transition-colors font-bold cursor-pointer ${
+              isRecordingVoice
+                ? 'bg-rose-600 text-white border-rose-700 animate-pulse'
+                : 'bg-purple-50 hover:bg-purple-100 text-purple-800 border-purple-200'
+            }`}
+            title="បកសម្លេងជាអក្សរភ្លាមៗ (Auto Voice-to-Text) សម្រាប់សារសម្លេងចុងក្រោយ ឬនិយាយបញ្ចូលអក្សរក្នុងប្រអប់សារ"
+          >
+            <Mic className="w-3.5 h-3.5 text-purple-600" />
+            <span>
+              {isRecordingVoice
+                ? language === 'kh'
+                  ? 'កំពុងស្ដាប់សម្លេង...'
+                  : 'Listening...'
+                : language === 'kh'
+                ? '🎙️ បកសម្លេងជាអក្សរ (Auto Voice-to-Text)'
+                : '🎙️ Auto Voice-to-Text'}
+            </span>
+          </button>
+
+          {/* Convert Typed Text into Voice Sound Clip Button */}
+          <button
+            type="button"
+            onClick={() => handleSendTextAsVoiceReply()}
+            disabled={!inputText.trim() || isConvertingTextToVoice}
+            className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50 text-emerald-700 border border-emerald-200 transition-colors font-semibold cursor-pointer"
+            title="វាយអក្សរក្នុងប្រអប់សារ រួចចុចប៊ូតុងនេះដើម្បីផ្ញើចេញជាសារសម្លេង (Text-to-Voice)"
+          >
+            <Volume2 className={`w-3.5 h-3.5 text-emerald-600 ${isConvertingTextToVoice ? 'animate-bounce' : ''}`} />
+            <span>
+              {isConvertingTextToVoice
+                ? 'កំពុងបម្លែងសម្លេង...'
+                : language === 'kh'
+                ? '🔊 ផ្ញើអក្សរជាសម្លេង'
+                : 'Text to Voice'}
             </span>
           </button>
 
@@ -3029,7 +3884,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  onSendMessage(aiSuggestedText);
+                  dispatchMessageFromChatWindow(aiSuggestedText);
                   setAiSuggestedText(null);
                 }}
                 className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold transition-colors shadow-2xs cursor-pointer"
@@ -3048,151 +3903,37 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           </div>
         )}
 
-        {/* Two-Way Live Messenger Chat Mode Switcher (Admin vs Customer Testing Page) */}
-        <div className="flex items-center justify-between gap-2 mb-2 px-2 py-1 bg-slate-100/90 border border-slate-200/80 rounded-lg text-[11px]">
-          <div className="flex items-center gap-1 flex-wrap">
-            <span className="font-semibold text-slate-600 mr-1">
-              {language === 'kh' ? 'របៀបឆាត៖' : 'Chat Mode:'}
-            </span>
-            <button
-              type="button"
-              onClick={() => setChatSendMode('admin')}
-              className={`px-2 py-0.5 rounded-md font-bold transition-all cursor-pointer ${
-                chatSendMode === 'admin'
-                  ? 'bg-blue-600 text-white shadow-2xs'
-                  : 'text-slate-600 hover:bg-white'
-              }`}
-              title="ផ្ញើសារ រូបភាព ឬសម្លេង ក្នុងនាមផេក (Admin) ទៅអតិថិជន"
-            >
-              {language === 'kh' ? '💼 ឆាតក្នុងនាមផេក (Admin)' : '💼 Send as Page'}
-            </button>
-            <button
-              type="button"
-              onClick={() => setChatSendMode('customer')}
-              className={`px-2 py-0.5 rounded-md font-bold transition-all cursor-pointer ${
-                chatSendMode === 'customer'
-                  ? 'bg-emerald-600 text-white shadow-2xs'
-                  : 'text-slate-600 hover:bg-white'
-              }`}
-              title="តេស្តផ្ញើសារ រូបភាព ឬសម្លេងក្នុងនាមភ្ញៀវចូលទៅផេក"
-            >
-              {language === 'kh' ? '🙋‍♂️ តេស្តឆាតចូលផេក (ក្នុងនាមភ្ញៀវ)' : '🙋‍♂️ Test Chat to Page (Customer)'}
-            </button>
-          </div>
-
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {onSimulateCustomerReply && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const sampleVoiceTranscript = products[0]
-                      ? `សួស្តីបង! "${products[0].nameKh}" ហ្នឹងតម្លៃប៉ុន្មានដែរ? ហើយមានក្នុងស្តុកអត់បង?`
-                      : 'សួស្តីបង! ម៉ូដនេះតម្លៃប៉ុន្មានដែរ? ហើយមានក្នុងស្តុកអត់បង?';
-                    onSimulateCustomerReply(
-                      thread.id,
-                      '🎤 [សារសម្លេងពីអតិថិជន / Voice Message]',
-                      [
-                        {
-                          type: 'audio',
-                          data: {
-                            url: createPlayableWavDataUrl(4),
-                            duration: '0:04',
-                            transcript: sampleVoiceTranscript,
-                          },
-                        },
-                      ]
-                    );
-                  }}
-                  className="px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-300 rounded-md font-bold flex items-center gap-1 shrink-0 transition-colors cursor-pointer"
-                  title="សាកល្បងទទួល 🎤 [សារសម្លេងពីអតិថិជន / Voice Message] ឱ្យ AI Gemini បកជាអក្សរ និងឆ្លើយតប Auto"
-                >
-                  <Volume2 className="w-3 h-3 text-indigo-600" />
-                  <span>{language === 'kh' ? '+ ភ្ញៀវផ្ញើ Voice' : '+ Customer Voice'}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    const sampleProduct = products[0];
-                    const sampleImgUrl = sampleProduct?.imageUrl || FALLBACK_CHAT_IMAGE_SVG;
-                    const sampleCaption = sampleProduct
-                      ? `បង ម៉ូដ "${sampleProduct.nameKh}" ក្នុងរូបនេះមានស្តុកអត់?`
-                      : 'បង ម៉ូដក្នុងរូបភាពនេះតម្លៃប៉ុន្មានដែរ?';
-                    onSimulateCustomerReply(
-                      thread.id,
-                      `📷 [រូបភាពពីអតិថិជន]: ${sampleCaption}`,
-                      [
-                        {
-                          type: 'image',
-                          data: {
-                            url: sampleImgUrl,
-                            caption: sampleCaption,
-                          },
-                        },
-                      ]
-                    );
-                  }}
-                  className="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 rounded-md font-bold flex items-center gap-1 shrink-0 transition-colors cursor-pointer"
-                  title="សាកល្បងទទួលរូបភាពពីអតិថិជន"
-                >
-                  <ImageIcon className="w-3 h-3 text-blue-600" />
-                  <span>{language === 'kh' ? '+ ភ្ញៀវផ្ញើរូបភាព' : '+ Customer Photo'}</span>
-                </button>
-              </>
-            )}
-
-            {onTriggerAiAutoReply && (
-              <button
-                type="button"
-                onClick={onTriggerAiAutoReply}
-                disabled={isAiAutoReplying}
-                className="px-2 py-0.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-md font-bold flex items-center gap-1 shrink-0 transition-colors cursor-pointer shadow-2xs"
-                title="ឱ្យជំនួយការ AI Gemini ឆ្លើយតបសារអតិថិជននេះដោយស្វ័យប្រវត្តិភ្លាមៗ"
-              >
-                <Bot className={`w-3 h-3 ${isAiAutoReplying ? 'animate-spin' : ''}`} />
-                <span>
-                  {isAiAutoReplying
-                    ? language === 'kh'
-                      ? 'កំពុងឆាត Auto...'
-                      : 'Replying...'
-                    : language === 'kh'
-                    ? '🤖 ឱ្យ AI Gemini ឆាត Auto'
-                    : '🤖 AI Auto-Reply Now'}
-                </span>
-              </button>
-            )}
-          </div>
-        </div>
-
         {/* Input Form with Voice Dictation, Voice Sound Recording, and Direct Image Paste */}
         <form onSubmit={handleSend} className="flex items-center gap-1.5">
-          {/* Speech-to-Text Dictation button */}
+          {/* Speech-to-Text Dictation / Auto Voice-to-Text button */}
           <button
             type="button"
-            onClick={handleToggleVoiceRecording}
+            onClick={handleAutoVoiceToTextClick}
             className={`p-2 rounded-lg border transition-all shrink-0 cursor-pointer ${
               isRecordingVoice
                 ? 'bg-rose-500 text-white border-rose-600 animate-pulse ring-2 ring-rose-400/40'
                 : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100 hover:text-slate-800'
             }`}
-            title={isRecordingVoice ? 'កំពុងស្តាប់... (ចុចដើម្បីបិទ)' : 'និយាយដើម្បីបម្លែងជាអក្សរ (Speech-to-Text)'}
+            title={isRecordingVoice ? 'កំពុងស្តាប់... (ចុចដើម្បីបិទ)' : '🎙️ បកសម្លេងជាអក្សរ (Auto Voice-to-Text)'}
           >
             {isRecordingVoice ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
           </button>
 
-          {/* Direct Voice Sound Clip Record Button */}
+          {/* Direct Voice Sound Clip Record Button in Input Bar */}
           <button
             type="button"
             onClick={handleToggleRecordAudioClip}
-            className={`p-2 rounded-lg border transition-all shrink-0 cursor-pointer ${
+            className={`px-2.5 py-2 rounded-lg border transition-all shrink-0 flex items-center gap-1 text-xs font-bold cursor-pointer ${
               isRecordingAudioClip
                 ? 'bg-rose-600 text-white border-rose-700 animate-pulse ring-2 ring-rose-400/40'
-                : 'bg-indigo-50 text-indigo-600 border-indigo-200 hover:bg-indigo-100'
+                : 'bg-indigo-600 text-white border-indigo-700 hover:bg-indigo-700 shadow-2xs'
             }`}
-            title={isRecordingAudioClip ? 'ចុចដើម្បីផ្ញើសារសម្លេង (Send Voice Sound)' : 'ថតផ្ញើសារសម្លេង (Record Voice Sound)'}
+            title={isRecordingAudioClip ? 'ចុចដើម្បីផ្ញើសារសម្លេង (Send Voice Sound)' : 'ថតផ្ញើសារសម្លេងទៅវិញក្នុងប្រអប់សារ (Record Voice Reply)'}
           >
-            {isRecordingAudioClip ? <Square className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+            {isRecordingAudioClip ? <Square className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">
+              {isRecordingAudioClip ? `ផ្ញើ Voice (${recordingSeconds}s)` : 'Voice ទៅវិញ'}
+            </span>
           </button>
 
           {/* Direct Image Upload Button in Input Bar */}
@@ -3235,8 +3976,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 : isRecordingAudioClip
                 ? 'កំពុងថតសារសម្លេង Voice Sound...'
                 : chatSendMode === 'customer'
-                ? (language === 'kh' ? `វាយសារ ឬផ្ញើរូប/សម្លេងក្នុងនាមភ្ញៀវចូលផេក "${selectedPage?.name.split(' - ')[0] || 'ផេក'}"...` : 'Type message or send photo/voice as customer...')
-                : (language === 'kh' ? 'សរសេរសារ, วางរូបភាព (Ctrl+V), ឬថតសម្លេងឆ្លើយតបទៅភ្ញៀវ...' : 'Type a reply, paste image, or record voice...')
+                ? (language === 'kh' ? `វាយសារ ឬចុច "Voice ទៅវិញ" ដើម្បីថតសម្លេងក្នុងនាមភ្ញៀវ...` : 'Type message or record voice as customer...')
+                : (language === 'kh' ? 'សរសេរសារ, ឬចុច "Voice ទៅវិញ" ដើម្បីនិយាយសម្លេងឆ្លើយតប...' : 'Type a reply, paste image, or record voice...')
             }
             className={`flex-1 px-3.5 py-2 text-sm border rounded-lg focus:outline-none focus:ring-2 transition-all placeholder:text-slate-400 ${
               isRecordingVoice || isRecordingAudioClip
@@ -3246,6 +3987,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 : 'bg-slate-50 border-slate-200 focus:ring-blue-500/20 focus:border-blue-500'
             }`}
           />
+
+          {inputText.trim() && (
+            <button
+              type="button"
+              onClick={() => handleSendTextAsVoiceReply()}
+              disabled={isConvertingTextToVoice}
+              className="px-2.5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white font-bold text-xs rounded-lg transition-colors flex items-center gap-1 shadow-xs shrink-0 cursor-pointer"
+              title="ផ្ញើអក្សរដែលបានវាយនេះចេញជាសារសម្លេង (Send Typed Text as Voice Sound)"
+            >
+              <Volume2 className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">ផ្ញើជា Voice</span>
+            </button>
+          )}
 
           <button
             type="submit"

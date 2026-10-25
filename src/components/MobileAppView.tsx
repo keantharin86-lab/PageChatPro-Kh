@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import {
   Smartphone,
   QrCode,
@@ -22,6 +22,11 @@ import {
   ExternalLink,
   Maximize2,
   Minimize2,
+  Mic,
+  Square,
+  Volume2,
+  Play,
+  Pause,
 } from 'lucide-react';
 import {
   Order,
@@ -32,6 +37,49 @@ import {
 } from '../types';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { resolveOrderDate } from './AnalyticsView';
+import {
+  resolveCustomerOriginalPageAvatar,
+  resolvePageOriginalAvatar,
+  buildClientFallbackAvatarDataUrl,
+} from '../utils/avatarUtils';
+
+function createMobilePlayableWavDataUrl(durationSec = 3): string {
+  try {
+    const sampleRate = 8000;
+    const numSamples = Math.max(1, Math.floor(sampleRate * durationSec));
+    const buffer = new ArrayBuffer(44 + numSamples * 2);
+    const view = new DataView(buffer);
+    const writeStr = (offset: number, str: string) => {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    };
+    writeStr(0, 'RIFF');
+    view.setUint32(4, 36 + numSamples * 2, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, 'data');
+    view.setUint32(40, numSamples * 2, true);
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / sampleRate;
+      const env = Math.sin(Math.min(1, t * 6) * (Math.PI / 2)) * Math.max(0, 1 - t / durationSec);
+      const freq = 230 + 40 * Math.sin(2 * Math.PI * 2 * t);
+      const s = Math.sin(2 * Math.PI * freq * t) * env * 0.6;
+      view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, s)) * 12000, true);
+    }
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+    return `data:audio/wav;base64,${btoa(binary)}`;
+  } catch {
+    return '';
+  }
+}
 
 interface MobileAppViewProps {
   pages: PageAccount[];
@@ -41,6 +89,7 @@ interface MobileAppViewProps {
   products: ProductItem[];
   isOnline: boolean;
   onSendMessage: (text: string, attachments?: any[]) => void;
+  onSimulateCustomerReply?: (threadId: string, replyText?: string, attachments?: any[]) => void;
   onSelectThread: (threadId: string) => void;
   selectedThreadId: string;
   onOpenCreateOrder: () => void;
@@ -163,9 +212,186 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
     }
   };
 
+  const [isRecordingMobileVoice, setIsRecordingMobileVoice] = useState(false);
+  const [mobileRecSeconds, setMobileRecSeconds] = useState(0);
+  const [playingMobileAudioId, setPlayingMobileAudioId] = useState<string | null>(null);
+  const mobileMediaRecRef = useRef<MediaRecorder | null>(null);
+  const mobileChunksRef = useRef<Blob[]>([]);
+  const mobileTimerRef = useRef<number | null>(null);
+  const mobileSpeechRecRef = useRef<any>(null);
+  const mobileLiveTranscriptRef = useRef<string>('');
+  const mobileAudioElRef = useRef<HTMLAudioElement | null>(null);
+
+  const handleSendMobileTextAsVoice = () => {
+    const voiceText =
+      quickMsgText.trim() ||
+      'ចាស៎បង! ម៉ូដនេះមានក្នុងស្តុក អាចកម្ម៉ង់បានបងចា៎!';
+    const durSec = Math.max(2, Math.min(25, Math.ceil(voiceText.length / 12)));
+    const durationFormatted = `0:${String(durSec).padStart(2, '0')}`;
+    const wavUrl = createMobilePlayableWavDataUrl(durSec);
+    onSendMessage(`🎤 សារសម្លេង (${durationFormatted}): ${voiceText}`, [
+      {
+        type: 'audio',
+        data: {
+          url: wavUrl,
+          duration: durationFormatted,
+          transcript: voiceText,
+        },
+      },
+    ]);
+    setQuickMsgText('');
+  };
+
+  const handleToggleMobileVoiceRecord = async () => {
+    if (isRecordingMobileVoice) {
+      if (mobileTimerRef.current) {
+        window.clearInterval(mobileTimerRef.current);
+        mobileTimerRef.current = null;
+      }
+      if (mobileSpeechRecRef.current) {
+        try {
+          mobileSpeechRecRef.current.stop();
+        } catch {}
+      }
+      if (mobileMediaRecRef.current && mobileMediaRecRef.current.state !== 'inactive') {
+        mobileMediaRecRef.current.stop();
+      } else {
+        const durSec = Math.max(2, mobileRecSeconds || 3);
+        const durationFormatted = `0:${String(durSec).padStart(2, '0')}`;
+        const text =
+          mobileLiveTranscriptRef.current.trim() ||
+          quickMsgText.trim() ||
+          'ចាស៎បង! សារសម្លេងឆ្លើយតប';
+        const wavUrl = createMobilePlayableWavDataUrl(durSec);
+        onSendMessage(`🎤 សារសម្លេង (${durationFormatted}): ${text}`, [
+          {
+            type: 'audio',
+            data: {
+              url: wavUrl,
+              duration: durationFormatted,
+              transcript: text,
+            },
+          },
+        ]);
+        setQuickMsgText('');
+        mobileLiveTranscriptRef.current = '';
+      }
+      setIsRecordingMobileVoice(false);
+      setMobileRecSeconds(0);
+      return;
+    }
+
+    mobileLiveTranscriptRef.current = '';
+    setMobileRecSeconds(0);
+    setIsRecordingMobileVoice(true);
+
+    const startTime = Date.now();
+    mobileTimerRef.current = window.setInterval(() => {
+      setMobileRecSeconds(Math.floor((Date.now() - startTime) / 1000));
+    }, 500);
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      try {
+        const rec = new SpeechRecognition();
+        rec.continuous = true;
+        rec.interimResults = true;
+        rec.lang = language === 'kh' ? 'km-KH' : 'en-US';
+        rec.onresult = (event: any) => {
+          const t = Array.from(event.results)
+            .map((r: any) => r[0].transcript)
+            .join('')
+            .trim();
+          if (t) mobileLiveTranscriptRef.current = t;
+        };
+        mobileSpeechRecRef.current = rec;
+        rec.start();
+      } catch {}
+    }
+
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mobileChunksRef.current = [];
+        const recorder = new MediaRecorder(stream);
+        recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) mobileChunksRef.current.push(e.data);
+        };
+        recorder.onstop = () => {
+          stream.getTracks().forEach((t) => t.stop());
+          const durSec = Math.max(1, Math.round((Date.now() - startTime) / 1000));
+          const durationFormatted = `0:${String(Math.min(59, durSec)).padStart(2, '0')}`;
+          const blob = new Blob(mobileChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const base64Audio = (reader.result as string) || createMobilePlayableWavDataUrl(durSec);
+            const browserCaptured = mobileLiveTranscriptRef.current.trim();
+            const recognizedText =
+              quickMsgText.trim() || browserCaptured || 'ចាស៎បង! សារសម្លេងឆ្លើយតប';
+
+            onSendMessage(`🎤 សារសម្លេង (${durationFormatted}): ${recognizedText}`, [
+              {
+                type: 'audio',
+                data: {
+                  url: base64Audio,
+                  duration: durationFormatted,
+                  transcript: recognizedText,
+                },
+              },
+            ]);
+            setQuickMsgText('');
+            mobileLiveTranscriptRef.current = '';
+          };
+          reader.readAsDataURL(blob);
+        };
+        mobileMediaRecRef.current = recorder;
+        recorder.start();
+      } catch {}
+    }
+  };
+
+  const handlePlayMobileAudio = (msgId: string, audioUrl?: string, transcript?: string) => {
+    if (playingMobileAudioId === msgId) {
+      if (mobileAudioElRef.current) {
+        mobileAudioElRef.current.pause();
+      }
+      if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+      setPlayingMobileAudioId(null);
+      return;
+    }
+    if (mobileAudioElRef.current) {
+      mobileAudioElRef.current.pause();
+    }
+    setPlayingMobileAudioId(msgId);
+    const effectiveUrl = audioUrl || createMobilePlayableWavDataUrl(3);
+    const audio = new Audio(effectiveUrl);
+    mobileAudioElRef.current = audio;
+    audio.onended = () => setPlayingMobileAudioId(null);
+    audio.onerror = () => {
+      if ('speechSynthesis' in window && transcript) {
+        const u = new SpeechSynthesisUtterance(transcript);
+        u.lang = 'km-KH';
+        u.onend = () => setPlayingMobileAudioId(null);
+        window.speechSynthesis.speak(u);
+      } else {
+        setPlayingMobileAudioId(null);
+      }
+    };
+    audio.play().catch(() => {
+      if ('speechSynthesis' in window && transcript) {
+        const u = new SpeechSynthesisUtterance(transcript);
+        u.lang = 'km-KH';
+        u.onend = () => setPlayingMobileAudioId(null);
+        window.speechSynthesis.speak(u);
+      } else {
+        setPlayingMobileAudioId(null);
+      }
+    });
+  };
+
   const handleSendQuickMobileMessage = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!quickMsgText.trim() || !activeThread) return;
+    if (!quickMsgText.trim()) return;
     onSendMessage(quickMsgText.trim());
     setQuickMsgText('');
   };
@@ -257,15 +483,23 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                     <button
                       type="button"
                       onClick={() => setPhoneTab('inbox')}
-                      className="min-h-[40px] min-w-[36px] flex items-center justify-center -ml-1 text-slate-200 hover:text-white cursor-pointer"
+                      className="px-2 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                      title="ត្រឡប់មកប្រអប់ដើមវិញ (Back to Main Inbox)"
                     >
-                      <ArrowLeft className="w-4 h-4" />
+                      <ArrowLeft className="w-3.5 h-3.5" />
+                      <span>{language === 'kh' ? 'មកប្រអប់ដើមវិញ' : 'Main Inbox'}</span>
                     </button>
                   ) : (
                     <img
-                      src={selectedPage.avatar}
+                      src={resolvePageOriginalAvatar(selectedPage)}
                       alt={selectedPage.name}
                       referrerPolicy="no-referrer"
+                      onError={(e) => {
+                        e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                          selectedPage.name,
+                          'FB Page'
+                        );
+                      }}
                       className="w-7 h-7 rounded-full object-cover border border-slate-700 shrink-0"
                     />
                   )}
@@ -277,7 +511,7 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                     </p>
                     <p className="text-[10px] text-slate-400 truncate">
                       {phoneTab === 'chat' && activeThread
-                        ? `${activeThread.customer.phone} · ${activeThread.customer.province}`
+                        ? `${activeThread.customer.phone} · រូបដើមពីផេក`
                         : language === 'kh'
                         ? 'កម្មវិធីទូរស័ព្ទដៃ PageChat Pro'
                         : 'PageChat Pro Mobile'}
@@ -322,10 +556,28 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                       >
                         <div className="relative shrink-0">
                           <img
-                            src={th.customer.avatarUrl}
+                            src={resolveCustomerOriginalPageAvatar(th.customer, selectedPage)}
                             alt={th.customer.name}
                             referrerPolicy="no-referrer"
-                            className="w-11 h-11 rounded-full object-cover border border-slate-200"
+                            onError={(e) => {
+                              e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                                th.customer.name,
+                                selectedPage?.name
+                              );
+                            }}
+                            className="w-11 h-11 rounded-full object-cover border-2 border-blue-500/30 bg-slate-100"
+                          />
+                          <img
+                            src={resolvePageOriginalAvatar(selectedPage)}
+                            alt={selectedPage.name}
+                            referrerPolicy="no-referrer"
+                            onError={(e) => {
+                              e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                                selectedPage?.name,
+                                'FB Page'
+                              );
+                            }}
+                            className="w-4.5 h-4.5 rounded-full object-cover border border-white absolute -bottom-0.5 -right-0.5 bg-white shadow-2xs"
                           />
                           {th.unreadCount > 0 && (
                             <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center tabular-nums">
@@ -360,15 +612,20 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                 {phoneTab === 'chat' && activeThread && (
                   <div className="flex flex-col h-full bg-slate-100">
                     {/* Customer Quick Strip */}
-                    <div className="px-3 py-2 bg-white border-b border-slate-200 flex items-center justify-between text-[11px] text-slate-600 shrink-0">
+                    <div className="px-3 py-1.5 bg-white border-b border-slate-200 flex items-center justify-between text-[11px] text-slate-600 shrink-0 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setPhoneTab('inbox')}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-[10px] shrink-0 cursor-pointer"
+                      >
+                        <ArrowLeft className="w-3 h-3 text-blue-600" />
+                        <span>{language === 'kh' ? 'មកប្រអប់ដើមវិញ' : 'Main Inbox'}</span>
+                      </button>
                       <span className="flex items-center gap-1 truncate">
                         <Phone className="w-3 h-3 text-slate-400" />
                         <span className="tabular-nums font-medium">
                           {activeThread.customer.phone}
                         </span>
-                        <span aria-hidden="true">·</span>
-                        <MapPin className="w-3 h-3 text-slate-400" />
-                        <span>{activeThread.customer.province}</span>
                       </span>
                       <button
                         type="button"
@@ -384,6 +641,12 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                       {activeThread.messages.map((m) => {
                         const isCustomer = m.sender === 'customer';
                         const orderAtt = m.attachments?.find((a) => a.type === 'order_invoice');
+                        const audioAtt = m.attachments?.find((a) => a.type === 'audio');
+                        const custAvatar = resolveCustomerOriginalPageAvatar(
+                          activeThread.customer,
+                          selectedPage
+                        );
+                        const pageAvatar = resolvePageOriginalAvatar(selectedPage);
                         return (
                           <div
                             key={m.id}
@@ -391,6 +654,52 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                               isCustomer ? 'items-start' : 'items-end'
                             }`}
                           >
+                            <div className="flex items-center gap-1.5 mb-0.5 px-1">
+                              {isCustomer ? (
+                                <div className="relative flex items-center shrink-0">
+                                  <img
+                                    src={custAvatar}
+                                    alt={activeThread.customer.name}
+                                    referrerPolicy="no-referrer"
+                                    onError={(e) => {
+                                      e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                                        activeThread.customer.name,
+                                        selectedPage?.name
+                                      );
+                                    }}
+                                    className="w-5 h-5 rounded-full object-cover border border-blue-400"
+                                  />
+                                  <img
+                                    src={pageAvatar}
+                                    alt={selectedPage.name}
+                                    referrerPolicy="no-referrer"
+                                    onError={(e) => {
+                                      e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                                        selectedPage?.name,
+                                        'FB Page'
+                                      );
+                                    }}
+                                    className="w-3 h-3 rounded-full object-cover border border-white -ml-1.5 mt-1.5 bg-white"
+                                  />
+                                </div>
+                              ) : (
+                                <img
+                                  src={pageAvatar}
+                                  alt={selectedPage.name}
+                                  referrerPolicy="no-referrer"
+                                  onError={(e) => {
+                                    e.currentTarget.src = buildClientFallbackAvatarDataUrl(
+                                      selectedPage?.name,
+                                      'FB Page'
+                                    );
+                                  }}
+                                  className="w-4.5 h-4.5 rounded-full object-cover border border-blue-300"
+                                />
+                              )}
+                              <span className="text-[10px] font-semibold text-slate-500 truncate max-w-[140px]">
+                                {isCustomer ? activeThread.customer.name : selectedPage.name.split(' - ')[0]}
+                              </span>
+                            </div>
                             <div
                               className={`max-w-[85%] px-3 py-2 rounded-2xl text-xs leading-relaxed ${
                                 isCustomer
@@ -399,6 +708,37 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                               }`}
                             >
                               <p className="break-words">{m.text}</p>
+                              {audioAtt && (
+                                <div className="mt-1.5 pt-1.5 border-t border-current/15 flex items-center justify-between gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handlePlayMobileAudio(
+                                        m.id,
+                                        audioAtt.data?.url,
+                                        audioAtt.data?.transcript
+                                      )
+                                    }
+                                    className={`px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 cursor-pointer ${
+                                      isCustomer
+                                        ? 'bg-indigo-600 text-white'
+                                        : 'bg-white text-blue-700'
+                                    }`}
+                                  >
+                                    {playingMobileAudioId === m.id ? (
+                                      <Pause className="w-3 h-3" />
+                                    ) : (
+                                      <Play className="w-3 h-3" />
+                                    )}
+                                    <span>{audioAtt.data?.duration || '0:04'}</span>
+                                  </button>
+                                  {audioAtt.data?.transcript && (
+                                    <span className="text-[10px] italic truncate">
+                                      "{audioAtt.data.transcript}"
+                                    </span>
+                                  )}
+                                </div>
+                              )}
                             </div>
                             {orderAtt && orderAtt.data && (
                               <div className="mt-1.5 w-60 bg-white border-2 border-emerald-500 rounded-xl p-2.5 shadow-xs text-slate-900">
@@ -439,28 +779,60 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                       <button
                         type="button"
                         onClick={onOpenCreateOrder}
-                        className="px-2.5 py-2 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold flex items-center gap-1 shrink-0 cursor-pointer"
+                        className="px-2.5 py-2 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold flex items-center gap-1 shrink-0 cursor-pointer"
                         title="បង្កើតការបញ្ជាទិញ (Create Order)"
                       >
                         <ShoppingBag className="w-3.5 h-3.5" />
                         <span>{language === 'kh' ? '+ បុង' : '+ Order'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleToggleMobileVoiceRecord}
+                        className={`px-2 py-2 rounded-full text-[10px] font-bold flex items-center gap-1 shrink-0 cursor-pointer transition-colors ${
+                          isRecordingMobileVoice
+                            ? 'bg-rose-600 text-white animate-pulse'
+                            : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                        }`}
+                        title="ថតផ្ញើសារសម្លេងទៅវិញក្នុងប្រអប់សារ"
+                      >
+                        {isRecordingMobileVoice ? (
+                          <Square className="w-3 h-3" />
+                        ) : (
+                          <Mic className="w-3.5 h-3.5" />
+                        )}
+                        <span>
+                          {isRecordingMobileVoice
+                            ? `${mobileRecSeconds}s`
+                            : '🎙️'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSendMobileTextAsVoice}
+                        className="px-2 py-2 rounded-full bg-purple-600 hover:bg-purple-700 text-white text-[10px] font-bold flex items-center gap-1 shrink-0 cursor-pointer"
+                        title="ផ្ញើអក្សរជាសម្លេង (Send Voice Reply)"
+                      >
+                        <Volume2 className="w-3.5 h-3.5" />
+                        <span>Voice</span>
                       </button>
                       <input
                         type="text"
                         value={quickMsgText}
                         onChange={(e) => setQuickMsgText(e.target.value)}
                         placeholder={
-                          language === 'kh'
-                            ? 'វាយសារឆ្លើយតបអតិថិជន...'
-                            : 'Type a message...'
+                          isRecordingMobileVoice
+                            ? 'កំពុងថតសម្លេង...'
+                            : language === 'kh'
+                            ? 'វាយសារ ឬចុច Voice ទៅវិញ...'
+                            : 'Type reply or tap Voice...'
                         }
-                        className="flex-1 px-3 py-2 text-xs bg-slate-100 rounded-full focus:outline-none focus:bg-white focus:ring-1 focus:ring-blue-500"
+                        className="flex-1 px-2.5 py-2 text-xs bg-slate-100 rounded-full focus:outline-none focus:bg-white focus:ring-1 focus:ring-blue-500 min-w-0"
                       />
                       <button
                         type="submit"
-                        className="w-9 h-9 rounded-full bg-blue-600 text-white flex items-center justify-center shrink-0 hover:bg-blue-700 cursor-pointer"
+                        className="w-8 h-8 rounded-full bg-blue-600 text-white flex items-center justify-center shrink-0 hover:bg-blue-700 cursor-pointer"
                       >
-                        <Send className="w-4 h-4" />
+                        <Send className="w-3.5 h-3.5" />
                       </button>
                     </form>
                   </div>

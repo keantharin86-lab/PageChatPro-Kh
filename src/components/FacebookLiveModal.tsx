@@ -43,7 +43,7 @@ export const FacebookLiveModal: React.FC<FacebookLiveModalProps> = ({
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [verifiedPageData, setVerifiedPageData] = useState<any>(null);
-  const [showAdvancedToken, setShowAdvancedToken] = useState(false);
+  const [showAdvancedToken, setShowAdvancedToken] = useState(true);
   const [isSimulatingWebhook, setIsSimulatingWebhook] = useState(false);
   const [simulateSuccessMsg, setSimulateSuccessMsg] = useState('');
   const [isConnectingFacebook, setIsConnectingFacebook] = useState(false);
@@ -460,18 +460,22 @@ export const FacebookLiveModal: React.FC<FacebookLiveModalProps> = ({
           </div>
 
           {/* Sync Real Messages Action */}
-          {onSyncRealConversations && isLive && (
+          {onSyncRealConversations && (
             <div className="pt-1">
               <button
                 type="button"
-                onClick={() => {
-                  onSyncRealConversations();
+                onClick={async () => {
+                  await onSyncRealConversations();
                   onClose();
                 }}
-                className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
-                <span>{language === 'kh' ? 'ទាញយកសារពិតពី Facebook ចូលប្រអប់សារ (Sync)' : 'Sync Real Facebook Messages'}</span>
+                <span>
+                  {language === 'kh'
+                    ? '📥 យកសារអតិថិជនទាំងអស់ចូលផេក (Meta Token) & Live ជាមួយសារថ្មីៗ'
+                    : 'Pull All Customer Messages into Page (Meta Token) & Go Live'}
+                </span>
               </button>
             </div>
           )}
@@ -536,17 +540,21 @@ export const FacebookLiveModal: React.FC<FacebookLiveModalProps> = ({
                   type="button"
                   onClick={handleVerifyAndConnect}
                   disabled={isVerifying}
-                  className="w-full py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
                 >
                   {isVerifying ? (
                     <>
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      <span>{language === 'kh' ? 'កំពុងផ្ទៀងផ្ទាត់...' : 'Verifying...'}</span>
+                      <span>{language === 'kh' ? 'កំពុងផ្ទៀងផ្ទាត់ & ទាញយកសារអតិថិជនទាំងអស់...' : 'Verifying & Pulling All Messages...'}</span>
                     </>
                   ) : (
                     <>
                       <Check className="w-3.5 h-3.5" />
-                      <span>{language === 'kh' ? 'ផ្ទៀងផ្ទាត់ & រក្សាទុក Token' : 'Verify & Save Token'}</span>
+                      <span>
+                        {language === 'kh'
+                          ? 'ផ្ទៀងផ្ទាត់ Token & ទាញយកសារអតិថិជនទាំងអស់ចូលផេក + Live សារថ្មីៗ'
+                          : 'Verify Token & Pull All Customer Messages + Go Live'}
+                      </span>
                     </>
                   )}
                 </button>
