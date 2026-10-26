@@ -330,9 +330,9 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   return (
     <div className="w-full md:w-80 lg:w-96 bg-white border-r border-slate-200 flex flex-col shrink-0 h-full">
       {/* Header & Search */}
-      <div className="p-3 border-b border-slate-200">
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
+      <div className="p-2.5 border-b border-slate-200">
+        <div className="flex items-center justify-between gap-1.5 mb-1.5">
+          <div className="flex items-center gap-1.5 shrink-0">
             {onOpenMobileMenu && (
               <button
                 onClick={onOpenMobileMenu}
@@ -340,13 +340,13 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                 aria-label="Open menu"
                 title="បើកមឺនុយ"
               >
-                <Menu className="w-5 h-5" />
+                <Menu className="w-4 h-4" />
               </button>
             )}
-            <h2 className="text-base font-semibold text-slate-800">
+            <h2 className="text-[13px] font-semibold text-slate-800 whitespace-nowrap">
               {language === 'kh' ? 'សារអតិថិជន' : 'Chat Inbox'}
             </h2>
-            <span className="text-xs px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full font-medium tabular-nums">
+            <span className="text-[10px] px-1.5 py-0.2 bg-slate-100 text-slate-600 rounded-full font-medium tabular-nums">
               {filteredThreads.length}
             </span>
           </div>
@@ -357,7 +357,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               type="button"
               onClick={handleSyncClick}
               disabled={isSyncingPage}
-              className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-[10px] font-bold shadow-2xs transition-all cursor-pointer disabled:opacity-60 max-w-[140px] sm:max-w-[165px]"
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-[9.5px] font-bold shadow-2xs transition-all cursor-pointer disabled:opacity-60 max-w-[125px] sm:max-w-[145px]"
               title={
                 language === 'kh'
                   ? 'សារអតិថិជនទាំងអស់ (Meta Token) & Live សារថ្មីៗ'
@@ -375,7 +375,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             <button
               type="button"
               onClick={() => setShowInlineTokenBox((prev) => !prev)}
-              className={`px-1.5 py-0.5 rounded-md border text-[10px] font-bold transition-colors shrink-0 cursor-pointer flex items-center gap-0.5 ${
+              className={`px-1 py-0.5 rounded border text-[9.5px] font-bold transition-colors shrink-0 cursor-pointer flex items-center gap-0.5 ${
                 showInlineTokenBox || hasRealMetaToken
                   ? 'bg-indigo-50 text-indigo-700 border-indigo-300 hover:bg-indigo-100'
                   : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'
@@ -394,7 +394,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               <button
                 type="button"
                 onClick={onOpenLiveOnlineModal}
-                className={`flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold rounded-md border transition-all cursor-pointer shrink-0 ${
+                className={`flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-bold rounded border transition-all cursor-pointer shrink-0 ${
                   (selectedPage?.isLiveOnline || selectedPage?.accessToken)
                     ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100 shadow-2xs'
                     : 'bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100'
@@ -410,10 +410,10 @@ export const ConversationList: React.FC<ConversationListProps> = ({
               <button
                 type="button"
                 onClick={handleDeleteAllClick}
-                className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md transition-colors shadow-2xs cursor-pointer shrink-0"
+                className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded transition-colors shadow-2xs cursor-pointer shrink-0"
                 title={language === 'kh' ? 'លុបសារទាំងអស់ក្នុងគ្រប់ទំព័រ' : 'Delete all messages in all pages'}
               >
-                <Trash2 className="w-3 h-3" />
+                <Trash2 className="w-2.5 h-2.5" />
                 <span className="hidden sm:inline">{language === 'kh' ? 'លុបទាំងអស់' : 'Clear All'}</span>
               </button>
             )}
@@ -460,12 +460,12 @@ export const ConversationList: React.FC<ConversationListProps> = ({
 
         {/* Page Scope Switcher (Current Page vs All Pages) */}
         {selectedPage && (
-          <div className="flex items-center gap-1 mb-2.5 bg-slate-100 p-0.5 rounded-lg text-xs font-medium text-slate-600">
+          <div className="flex items-center gap-1 mb-2 bg-slate-100 p-0.5 rounded-md text-[11px] font-medium text-slate-600">
             <button
               onClick={() => setPageScope('all')}
-              className={`flex-1 py-1 px-2 rounded-md transition-all text-center truncate cursor-pointer ${
+              className={`flex-1 py-0.5 px-1.5 rounded text-[11px] leading-tight transition-all text-center truncate cursor-pointer ${
                 pageScope === 'all'
-                  ? 'bg-white text-slate-900 shadow-xs font-semibold'
+                  ? 'bg-white text-slate-900 shadow-2xs font-semibold'
                   : 'hover:text-slate-900'
               }`}
             >
@@ -473,14 +473,14 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             </button>
             <button
               onClick={() => setPageScope('current')}
-              className={`flex-1 py-1 px-2 rounded-md transition-all text-center truncate flex items-center justify-center gap-1.5 cursor-pointer ${
+              className={`flex-1 py-0.5 px-1.5 rounded text-[11px] leading-tight transition-all text-center truncate flex items-center justify-center gap-1 cursor-pointer ${
                 pageScope === 'current'
-                  ? 'bg-white text-blue-700 shadow-xs font-semibold'
+                  ? 'bg-white text-blue-700 shadow-2xs font-semibold'
                   : 'hover:text-slate-900'
               }`}
               title={`${selectedPage.name} (Messenger Live Online)`}
             >
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
               <span className="truncate">{selectedPage.name.split(' - ')[0] || selectedPage.name}</span>
             </button>
           </div>

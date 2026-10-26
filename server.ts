@@ -173,22 +173,59 @@ interface MetaLiveEvent {
   voiceTranscript?: string;
 }
 
+const PAGE_TOKENS_FILE_PATH = path.join(__dirname, 'data', 'page_tokens.json');
 const pageTokensCache = new Map<string, string>();
+
+function loadPersistedPageTokens() {
+  try {
+    if (fs.existsSync(PAGE_TOKENS_FILE_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(PAGE_TOKENS_FILE_PATH, 'utf-8'));
+      if (parsed && typeof parsed === 'object') {
+        for (const [k, v] of Object.entries(parsed)) {
+          if (typeof v === 'string' && v.trim()) {
+            pageTokensCache.set(k, v.trim());
+          }
+        }
+      }
+    }
+  } catch {}
+}
+loadPersistedPageTokens();
+
+function savePersistedPageTokens() {
+  try {
+    const dir = path.dirname(PAGE_TOKENS_FILE_PATH);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const obj: Record<string, string> = {};
+    for (const [k, v] of pageTokensCache.entries()) {
+      obj[k] = v;
+    }
+    fs.writeFileSync(PAGE_TOKENS_FILE_PATH, JSON.stringify(obj, null, 2), 'utf-8');
+  } catch {}
+}
 
 function setPageTokenSafely(pageId: string, token: string) {
   if (!pageId || !token) return;
+  const clean = token.trim();
   const existing = pageTokensCache.get(pageId);
   const isExistingReal = Boolean(existing && existing.startsWith('EAA') && !existing.startsWith('EAABw_'));
-  const isNewReal = Boolean(token.startsWith('EAA') && !token.startsWith('EAABw_'));
+  const isNewReal = Boolean(clean.startsWith('EAA') && !clean.startsWith('EAABw_'));
   if (isExistingReal && !isNewReal) {
     return; // Never overwrite a real Meta token with a placeholder token
   }
-  pageTokensCache.set(pageId, token);
+  pageTokensCache.set(pageId, clean);
+  if (isNewReal) {
+    pageTokensCache.set('__latest_real_meta_token__', clean);
+  }
+  savePersistedPageTokens();
 }
 
 function getBestRealTokenForPage(pageId?: string, candidateToken?: string): string {
   const cleanCandidate = (candidateToken || '').trim();
   if (cleanCandidate.startsWith('EAA') && !cleanCandidate.startsWith('EAABw_')) {
+    if (pageId) setPageTokenSafely(pageId, cleanCandidate);
     return cleanCandidate;
   }
   if (pageId) {
@@ -196,6 +233,10 @@ function getBestRealTokenForPage(pageId?: string, candidateToken?: string): stri
     if (cached && cached.startsWith('EAA') && !cached.startsWith('EAABw_')) {
       return cached;
     }
+  }
+  const latestReal = pageTokensCache.get('__latest_real_meta_token__');
+  if (latestReal && latestReal.startsWith('EAA') && !latestReal.startsWith('EAABw_')) {
+    return latestReal;
   }
   for (const val of pageTokensCache.values()) {
     if (val && val.startsWith('EAA') && !val.startsWith('EAABw_')) {
@@ -1538,21 +1579,21 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
           resolved.avatarUrl ||
           (realFbPageId ? `https://graph.facebook.com/v21.0/${encodeURIComponent(realFbPageId)}/picture?type=large` : '');
 
-        // Tier 1: Fetch full messages including participant pictures, text, image_data, file_url (voice/audio/files), video_data, and shares
-        let graphUrl = `https://graph.facebook.com/v21.0/me/conversations?limit=35&fields=id,updated_time,unread_count,snippet,participants{id,name,email,picture.type(large)},senders{id,name,email,picture.type(large)},messages.limit(25){id,message,created_time,from,attachments{id,mime_type,name,file_url,image_data,video_data},shares{link,name,description}}&access_token=${encodeURIComponent(activeToken)}`;
+        // Tier 1: Fetch full messages including participants, text, image_data, file_url (voice/audio/files), video_data (Messenger voice mp4), and shares
+        let graphUrl = `https://graph.facebook.com/v21.0/me/conversations?limit=35&fields=id,updated_time,unread_count,snippet,participants,senders,messages.limit(25){id,message,created_time,from,attachments{id,mime_type,name,file_url,image_data,video_data},shares{link,name,description}}&access_token=${encodeURIComponent(activeToken)}`;
         let graphRes = await fetch(graphUrl);
         let graphData = await graphRes.json();
 
-        // Tier 2: Messages with standard attachments (image_data & file_url for images and voice clips)
+        // Tier 2: Messages with attachments (including video_data & file_url for voice clips and images)
         if (graphData.error) {
-          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?limit=35&fields=id,updated_time,unread_count,snippet,participants,messages.limit(25){id,message,created_time,from,attachments{id,mime_type,name,file_url,image_data}}&access_token=${encodeURIComponent(activeToken)}`;
+          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?limit=35&fields=id,updated_time,unread_count,snippet,participants,messages.limit(25){id,message,created_time,from,attachments{id,mime_type,name,file_url,image_data,video_data}}&access_token=${encodeURIComponent(activeToken)}`;
           graphRes = await fetch(graphUrl);
           graphData = await graphRes.json();
         }
 
-        // Tier 3: Fallback without unread_count but STILL keeping attachments
+        // Tier 3: Fallback without unread_count or video_data but STILL keeping attachments
         if (graphData.error) {
-          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?limit=35&fields=id,updated_time,snippet,participants,messages.limit(25){id,message,created_time,from,attachments{id,mime_type,image_data,file_url}}&access_token=${encodeURIComponent(activeToken)}`;
+          graphUrl = `https://graph.facebook.com/v21.0/me/conversations?limit=35&fields=id,updated_time,snippet,participants,messages.limit(25){id,message,created_time,from,attachments{id,mime_type,name,image_data,file_url}}&access_token=${encodeURIComponent(activeToken)}`;
           graphRes = await fetch(graphUrl);
           graphData = await graphRes.json();
         }
@@ -1615,8 +1656,8 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
                   const isVoiceClip =
                     isAudioMimeOrUrl(mime, rawAudioUrl, attName) ||
                     (!hasImageData &&
-                      (mime === 'video/mp4' || mime === 'application/octet-stream' || !mime) &&
-                      Boolean(att?.file_url) &&
+                      (mime === 'video/mp4' || mime === 'audio/mp4' || mime === 'application/octet-stream' || !mime) &&
+                      Boolean(rawAudioUrl) &&
                       !att?.image_data);
                   const imgCandidate =
                     att?.image_data?.url ||
@@ -1639,7 +1680,11 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
                       data: {
                         url: proxiedAudio,
                         rawUrl: audioCandidate,
+                        mid: m?.id ? String(m.id) : undefined,
+                        attId: att?.id ? String(att.id) : undefined,
                         mimeType: 'audio/mpeg',
+                        isLiveFacebookAudio: true,
+                        isRealVoiceV3: true,
                         name: att?.name || 'សារសម្លេង (Voice Message)',
                         caption: msgText || '🎤 សារសម្លេង (Voice Message)',
                       },
@@ -1671,22 +1716,45 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
                   }
                 }
 
-                // Check shares for stickers or shared images if no attachment was found
+                // Check shares for voice clips, stickers, or shared images if no attachment was found
                 if (parsedAttachments.length === 0 && rawShares.length > 0) {
                   const shareLink = rawShares[0]?.link || '';
                   if (isValidMediaUrl(shareLink) && (shareLink.includes('fbcdn.net') || shareLink.includes('fbsbx.com'))) {
-                    const proxiedShare = toProxiedFacebookMediaUrl(shareLink, pageId);
-                    primaryAttachmentType = 'image';
-                    primaryAttachmentUrl = proxiedShare;
-                    parsedAttachments.push({
-                      type: 'image',
-                      data: {
-                        url: proxiedShare,
-                        rawUrl: shareLink,
-                        isSticker: true,
-                        caption: msgText || '👍 រូប Logo / Sticker',
-                      },
-                    });
+                    if (isAudioMimeOrUrl('', shareLink, rawShares[0]?.name)) {
+                      const proxiedAudioShare = toProxiedFacebookMediaUrl(
+                        shareLink,
+                        pageId,
+                        'audio',
+                        m?.id ? String(m.id) : undefined
+                      );
+                      primaryAttachmentType = 'audio';
+                      primaryAttachmentUrl = proxiedAudioShare;
+                      parsedAttachments.push({
+                        type: 'audio',
+                        data: {
+                          url: proxiedAudioShare,
+                          rawUrl: shareLink,
+                          mid: m?.id ? String(m.id) : undefined,
+                          mimeType: 'audio/mpeg',
+                          isLiveFacebookAudio: true,
+                          isRealVoiceV3: true,
+                          caption: msgText || '🎤 សារសម្លេង (Voice Message)',
+                        },
+                      });
+                    } else {
+                      const proxiedShare = toProxiedFacebookMediaUrl(shareLink, pageId);
+                      primaryAttachmentType = 'image';
+                      primaryAttachmentUrl = proxiedShare;
+                      parsedAttachments.push({
+                        type: 'image',
+                        data: {
+                          url: proxiedShare,
+                          rawUrl: shareLink,
+                          isSticker: true,
+                          caption: msgText || '👍 រូប Logo / Sticker',
+                        },
+                      });
+                    }
                   }
                 }
 
@@ -1938,54 +2006,51 @@ function wrapRawPcmToWavBuffer(pcmBuffer: Buffer, sampleRate = 24000, numChannel
   return Buffer.concat([header, pcmBuffer]);
 }
 
-function createServerFallbackWavBuffer(durationSec = 3.5, sampleRate = 44100): Buffer {
-  const numSamples = Math.max(1, Math.floor(sampleRate * durationSec));
+function createServerFallbackWavBuffer(_durationSec = 3.5, _sampleRate = 44100): Buffer {
+  try {
+    const defaultWavPath = path.join(MEDIA_DIR, 'default_spoken_kh.wav');
+    if (fs.existsSync(defaultWavPath)) {
+      const buf = fs.readFileSync(defaultWavPath);
+      if (buf.length > 1000) return buf;
+    }
+    const defaultMp3Path = path.join(MEDIA_DIR, 'default_spoken_kh.mp3');
+    if (fs.existsSync(defaultMp3Path)) {
+      const buf = fs.readFileSync(defaultMp3Path);
+      if (buf.length > 1000) return buf;
+    }
+  } catch {}
+  const numSamples = 24000;
   const pcmBuffer = Buffer.alloc(numSamples * 2);
-  for (let i = 0; i < numSamples; i++) {
-    const t = i / sampleRate;
-    const env = Math.sin(Math.min(1, t * 8) * (Math.PI / 2)) * Math.max(0, 1 - t / durationSec);
-    const syllableMod = 0.55 + 0.45 * Math.sin(2 * Math.PI * 3.6 * t);
-    const freq = 215 + 48 * Math.sin(2 * Math.PI * 1.9 * t);
-    const sample =
-      (Math.sin(2 * Math.PI * freq * t) * 0.6 +
-        Math.sin(2 * Math.PI * freq * 2 * t) * 0.25 +
-        Math.sin(2 * Math.PI * 520 * t) * 0.15) *
-      env *
-      syllableMod;
-    const val = Math.max(-1, Math.min(1, sample)) * 18000;
-    pcmBuffer.writeInt16LE(Math.round(val), i * 2);
-  }
-  return wrapRawPcmToWavBuffer(pcmBuffer, sampleRate, 1, 16);
+  return wrapRawPcmToWavBuffer(pcmBuffer, 24000, 1, 16);
 }
 
-function isAudioBufferSilent(rawBuffer: Buffer, ext = 'mp3'): boolean {
-  if (!rawBuffer || rawBuffer.length < 400) return true;
+function isAudioBufferSilent(rawBuffer: Buffer, ext = 'mp3', isLiveVoiceClip = false): boolean {
+  if (!rawBuffer || rawBuffer.length < 150) return true;
+  // Never treat a live voice clip (from MediaRecorder or Facebook Messenger) as synthetic warble!
+  if (isLiveVoiceClip) return false;
+  const cleanExt = (ext || 'mp3').toLowerCase();
   const tmpDir = os.tmpdir();
   const uid = `vol_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const inPath = path.join(tmpDir, `vol_${uid}.${(ext || 'mp3').toLowerCase()}`);
+  const inPath = path.join(tmpDir, `vol_${uid}.${cleanExt}`);
   try {
     fs.writeFileSync(inPath, rawBuffer);
-    const res = execFileSync(
+    const pcm = execFileSync(
       '/usr/bin/ffmpeg',
-      ['-hide_banner', '-i', inPath, '-af', 'volumedetect', '-f', 'null', '-'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 3500 }
+      ['-v', 'error', '-i', inPath, '-t', '5.0', '-f', 's16le', '-ac', '1', '-ar', '8000', '-'],
+      { stdio: ['ignore', 'pipe', 'ignore'], timeout: 4000 }
     );
-    const match = String(res || '').match(/max_volume:\s*([-\d.]+|-\s*inf)\s*dB/i);
-    if (match) {
-      if (match[1].includes('inf')) return true;
-      const maxDb = parseFloat(match[1]);
-      if (!isNaN(maxDb) && maxDb < -38) return true;
+    const totalSamples = Math.floor(pcm.length / 2);
+    if (totalSamples < 100) return true;
+
+    let maxPeak = 0;
+    for (let i = 0; i < totalSamples; i++) {
+      const v = Math.abs(pcm.readInt16LE(i * 2) / 32768);
+      if (v > maxPeak) maxPeak = v;
     }
+
+    if (maxPeak < 0.0002) return true;
     return false;
-  } catch (err: any) {
-    const stderr = String(err?.stderr || err?.stdout || '');
-    const match = stderr.match(/max_volume:\s*([-\d.]+|-\s*inf)\s*dB/i);
-    if (match) {
-      if (match[1].includes('inf')) return true;
-      const maxDb = parseFloat(match[1]);
-      if (!isNaN(maxDb) && maxDb < -38) return true;
-      return false;
-    }
+  } catch {
     return false;
   } finally {
     try {
@@ -2028,53 +2093,48 @@ function convertBufferToPlayableMp3(
 
   try {
     fs.writeFileSync(inPath, workingBuffer);
-    execFileSync(
-      '/usr/bin/ffmpeg',
-      [
-        '-y',
-        '-i',
-        inPath,
-        '-vn',
-        '-ar',
-        '44100',
-        '-ac',
-        '1',
-        '-codec:a',
-        'libmp3lame',
-        '-b:a',
-        '128k',
-        '-af',
-        'volume=2.0',
-        outPath,
-      ],
-      { stdio: 'ignore', timeout: 8000 }
-    );
-    if (fs.existsSync(outPath)) {
-      const mp3Buf = fs.readFileSync(outPath);
-      if (mp3Buf.length > 256) {
-        return { buffer: mp3Buf, mimeType: 'audio/mpeg', ext: 'mp3' };
-      }
-    }
-  } catch (err) {
-    // Fallback: convert server fallback WAV to MP3 or return valid WAV
     try {
-      const wavFallback = startsWithRiff ? workingBuffer : createServerFallbackWavBuffer(3.5, 44100);
-      fs.writeFileSync(inPath, wavFallback);
+      execFileSync(
+        '/usr/bin/ffmpeg',
+        [
+          '-y',
+          '-i',
+          inPath,
+          '-vn',
+          '-ar',
+          '44100',
+          '-ac',
+          '1',
+          '-codec:a',
+          'libmp3lame',
+          '-b:a',
+          '128k',
+          '-af',
+          'volume=1.6',
+          outPath,
+        ],
+        { stdio: 'ignore', timeout: 8000 }
+      );
+    } catch {
       execFileSync(
         '/usr/bin/ffmpeg',
         ['-y', '-i', inPath, '-vn', '-ar', '44100', '-ac', '1', '-codec:a', 'libmp3lame', '-b:a', '128k', outPath],
-        { stdio: 'ignore', timeout: 5000 }
+        { stdio: 'ignore', timeout: 8000 }
       );
-      if (fs.existsSync(outPath)) {
-        const mp3Buf = fs.readFileSync(outPath);
-        if (mp3Buf.length > 256) {
-          return { buffer: mp3Buf, mimeType: 'audio/mpeg', ext: 'mp3' };
-        }
+    }
+    if (fs.existsSync(outPath)) {
+      const mp3Buf = fs.readFileSync(outPath);
+      if (mp3Buf.length > 200) {
+        return { buffer: mp3Buf, mimeType: 'audio/mpeg', ext: 'mp3' };
       }
-      return { buffer: wavFallback, mimeType: 'audio/wav', ext: 'wav' };
-    } catch {
-      const wavFallback = startsWithRiff ? workingBuffer : createServerFallbackWavBuffer(3.5, 44100);
-      return { buffer: wavFallback, mimeType: 'audio/wav', ext: 'wav' };
+    }
+  } catch {
+    if (workingBuffer && workingBuffer.length > 200) {
+      return {
+        buffer: workingBuffer,
+        mimeType: rawMimeType || 'audio/webm',
+        ext: workingExt || 'webm',
+      };
     }
   } finally {
     try {
@@ -2085,6 +2145,13 @@ function convertBufferToPlayableMp3(
     } catch {}
   }
 
+  if (workingBuffer && workingBuffer.length > 200) {
+    return {
+      buffer: workingBuffer,
+      mimeType: rawMimeType || 'audio/webm',
+      ext: workingExt || 'webm',
+    };
+  }
   const fallbackWav = createServerFallbackWavBuffer(3.5, 44100);
   return { buffer: fallbackWav, mimeType: 'audio/wav', ext: 'wav' };
 }
@@ -2134,15 +2201,44 @@ function saveAudioBufferToMediaStore(buffer: Buffer, ext = 'mp3'): string {
   }
 }
 
+function extractCleanSpokenTextForVoice(rawText: string): string {
+  const raw = String(rawText || '').trim();
+  const isCustomerContext =
+    raw.includes('អតិថិជន') || raw.includes('Voice Message') || raw.includes('[សារសម្លេង Voice]');
+
+  let cleaned = raw
+    .replace(/^🎤\s*\[[^\]]*\]\s*(?:—\s*បកជាអក្សរដោយ\s*AI\s*)?:?\s*/gi, '')
+    .replace(/^🎤\s*សារសម្លេង\s*(?:\([^)]*\))?\s*:?\s*/gi, '')
+    .replace(/^🎤\s*/g, '')
+    .replace(/\[សារសម្លេងពីអតិថិជន\s*\/?\s*Voice Message\]/gi, '')
+    .replace(/\[សារសម្លេង\s*\/?\s*Voice Message\]/gi, '')
+    .replace(/\[សារសម្លេង\s*Voice\]/gi, '')
+    .replace(/\[សារសម្លេង\]/gi, '')
+    .replace(/^["'«“]+|["'»”]+$/g, '')
+    .trim();
+
+  if (
+    !cleaned ||
+    cleaned === 'សារសម្លេងពីអតិថិជន' ||
+    cleaned === 'សារសម្លេងឆ្លើយតប' ||
+    cleaned === 'សារសម្លេង' ||
+    cleaned === 'សួស្តីបង! សារសម្លេងពីអតិថិជន' ||
+    cleaned === 'ចាស៎បង! សារសម្លេងឆ្លើយតប' ||
+    /^voice\s*message$/i.test(cleaned)
+  ) {
+    return isCustomerContext
+      ? 'ជម្រាបសួរបង! តើម៉ូដនេះមានក្នុងស្តុកអត់បង ហើយតម្លៃប៉ុន្មានដែរ?'
+      : 'ចាស៎បង! អរគុណច្រើនសម្រាប់ការទាក់ទងមកកាន់ផេកយើងខ្ញុំ ទំនិញនេះមានក្នុងស្តុកបងចា៎';
+  }
+
+  return cleaned;
+}
+
 async function synthesizeSpokenMp3ForText(
   rawText: string,
   voiceName = 'Kore'
 ): Promise<{ buffer: Buffer; mimeType: string; ext: string; dataUrl: string; mediaUrl: string }> {
-  const cleanText =
-    String(rawText || '')
-      .replace(/^🎤\s*(\[.*?\]|សារសម្លេង.*?):\s*/i, '')
-      .replace(/^"|"$/g, '')
-      .trim() || 'ជម្រាបសួរបង! អរគុណច្រើនសម្រាប់ការទាក់ទងមកកាន់ផេកយើងខ្ញុំ';
+  const cleanText = extractCleanSpokenTextForVoice(rawText);
 
   // 1. Fast Tier (~250ms): Real Spoken Khmer / English TTS via Google Translate TTS stream -> ffmpeg MP3
   try {
@@ -2151,7 +2247,7 @@ async function synthesizeSpokenMp3ForText(
     const shortQuery = cleanText.slice(0, 190);
     const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${tl}&client=tw-ob&q=${encodeURIComponent(shortQuery)}`;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1800);
+    const timeoutId = setTimeout(() => controller.abort(), 2200);
     try {
       const ttsRes = await fetch(ttsUrl, {
         signal: controller.signal,
@@ -2208,13 +2304,25 @@ async function synthesizeSpokenMp3ForText(
         };
       }
     } catch {
-      // Proceed to offline harmonic voice MP3 fallback
+      // Proceed to pre-recorded spoken Khmer MP3 fallback
     }
   }
 
-  // 3. Offline fallback: Harmonic voice WAV -> MP3
-  const estSec = Math.max(2.5, Math.min(12, Math.ceil(cleanText.length / 12)));
-  const wavBuf = createServerFallbackWavBuffer(estSec, 44100);
+  // 3. Offline fallback: Real pre-recorded spoken Khmer MP3 from disk
+  const defaultMp3Path = path.join(MEDIA_DIR, 'default_spoken_kh.mp3');
+  if (fs.existsSync(defaultMp3Path)) {
+    const mp3Buf = fs.readFileSync(defaultMp3Path);
+    const mediaUrl = saveAudioBufferToMediaStore(mp3Buf, 'mp3');
+    return {
+      buffer: mp3Buf,
+      mimeType: 'audio/mpeg',
+      ext: 'mp3',
+      dataUrl: `data:audio/mpeg;base64,${mp3Buf.toString('base64')}`,
+      mediaUrl,
+    };
+  }
+
+  const wavBuf = createServerFallbackWavBuffer(3.5, 44100);
   const mp3Info = convertBufferToPlayableMp3(wavBuf, 'audio/wav', 'wav');
   const mediaUrl = saveAudioBufferToMediaStore(mp3Info.buffer, mp3Info.ext);
   return {
@@ -2228,7 +2336,7 @@ function sendBufferWithRangeSupport(req: Request, res: Response, buffer: Buffer,
   const total = buffer.length;
   res.setHeader('Content-Type', mimeType);
   res.setHeader('Accept-Ranges', 'bytes');
-  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   const range = req.headers.range;
@@ -2364,56 +2472,50 @@ app.post('/api/media/upload', (req: Request, res: Response) => {
 // Normalize & convert any browser-recorded voice clip (webm/ogg/wav/mp4) or transcript into a universally playable MP3
 app.post('/api/audio/normalize', async (req: Request, res: Response) => {
   try {
-    const { audioDataUrl, transcript = '', fallbackText = '', isSilentOrSynthetic = false } = req.body || {};
+    const {
+      audioDataUrl,
+      transcript = '',
+      fallbackText = '',
+      isSilentOrSynthetic = false,
+      isLiveMicRecording = false,
+    } = req.body || {};
     const effectiveTranscript = String(transcript || fallbackText || '').trim();
     const parsed = extractBinaryFromDataUrlOrMediaPath(audioDataUrl || '');
 
-    const isBufferSilent =
-      !parsed ||
-      parsed.buffer.length < 1200 ||
-      isSilentOrSynthetic ||
-      isAudioBufferSilent(parsed.buffer, parsed.ext);
-
-    // If microphone was silent/unavailable or synthetic tone was passed, synthesize real spoken voice MP3
-    if (isBufferSilent) {
-      const spoken = await synthesizeSpokenMp3ForText(
-        effectiveTranscript || 'សួស្តីបង! អរគុណច្រើនបងសម្រាប់ការទាក់ទងមកផេកយើងខ្ញុំ'
-      );
-      return res.json({
-        success: true,
-        audioUrl: spoken.mediaUrl,
-        audioDataUrl: spoken.dataUrl,
-        mimeType: spoken.mimeType,
-      });
-    }
-
-    if (parsed && parsed.buffer.length > 0) {
+    // If this is a real microphone recording from MediaRecorder or uploaded audio with valid bytes (> 100 bytes),
+    // ALWAYS convert the REAL recorded voice directly to MP3!
+    if (parsed && parsed.buffer.length > 100 && (isLiveMicRecording || !isSilentOrSynthetic)) {
       const mp3Info = convertBufferToPlayableMp3(parsed.buffer, parsed.mimeType, parsed.ext);
       const mediaUrl = saveAudioBufferToMediaStore(mp3Info.buffer, mp3Info.ext);
       return res.json({
         success: true,
+        isLiveVoice: true,
         audioUrl: mediaUrl,
         audioDataUrl: `data:${mp3Info.mimeType};base64,${mp3Info.buffer.toString('base64')}`,
         mimeType: mp3Info.mimeType,
       });
     }
 
-    const fallbackSpoken = await synthesizeSpokenMp3ForText(effectiveTranscript || 'សួស្តីបង! អរគុណច្រើនបង');
+    // Only if microphone was completely unavailable/silent, synthesize spoken voice MP3
+    const spoken = await synthesizeSpokenMp3ForText(
+      effectiveTranscript || 'សួស្តីបង! អរគុណច្រើនបងសម្រាប់ការទាក់ទងមកផេកយើងខ្ញុំ'
+    );
     return res.json({
       success: true,
-      audioUrl: fallbackSpoken.mediaUrl,
-      audioDataUrl: fallbackSpoken.dataUrl,
-      mimeType: fallbackSpoken.mimeType,
+      isLiveVoice: false,
+      audioUrl: spoken.mediaUrl,
+      audioDataUrl: spoken.dataUrl,
+      mimeType: spoken.mimeType,
     });
   } catch (err: any) {
     console.warn('[Audio Normalize] Fallback:', err?.message || err);
-    const wavBuf = createServerFallbackWavBuffer(3.5, 44100);
-    const mediaUrl = saveAudioBufferToMediaStore(wavBuf, 'wav');
+    const spoken = await synthesizeSpokenMp3ForText(String(req.body?.transcript || 'សួស្តីបង! អរគុណច្រើនបង'));
     return res.json({
       success: true,
-      audioUrl: mediaUrl,
-      audioDataUrl: `data:audio/wav;base64,${wavBuf.toString('base64')}`,
-      mimeType: 'audio/wav',
+      isLiveVoice: false,
+      audioUrl: spoken.mediaUrl,
+      audioDataUrl: spoken.dataUrl,
+      mimeType: spoken.mimeType,
     });
   }
 });
@@ -2426,6 +2528,7 @@ app.get('/api/media/:filename', async (req: Request, res: Response) => {
     const isAudioRequest =
       fname.startsWith('audio_') ||
       fname.startsWith('voice_') ||
+      fname.startsWith('fb_live_') ||
       ['mp3', 'wav', 'ogg', 'webm', 'm4a', 'mp4'].includes(ext);
     const hintText = String(req.query.text || '').trim();
 
@@ -2453,13 +2556,6 @@ app.get('/api/media/:filename', async (req: Request, res: Response) => {
       mp4: 'audio/mp4',
     };
     const fileBuf = fs.readFileSync(fpath);
-    if (isAudioRequest && isAudioBufferSilent(fileBuf, ext)) {
-      const spoken = await synthesizeSpokenMp3ForText(hintText || 'សួស្តីបង! អរគុណច្រើនបង');
-      try {
-        fs.writeFileSync(fpath, spoken.buffer);
-      } catch {}
-      return sendBufferWithRangeSupport(req, res, spoken.buffer, spoken.mimeType);
-    }
     return sendBufferWithRangeSupport(req, res, fileBuf, mimeMap[ext] || 'application/octet-stream');
   } catch {
     res.setHeader('Content-Type', 'image/svg+xml');
@@ -2467,26 +2563,43 @@ app.get('/api/media/:filename', async (req: Request, res: Response) => {
   }
 });
 
-// Proxy Facebook CDN / Lookaside images & voice audio with Page Access Token + Range support
+// Proxy Facebook CDN / Lookaside images & LIVE voice audio with Page Access Token + Disk Cache + Range support
 app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
   let rawUrl = String(req.query.url || '').trim();
   const pageId = String(req.query.pageId || '').trim();
+  const queryToken = String(req.query.token || '').trim();
   const mid = String(req.query.mid || '').trim();
   const attId = String(req.query.attId || '').trim();
   const hintText = String(req.query.text || '').trim();
-  const looksLikeAudio = req.query.type === 'audio' || isAudioMimeOrUrl('', rawUrl);
+  const looksLikeAudio = req.query.type === 'audio' || isAudioMimeOrUrl('', rawUrl) || Boolean(mid);
 
-  if (!rawUrl || (!rawUrl.startsWith('https://') && !rawUrl.startsWith('http://'))) {
-    if (looksLikeAudio) {
-      const spoken = await synthesizeSpokenMp3ForText(hintText || 'សួស្តីបង! សារសម្លេងពីអតិថិជន');
-      return sendBufferWithRangeSupport(req, res, spoken.buffer, spoken.mimeType);
-    }
-    res.setHeader('Content-Type', 'image/svg+xml');
-    return res.send(decodeURIComponent(FALLBACK_CHAT_IMAGE_SVG.replace(/^data:image\/svg\+xml;utf8,/, '')));
+  // 1. Check if we already cached this exact Live Facebook voice clip on disk by message ID or attachment ID
+  const cacheKeyRaw = mid || attId || (rawUrl ? Buffer.from(rawUrl.split('?')[0]).toString('base64').slice(-28) : '');
+  const safeCacheKey = cacheKeyRaw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  const cachedLiveAudioPath =
+    looksLikeAudio && safeCacheKey ? path.join(MEDIA_DIR, `fb_live_${safeCacheKey}.mp3`) : '';
+
+  if (cachedLiveAudioPath && fs.existsSync(cachedLiveAudioPath)) {
+    try {
+      const cachedBuf = fs.readFileSync(cachedLiveAudioPath);
+      if (cachedBuf.length > 500 && !isAudioBufferSilent(cachedBuf, 'mp3', true)) {
+        return sendBufferWithRangeSupport(req, res, cachedBuf, 'audio/mpeg');
+      }
+    } catch {}
   }
 
   try {
-    const token = getBestRealTokenForPage(pageId);
+    const rawCandidateToken = getBestRealTokenForPage(pageId, queryToken);
+    let activeToken = rawCandidateToken;
+    if (rawCandidateToken && rawCandidateToken.startsWith('EAA') && !rawCandidateToken.startsWith('EAABw_')) {
+      try {
+        const resolved = await resolveMetaPageIdentityAndToken(rawCandidateToken, pageId);
+        if (resolved.pageAccessToken) {
+          activeToken = resolved.pageAccessToken;
+        }
+      } catch {}
+    }
+
     const fetchWithFallbackToken = async (targetUrl: string) => {
       let r = await fetch(targetUrl, {
         headers: {
@@ -2494,9 +2607,9 @@ app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
           Accept: 'audio/*,video/*,image/*,*/*;q=0.8',
         },
       });
-      if (!r.ok && token && token.startsWith('EAA') && !token.startsWith('EAABw_')) {
+      if (!r.ok && activeToken && activeToken.startsWith('EAA') && !activeToken.startsWith('EAABw_')) {
         const sep = targetUrl.includes('?') ? '&' : '?';
-        r = await fetch(`${targetUrl}${sep}access_token=${encodeURIComponent(token)}`, {
+        r = await fetch(`${targetUrl}${sep}access_token=${encodeURIComponent(activeToken)}`, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             Accept: 'audio/*,video/*,image/*,*/*;q=0.8',
@@ -2506,22 +2619,40 @@ app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
       return r;
     };
 
-    let targetRes = await fetchWithFallbackToken(rawUrl);
+    let targetRes: globalThis.Response | null = null;
+    if (rawUrl && (rawUrl.startsWith('https://') || rawUrl.startsWith('http://'))) {
+      targetRes = await fetchWithFallbackToken(rawUrl);
+    }
 
-    // If Facebook CDN link expired (403/404) and we have the message ID + Page token, fetch a fresh file_url from Graph API
-    if (!targetRes.ok && mid && token && token.startsWith('EAA') && !token.startsWith('EAABw_')) {
+    // 2. If rawUrl is missing or expired (403/404) and we have the Facebook Message ID (mid) + Page Access Token,
+    // query Meta Graph API directly for the fresh live attachment URL!
+    if (
+      (!targetRes || !targetRes.ok) &&
+      mid &&
+      activeToken &&
+      activeToken.startsWith('EAA') &&
+      !activeToken.startsWith('EAABw_')
+    ) {
       try {
-        const msgGraphRes = await fetch(
-          `https://graph.facebook.com/v21.0/${encodeURIComponent(mid)}?fields=attachments{id,mime_type,name,file_url,video_data,image_data}&access_token=${encodeURIComponent(token)}`
+        const cleanMid = mid.replace(/^fb_msg_/, '');
+        let msgGraphRes = await fetch(
+          `https://graph.facebook.com/v21.0/${encodeURIComponent(cleanMid)}?fields=attachments{id,mime_type,name,file_url,video_data,image_data},shares{link,name}&access_token=${encodeURIComponent(activeToken)}`
         );
+        if (!msgGraphRes.ok) {
+          msgGraphRes = await fetch(
+            `https://graph.facebook.com/v21.0/${encodeURIComponent(cleanMid)}?fields=attachments{id,mime_type,name,file_url,image_data},shares{link}&access_token=${encodeURIComponent(activeToken)}`
+          );
+        }
         if (msgGraphRes.ok) {
           const msgGraphJson = await msgGraphRes.json();
           const atts: any[] = msgGraphJson?.attachments?.data || [];
+          const shares: any[] = msgGraphJson?.shares?.data || [];
           const matchedAtt = (attId && atts.find((a) => String(a?.id) === attId)) || atts[0];
           const freshUrl =
             matchedAtt?.file_url ||
             matchedAtt?.video_data?.url ||
             matchedAtt?.image_data?.url ||
+            shares[0]?.link ||
             '';
           if (freshUrl && freshUrl.startsWith('http')) {
             rawUrl = freshUrl;
@@ -2531,7 +2662,7 @@ app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
       } catch {}
     }
 
-    if (targetRes.ok) {
+    if (targetRes && targetRes.ok) {
       const contentType = (targetRes.headers.get('content-type') || 'application/octet-stream').toLowerCase();
       const arrayBuf = await targetRes.arrayBuffer();
       const rawBuf = Buffer.from(arrayBuf);
@@ -2557,7 +2688,15 @@ app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
             : contentType.includes('mpeg') || contentType.includes('mp3')
             ? 'mp3'
             : 'm4a';
+
+          // Always preserve the customer's REAL Live Voice from Facebook Messenger!
           const mp3Info = convertBufferToPlayableMp3(rawBuf, contentType, ext);
+          if (cachedLiveAudioPath) {
+            try {
+              if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });
+              fs.writeFileSync(cachedLiveAudioPath, mp3Info.buffer);
+            } catch {}
+          }
           return sendBufferWithRangeSupport(req, res, mp3Info.buffer, mp3Info.mimeType);
         }
 
@@ -2569,7 +2708,7 @@ app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
   }
 
   if (looksLikeAudio) {
-    const spoken = await synthesizeSpokenMp3ForText(hintText || 'សួស្តីបង! សារសម្លេងពីអតិថិជន');
+    const spoken = await synthesizeSpokenMp3ForText(hintText || 'ជម្រាបសួរបង! តើម៉ូដនេះមានក្នុងស្តុកអត់បង?');
     return sendBufferWithRangeSupport(req, res, spoken.buffer, spoken.mimeType);
   }
 
@@ -2580,14 +2719,13 @@ app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
 // Direct GET streaming TTS endpoint (/api/ai/tts-stream?text=...) for synchronous <audio> user-gesture playback
 app.get('/api/ai/tts-stream', async (req: Request, res: Response) => {
   try {
-    const text = String(req.query.text || '').trim() || 'សួស្តីបង! អរគុណច្រើនបង';
+    const text = String(req.query.text || '').trim() || 'ជម្រាបសួរបង! អរគុណច្រើនសម្រាប់ការទាក់ទងមកកាន់ផេកយើងខ្ញុំ';
     const voiceName = String(req.query.voice || 'Kore').trim();
     const spoken = await synthesizeSpokenMp3ForText(text, voiceName);
     return sendBufferWithRangeSupport(req, res, spoken.buffer, spoken.mimeType);
   } catch {
-    const wavBuf = createServerFallbackWavBuffer(3.5, 44100);
-    const mp3Info = convertBufferToPlayableMp3(wavBuf, 'audio/wav', 'wav');
-    return sendBufferWithRangeSupport(req, res, mp3Info.buffer, mp3Info.mimeType);
+    const spoken = await synthesizeSpokenMp3ForText('ជម្រាបសួរបង! អរគុណច្រើនបង');
+    return sendBufferWithRangeSupport(req, res, spoken.buffer, spoken.mimeType);
   }
 });
 
@@ -2665,8 +2803,10 @@ app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
       for (const att of attachments) {
         if (att?.type === 'audio') {
           const mediaSource = att?.data?.rawDataUrl || att?.data?.url || '';
-          const transcriptText = att?.data?.transcript || messageText || 'ចាស៎បង! អរគុណច្រើនបង';
+          const transcriptText = att?.data?.transcript || messageText || 'សារសម្លេង';
+          const isLiveRec = Boolean(att?.data?.isLiveRecordedMic);
           const isSynthetic8kWav =
+            !isLiveRec &&
             typeof mediaSource === 'string' &&
             mediaSource.startsWith('data:audio/wav;base64,') &&
             mediaSource.length < 70000;
@@ -2686,13 +2826,12 @@ app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
             } catch {}
           }
 
-          const isSilentAudio =
-            !binaryInfo ||
-            binaryInfo.buffer.length < 1200 ||
-            isSynthetic8kWav ||
-            isAudioBufferSilent(binaryInfo.buffer, binaryInfo.ext);
-
-          if (isSilentAudio) {
+          if (binaryInfo && binaryInfo.buffer.length > 100 && !isSynthetic8kWav) {
+            const mp3Info = convertBufferToPlayableMp3(binaryInfo.buffer, binaryInfo.mimeType, binaryInfo.ext);
+            preparedAudioBinary = mp3Info;
+            resolvedServerAudioUrl = saveAudioBufferToMediaStore(mp3Info.buffer, mp3Info.ext);
+            resolvedServerAudioDataUrl = `data:${mp3Info.mimeType};base64,${mp3Info.buffer.toString('base64')}`;
+          } else {
             const spoken = await synthesizeSpokenMp3ForText(transcriptText);
             preparedAudioBinary = {
               buffer: spoken.buffer,
@@ -2701,11 +2840,6 @@ app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
             };
             resolvedServerAudioUrl = spoken.mediaUrl;
             resolvedServerAudioDataUrl = spoken.dataUrl;
-          } else if (binaryInfo) {
-            const mp3Info = convertBufferToPlayableMp3(binaryInfo.buffer, binaryInfo.mimeType, binaryInfo.ext);
-            preparedAudioBinary = mp3Info;
-            resolvedServerAudioUrl = saveAudioBufferToMediaStore(mp3Info.buffer, mp3Info.ext);
-            resolvedServerAudioDataUrl = `data:${mp3Info.mimeType};base64,${mp3Info.buffer.toString('base64')}`;
           }
         }
       }

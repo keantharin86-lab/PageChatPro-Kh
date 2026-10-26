@@ -82,42 +82,11 @@ const WIDGET_FALLBACK_IMAGE_SVG =
     </svg>`
   );
 
-function createWidgetWavDataUrl(durationSec = 3): string {
-  try {
-    const sampleRate = 8000;
-    const numSamples = Math.max(1, Math.floor(sampleRate * durationSec));
-    const buffer = new ArrayBuffer(44 + numSamples * 2);
-    const view = new DataView(buffer);
-    const writeStr = (offset: number, str: string) => {
-      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-    };
-    writeStr(0, 'RIFF');
-    view.setUint32(4, 36 + numSamples * 2, true);
-    writeStr(8, 'WAVE');
-    writeStr(12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeStr(36, 'data');
-    view.setUint32(40, numSamples * 2, true);
-    for (let i = 0; i < numSamples; i++) {
-      const t = i / sampleRate;
-      const env = Math.sin(Math.min(1, t * 6) * (Math.PI / 2)) * Math.max(0, 1 - t / durationSec);
-      const freq = 220 + 40 * Math.sin(2 * Math.PI * 2 * t);
-      const s = Math.sin(2 * Math.PI * freq * t) * env * 0.6;
-      view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, s)) * 12000, true);
-    }
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    return `data:audio/wav;base64,${btoa(binary)}`;
-  } catch {
-    return '';
-  }
+function createWidgetWavDataUrl(_durationSec = 3, customSpokenText?: string): string {
+  const clean =
+    (customSpokenText || '').trim() ||
+    'សួស្តីបង! ម៉ូដថ្មីនេះនៅមានក្នុងស្តុកអត់បង? តម្លៃប៉ុន្មានដែរ?';
+  return `/api/ai/tts-stream?v=3&text=${encodeURIComponent(clean)}`;
 }
 
 interface CustomerMessengerWidgetProps {
@@ -238,13 +207,22 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
 
     setPlayingWidgetAudioId(msgId);
 
-    const cleanText =
-      (transcriptText || '')
-        .replace(/🎤\s*\[?សារសម្លេង[^\]]*\]?:?\s*/gi, '')
-        .replace(/^["']|["']$/g, '')
-        .trim() || 'សួស្តីបង! អរគុណច្រើនបង';
+    let cleanText = (transcriptText || '')
+      .replace(/🎤\s*\[?សារសម្លេង[^\]]*\]?:?\s*/gi, '')
+      .replace(/^["']|["']$/g, '')
+      .trim();
 
-    const ttsStreamUrl = `/api/ai/tts-stream?text=${encodeURIComponent(cleanText)}`;
+    if (
+      !cleanText ||
+      cleanText === 'សារសម្លេងពីអតិថិជន' ||
+      cleanText === 'សួស្តីបង! សារសម្លេងពីអតិថិជន' ||
+      cleanText === 'ចាស៎បង! សារសម្លេងឆ្លើយតប'
+    ) {
+      cleanText = 'សួស្តីបង! ម៉ូដថ្មីនេះនៅមានក្នុងស្តុកអត់បង? ហើយតម្លៃប៉ុន្មានដែរ?';
+    }
+
+    const cacheBuster = Date.now();
+    const ttsStreamUrl = `/api/ai/tts-stream?v=3&_cb=${cacheBuster}&text=${encodeURIComponent(cleanText)}`;
 
     // Reuse or create HTMLAudioElement synchronously inside the click gesture
     const audio = widgetAudioElementsRef.current[msgId] || new Audio();
@@ -276,7 +254,7 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
       }
       try {
         audio.onerror = null;
-        audio.src = createWidgetWavDataUrl(3.5);
+        audio.src = `/api/media/default_spoken_kh.mp3?v=3&_cb=${Date.now()}`;
         audio.play().catch(() => setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev)));
       } catch {
         setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
@@ -284,30 +262,36 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
     };
 
     const trimmedUrl = (rawAudUrl || '').trim();
-    const isShortSyntheticWav =
-      !trimmedUrl || (trimmedUrl.startsWith('data:audio/wav;base64,') && trimmedUrl.length < 75000);
+    const isSyntheticOrDataWav = !trimmedUrl || trimmedUrl.startsWith('data:audio/');
 
     let playableSrc = trimmedUrl;
-    if (isShortSyntheticWav) {
+    if (isSyntheticOrDataWav) {
       playableSrc = ttsStreamUrl;
       fallbackStage = 1;
     } else if (playableSrc.startsWith('/api/facebook/media-proxy')) {
+      const sep = playableSrc.includes('?') ? '&' : '?';
+      playableSrc = `${playableSrc}${sep}v=3&_cb=${cacheBuster}`;
       if (!playableSrc.includes('type=audio')) {
-        playableSrc += `${playableSrc.includes('?') ? '&' : '?'}type=audio`;
+        playableSrc += '&type=audio';
       }
       if (!playableSrc.includes('text=')) {
         playableSrc += `&text=${encodeURIComponent(cleanText)}`;
       }
     } else if (playableSrc.startsWith('/api/media/')) {
+      const sep = playableSrc.includes('?') ? '&' : '?';
+      playableSrc = `${playableSrc}${sep}v=3&_cb=${cacheBuster}`;
       if (!playableSrc.includes('text=')) {
-        playableSrc += `${playableSrc.includes('?') ? '&' : '?'}text=${encodeURIComponent(cleanText)}`;
+        playableSrc += `&text=${encodeURIComponent(cleanText)}`;
       }
+    } else if (playableSrc.startsWith('/api/ai/tts-stream')) {
+      const sep = playableSrc.includes('?') ? '&' : '?';
+      playableSrc = `${playableSrc}${sep}v=3&_cb=${cacheBuster}`;
     } else if (
       playableSrc.startsWith('http') &&
       !playableSrc.includes(window.location.host) &&
       !playableSrc.includes('/api/facebook/media-proxy')
     ) {
-      playableSrc = `/api/facebook/media-proxy?type=audio&url=${encodeURIComponent(playableSrc)}&text=${encodeURIComponent(cleanText)}`;
+      playableSrc = `/api/facebook/media-proxy?v=3&_cb=${cacheBuster}&type=audio&url=${encodeURIComponent(playableSrc)}&text=${encodeURIComponent(cleanText)}`;
     }
 
     audio.onended = () => {
@@ -578,12 +562,12 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
         widgetMediaRecorderRef.current.stop();
       } else {
         const durSec = Math.max(2, widgetRecordingSeconds || 3);
-        const wavUrl = createWidgetWavDataUrl(durSec);
         const voiceText =
           widgetLiveTranscriptRef.current.trim() ||
           widgetLiveTranscript.trim() ||
           customerInput.trim() ||
-          'សួស្តីបង! សារសម្លេងពីអតិថិជន';
+          'សួស្តីបង! ម៉ូដថ្មីនេះនៅមានក្នុងស្តុកអត់បង? តម្លៃប៉ុន្មានដែរ?';
+        const wavUrl = createWidgetWavDataUrl(durSec, voiceText);
         onSendCustomerMessageToPage(
           `🎤 [សារសម្លេង Voice]: "${voiceText}"`,
           sendAsNewCustomer,
@@ -595,6 +579,7 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
                 url: wavUrl,
                 duration: `0:${String(durSec).padStart(2, '0')}`,
                 transcript: voiceText,
+                isRealVoiceV3: true,
               },
             },
           ]

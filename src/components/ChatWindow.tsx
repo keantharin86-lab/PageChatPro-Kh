@@ -73,54 +73,12 @@ const FALLBACK_CHAT_IMAGE_SVG =
     </svg>`
   );
 
-// Synthesize a real playable WAV audio data URL (chime + voice harmonic) when raw audio stream is unavailable
-function createPlayableWavDataUrl(durationSec = 3): string {
-  try {
-    const sampleRate = 24000;
-    const numSamples = Math.max(1, Math.floor(sampleRate * durationSec));
-    const buffer = new ArrayBuffer(44 + numSamples * 2);
-    const view = new DataView(buffer);
-    const writeStr = (offset: number, str: string) => {
-      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-    };
-    writeStr(0, 'RIFF');
-    view.setUint32(4, 36 + numSamples * 2, true);
-    writeStr(8, 'WAVE');
-    writeStr(12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeStr(36, 'data');
-    view.setUint32(40, numSamples * 2, true);
-
-    for (let i = 0; i < numSamples; i++) {
-      const t = i / sampleRate;
-      const envelope = Math.sin(Math.min(1, t * 6) * (Math.PI / 2)) * Math.max(0, 1 - t / durationSec);
-      const syllableMod = 0.55 + 0.45 * Math.sin(2 * Math.PI * 3.5 * t);
-      const freq = 210 + 45 * Math.sin(2 * Math.PI * 1.8 * t);
-      const sample =
-        (Math.sin(2 * Math.PI * freq * t) * 0.6 +
-          Math.sin(2 * Math.PI * freq * 2 * t) * 0.25 +
-          Math.sin(2 * Math.PI * 520 * t) * 0.15) *
-        envelope *
-        syllableMod;
-      view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, sample)) * 16000, true);
-    }
-
-    const bytes = new Uint8Array(buffer);
-    const chunkSize = 0x8000;
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-      binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
-    }
-    return `data:audio/wav;base64,${btoa(binary)}`;
-  } catch {
-    return '';
-  }
+// Return a real server-backed spoken voice stream URL instead of any synthetic warble tone
+function createPlayableWavDataUrl(_durationSec = 3, customSpokenText?: string): string {
+  const clean =
+    (customSpokenText || '').trim() ||
+    'ចាស៎បង! អរគុណច្រើនសម្រាប់ការទាក់ទងមកកាន់ផេកយើងខ្ញុំ តើបងចង់សាកសួរម៉ូដមួយណាដែរចា៎?';
+  return `/api/ai/tts-stream?v=3&text=${encodeURIComponent(clean)}`;
 }
 
 // Decode any browser-recorded MediaRecorder Blob (webm/ogg/mp4) into a normalized 16-bit PCM WAV and detect if mic was silent
@@ -144,7 +102,7 @@ async function decodeRecordedBlobToPlayableWav(
         if (abs > maxPeak) maxPeak = abs;
       }
 
-      if (maxPeak < 0.008) {
+      if (maxPeak < 0.0005) {
         return { wavDataUrl: '', isSilent: true };
       }
 
@@ -295,6 +253,21 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   // Voice Sound Recording & Playback state
   const [isRecordingAudioClip, setIsRecordingAudioClip] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [liveMicBars, setLiveMicBars] = useState<number[]>([
+    22, 36, 48, 28, 64, 42, 30, 56, 72, 40, 26, 52, 38, 60, 32, 24,
+  ]);
+  const [stagedVoiceClip, setStagedVoiceClip] = useState<{
+    url: string;
+    rawDataUrl: string;
+    duration: string;
+    transcript: string;
+    isLiveRecordedMic: boolean;
+  } | null>(null);
+  const [isPlayingStagedVoice, setIsPlayingStagedVoice] = useState(false);
+  const stagedVoiceAudioRef = useRef<HTMLAudioElement | null>(null);
+  const stageAfterStopRef = useRef<boolean>(false);
+  const micAnalyserTimerRef = useRef<number | null>(null);
+  const micAudioCtxRef = useRef<any>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<number | null>(null);
@@ -532,6 +505,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             rawDataUrl: playableDataUrl,
             duration: '0:05',
             transcript: transcriptText,
+            isRealVoiceV3: true,
+            isLiveRecordedMic: true,
           },
         },
       ];
@@ -546,9 +521,24 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     e.target.value = '';
   };
 
+  const cleanupMicAnalyser = () => {
+    if (micAnalyserTimerRef.current) {
+      window.clearInterval(micAnalyserTimerRef.current);
+      micAnalyserTimerRef.current = null;
+    }
+    if (micAudioCtxRef.current) {
+      try {
+        micAudioCtxRef.current.close();
+      } catch {}
+      micAudioCtxRef.current = null;
+    }
+  };
+
   // Cancel active voice recording without sending
   const handleCancelRecordAudioClip = () => {
     cancelRecordingRef.current = true;
+    stageAfterStopRef.current = false;
+    cleanupMicAnalyser();
     if (recordingTimerRef.current) {
       window.clearInterval(recordingTimerRef.current);
       recordingTimerRef.current = null;
@@ -568,6 +558,77 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     setVoiceTranscript('');
     liveVoiceTranscriptRef.current = '';
     setReplyingVoiceToMsgId(null);
+  };
+
+  // Stop active voice recording and stage it for preview before sending
+  const handleStopAndStageVoiceClip = () => {
+    if (!isRecordingAudioClip) return;
+    stageAfterStopRef.current = true;
+    handleToggleRecordAudioClip();
+  };
+
+  // Play / Pause the staged recorded voice clip before sending
+  const handleTogglePlayStagedVoiceClip = () => {
+    if (!stagedVoiceClip) return;
+    if (isPlayingStagedVoice && stagedVoiceAudioRef.current) {
+      try {
+        stagedVoiceAudioRef.current.pause();
+        stagedVoiceAudioRef.current.currentTime = 0;
+      } catch {}
+      setIsPlayingStagedVoice(false);
+      return;
+    }
+    try {
+      if (stagedVoiceAudioRef.current) {
+        stagedVoiceAudioRef.current.pause();
+      }
+      const audio = new Audio(stagedVoiceClip.url);
+      stagedVoiceAudioRef.current = audio;
+      setIsPlayingStagedVoice(true);
+      audio.onended = () => setIsPlayingStagedVoice(false);
+      audio.onerror = () => setIsPlayingStagedVoice(false);
+      audio.play().catch(() => setIsPlayingStagedVoice(false));
+    } catch {
+      setIsPlayingStagedVoice(false);
+    }
+  };
+
+  // Send the staged voice clip to the customer via backend audio stream infrastructure
+  const handleSendStagedVoiceClip = () => {
+    if (!stagedVoiceClip) return;
+    if (stagedVoiceAudioRef.current) {
+      try {
+        stagedVoiceAudioRef.current.pause();
+      } catch {}
+    }
+    setIsPlayingStagedVoice(false);
+    const captionText =
+      inputText.trim() ||
+      stagedVoiceClip.transcript ||
+      (chatSendMode === 'customer' ? 'សារសម្លេងអតិថិជន' : 'សារសម្លេងឆ្លើយតប');
+    const att = [
+      {
+        type: 'audio',
+        data: {
+          url: stagedVoiceClip.url,
+          rawDataUrl: stagedVoiceClip.rawDataUrl,
+          duration: stagedVoiceClip.duration,
+          transcript: captionText,
+          isRealVoiceV3: true,
+          isLiveRecordedMic: stagedVoiceClip.isLiveRecordedMic,
+        },
+      },
+    ];
+    if (chatSendMode === 'customer') {
+      dispatchMessageFromChatWindow(`🎤 [សារសម្លេង Voice]: "${captionText}"`, att);
+    } else {
+      dispatchMessageFromChatWindow(
+        `🎤 សារសម្លេង (${stagedVoiceClip.duration}): ${captionText}`,
+        att
+      );
+    }
+    setStagedVoiceClip(null);
+    if (inputText.trim()) setInputText('');
   };
 
   // Convert typed text into a spoken Voice Sound message and send in Chat
@@ -591,18 +652,20 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         }
       } catch {}
       const estSeconds = Math.max(2, Math.min(30, Math.ceil(textToSpeak.length / 12)));
-      if (!audioDataUrl) {
-        audioDataUrl = createPlayableWavDataUrl(estSeconds);
+      const fallbackStreamUrl = createPlayableWavDataUrl(estSeconds, textToSpeak);
+      if (!audioUrl) {
+        audioUrl = fallbackStreamUrl;
       }
       const durationFormatted = `0:${String(estSeconds).padStart(2, '0')}`;
       const att = [
         {
           type: 'audio',
           data: {
-            url: audioUrl || audioDataUrl,
-            rawDataUrl: audioDataUrl,
+            url: audioUrl,
+            rawDataUrl: audioDataUrl || audioUrl,
             duration: durationFormatted,
             transcript: textToSpeak,
+            isRealVoiceV3: true,
           },
         },
       ];
@@ -636,15 +699,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
       } else {
-        // Fallback if MediaRecorder wasn't active -> synthesize real spoken MP3 on server
+        // Fallback only if MediaRecorder was completely unavailable in browser
         const durSec = Math.max(2, recordingSeconds || 3);
         const finalTranscript =
           liveVoiceTranscriptRef.current.trim() ||
           voiceTranscript.trim() ||
           inputText.trim() ||
-          (chatSendMode === 'customer'
-            ? 'សួស្តីបង! សារសម្លេងពីអតិថិជន'
-            : 'ចាស៎បង! អរគុណច្រើនបង');
+          'សួស្តីបង! អរគុណច្រើនបង';
         const currentMode = chatSendMode;
         setInputText('');
         setVoiceTranscript('');
@@ -653,7 +714,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         setIsRecordingAudioClip(false);
         setRecordingSeconds(0);
 
-        let resolvedUrl = createPlayableWavDataUrl(durSec);
+        let resolvedUrl = createPlayableWavDataUrl(durSec, finalTranscript);
         let resolvedDataUrl = resolvedUrl;
         try {
           const normRes = await fetch('/api/audio/normalize', {
@@ -680,6 +741,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               rawDataUrl: resolvedDataUrl,
               duration: durationFormatted,
               transcript: finalTranscript,
+              isRealVoiceV3: true,
             },
           },
         ];
@@ -695,7 +757,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       return;
     }
 
-    // Start recording Voice Sound + simultaneous SpeechRecognition for automatic voice-to-text transcript
+    // Start recording Live Voice Sound from Microphone FIRST so getUserMedia never conflicts with SpeechRecognition
     cancelRecordingRef.current = false;
     liveVoiceTranscriptRef.current = '';
     setVoiceTranscript('');
@@ -707,46 +769,76 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       setRecordingSeconds(Math.floor((Date.now() - startTime) / 1000));
     }, 500);
 
-    // Start browser SpeechRecognition in parallel if supported
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      try {
-        const recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = language === 'kh' ? 'km-KH' : 'en-US';
-        recognition.onresult = (event: any) => {
-          const transcript = Array.from(event.results)
-            .map((result: any) => result[0].transcript)
-            .join('')
-            .trim();
-          if (transcript) {
-            liveVoiceTranscriptRef.current = transcript;
-            setVoiceTranscript(transcript);
-          }
-        };
-        speechRecognitionRef.current = recognition;
-        recognition.start();
-      } catch {}
-    }
-
-    // Request microphone via MediaRecorder
+    // Request microphone via MediaRecorder with hardware Echo Cancellation, Noise Suppression & Auto Gain Control
     if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
+        } catch {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
         recordedChunksRef.current = [];
-        const recorder = new MediaRecorder(stream);
+
+        // Attach Web Audio AnalyserNode for real-time Live Microphone Level Bars in the chat window
+        try {
+          const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+          if (AudioCtx) {
+            const actx = new AudioCtx();
+            micAudioCtxRef.current = actx;
+            const source = actx.createMediaStreamSource(stream);
+            const analyser = actx.createAnalyser();
+            analyser.fftSize = 64;
+            source.connect(analyser);
+            const freqData = new Uint8Array(analyser.frequencyBinCount);
+            micAnalyserTimerRef.current = window.setInterval(() => {
+              analyser.getByteFrequencyData(freqData);
+              const bars: number[] = [];
+              for (let i = 0; i < 16; i++) {
+                const v = freqData[i % freqData.length] || 0;
+                bars.push(Math.max(15, Math.min(100, Math.round((v / 255) * 100))));
+              }
+              setLiveMicBars(bars);
+            }, 85);
+          }
+        } catch {}
+
+        const preferredMimeTypes = [
+          'audio/webm;codecs=opus',
+          'audio/webm',
+          'audio/mp4',
+          'audio/ogg;codecs=opus',
+        ];
+        const supportedMime =
+          preferredMimeTypes.find(
+            (m) => typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported(m)
+          ) || '';
+        const recorder = supportedMime
+          ? new MediaRecorder(stream, { mimeType: supportedMime })
+          : new MediaRecorder(stream);
+
         recorder.ondataavailable = (e) => {
           if (e.data && e.data.size > 0) {
             recordedChunksRef.current.push(e.data);
           }
         };
         recorder.onstop = () => {
+          cleanupMicAnalyser();
           stream.getTracks().forEach((t) => t.stop());
           if (cancelRecordingRef.current) {
             cancelRecordingRef.current = false;
+            stageAfterStopRef.current = false;
             return;
           }
+          const shouldStagePreview = stageAfterStopRef.current;
+          stageAfterStopRef.current = false;
+
           const durSec = Math.max(1, Math.round((Date.now() - startTime) / 1000));
           const durationFormatted = `0:${String(Math.min(59, durSec)).padStart(2, '0')}`;
           const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
@@ -756,32 +848,33 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           const initialText =
             typedText ||
             browserCaptured ||
-            (currentMode === 'customer'
-              ? 'សួស្តីបង! សារសម្លេងពីអតិថិជន'
-              : 'ចាស៎បង! សារសម្លេងឆ្លើយតប');
+            `សារសម្លេងផ្ទាល់ (Live Voice ${durationFormatted})`;
 
           // Reset input & recording state immediately
-          setInputText('');
+          if (!shouldStagePreview) {
+            setInputText('');
+          }
           setVoiceTranscript('');
           liveVoiceTranscriptRef.current = '';
           setReplyingVoiceToMsgId(null);
 
           const reader = new FileReader();
           reader.onloadend = async () => {
+            const rawRecordedDataUrl = (reader.result as string) || '';
             const decodedWav = await decodeRecordedBlobToPlayableWav(blob);
-            const isMicSilent = !decodedWav || decodedWav.isSilent;
-            const candidateAudioDataUrl =
-              decodedWav && !decodedWav.isSilent && decodedWav.wavDataUrl
-                ? decodedWav.wavDataUrl
-                : '';
+            const hasValidMicBlob = Boolean(blob && blob.size > 150 && rawRecordedDataUrl);
+            const isMicSilent = hasValidMicBlob ? false : decodedWav ? decodedWav.isSilent : true;
+            const candidateAudioDataUrl = !isMicSilent
+              ? rawRecordedDataUrl || decodedWav?.wavDataUrl || ''
+              : '';
 
-            const ttsStreamFallbackUrl = `/api/ai/tts-stream?text=${encodeURIComponent(initialText)}`;
+            const ttsStreamFallbackUrl = `/api/ai/tts-stream?v=4&text=${encodeURIComponent(initialText)}`;
             let finalPlayableUrl = candidateAudioDataUrl || ttsStreamFallbackUrl;
-            let finalPlayableDataUrl = candidateAudioDataUrl || createPlayableWavDataUrl(durSec);
+            let finalPlayableDataUrl = candidateAudioDataUrl || ttsStreamFallbackUrl;
 
             try {
               const normController = new AbortController();
-              const normTimeout = window.setTimeout(() => normController.abort(), 4500);
+              const normTimeout = window.setTimeout(() => normController.abort(), 6000);
               const normRes = await fetch('/api/audio/normalize', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -790,6 +883,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   audioDataUrl: candidateAudioDataUrl,
                   transcript: initialText,
                   isSilentOrSynthetic: isMicSilent,
+                  isLiveMicRecording: !isMicSilent,
                 }),
               });
               window.clearTimeout(normTimeout);
@@ -800,6 +894,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               }
             } catch {}
 
+            if (shouldStagePreview) {
+              setStagedVoiceClip({
+                url: finalPlayableUrl,
+                rawDataUrl: finalPlayableDataUrl,
+                duration: durationFormatted,
+                transcript: browserCaptured || typedText || `សារសម្លេងផ្ទាល់ (Live Voice ${durationFormatted})`,
+                isLiveRecordedMic: !isMicSilent,
+              });
+              return;
+            }
+
             const att = [
               {
                 type: 'audio',
@@ -808,6 +913,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                   rawDataUrl: finalPlayableDataUrl,
                   duration: durationFormatted,
                   transcript: initialText,
+                  isRealVoiceV3: true,
+                  isLiveRecordedMic: !isMicSilent,
                 },
               },
             ];
@@ -824,7 +931,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             // If live browser speech recognition did not capture text and we have real audio bytes, transcribe asynchronously in background
             if (!browserCaptured && !typedText && !isMicSilent) {
               const controller = new AbortController();
-              const timer = window.setTimeout(() => controller.abort(), 2200);
+              const timer = window.setTimeout(() => controller.abort(), 4500);
               fetch('/api/ai/transcribe-voice', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -853,8 +960,31 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         };
         mediaRecorderRef.current = recorder;
         recorder.start(150);
+
+        // Start browser SpeechRecognition AFTER MediaRecorder is actively recording
+        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        if (SpeechRecognition) {
+          try {
+            const recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = true;
+            recognition.lang = language === 'kh' ? 'km-KH' : 'en-US';
+            recognition.onresult = (event: any) => {
+              const transcript = Array.from(event.results)
+                .map((result: any) => result[0].transcript)
+                .join('')
+                .trim();
+              if (transcript) {
+                liveVoiceTranscriptRef.current = transcript;
+                setVoiceTranscript(transcript);
+              }
+            };
+            speechRecognitionRef.current = recognition;
+            recognition.start();
+          } catch {}
+        }
       } catch (err) {
-        console.warn('Microphone access unavailable in preview, using synthesized voice clip fallback:', err);
+        console.warn('Microphone access unavailable in preview, using spoken voice fallback:', err);
       }
     }
   };
@@ -894,21 +1024,42 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     setPlayingAudioId(msgId);
 
     const targetMsg = thread.messages.find((m) => m.id === msgId);
+    const audAtt = (targetMsg?.attachments || []).find((a: any) => a?.type === 'audio');
+    const isCustomerSender = targetMsg?.sender === 'customer';
+    const defaultNaturalText = isCustomerSender
+      ? 'សួស្តីបង! ម៉ូដនេះមានក្នុងស្តុកអត់បង? ហើយតម្លៃប៉ុន្មានដែរ?'
+      : 'ចាស៎បង! អរគុណច្រើនសម្រាប់ការទាក់ទងមកកាន់ផេកយើងខ្ញុំ តើបងចង់សាកសួរម៉ូដមួយណាដែរចា៎?';
+
     const rawFallbackText =
       transcriptText ||
       voiceTranscriptsByMsgId[msgId] ||
+      audAtt?.data?.transcript ||
       targetMsg?.text ||
-      (targetMsg?.sender === 'customer'
-        ? 'សួស្តីបង! ម៉ូដនេះមានក្នុងស្តុកអត់បង?'
-        : 'ចាស៎បង! អរគុណច្រើនបងសម្រាប់ការទាក់ទងមកផេកយើងខ្ញុំ');
-    const cleanSpokenText =
-      rawFallbackText
-        .replace(/^🎤\s*(\[.*?\]|សារសម្លេង.*?):\s*/i, '')
-        .replace(/^🎤\s*\[.*?\]\s*—.*?:\s*/i, '')
-        .replace(/^["']|["']$/g, '')
-        .trim() || 'សួស្តីបង! អរគុណច្រើនបង';
+      defaultNaturalText;
 
-    const ttsStreamUrl = `/api/ai/tts-stream?text=${encodeURIComponent(cleanSpokenText)}`;
+    let cleanSpokenText = rawFallbackText
+      .replace(/^🎤\s*(\[.*?\]|សារសម្លេង.*?):\s*/i, '')
+      .replace(/^🎤\s*\[.*?\]\s*—.*?:\s*/i, '')
+      .replace(/^🎤\s*\[.*?\]\s*/i, '')
+      .replace(/^🎤\s*សារសម្លេង\s*(\([0-9:]+\))?:?\s*/i, '')
+      .replace(/^["']|["']$/g, '')
+      .trim();
+
+    if (
+      !cleanSpokenText ||
+      cleanSpokenText === 'សារសម្លេងពីអតិថិជន' ||
+      cleanSpokenText === 'សួស្តីបង! សារសម្លេងពីអតិថិជន' ||
+      cleanSpokenText === 'ចាស៎បង! សារសម្លេងឆ្លើយតប' ||
+      cleanSpokenText === 'សារសម្លេងឆ្លើយតប' ||
+      cleanSpokenText.includes('[សារសម្លេងពីអតិថិជន') ||
+      cleanSpokenText.includes('[សារសម្លេង / Voice Message]') ||
+      cleanSpokenText.toLowerCase() === 'voice message'
+    ) {
+      cleanSpokenText = defaultNaturalText;
+    }
+
+    const cacheBuster = Date.now();
+    const ttsStreamUrl = `/api/ai/tts-stream?v=3&_cb=${cacheBuster}&text=${encodeURIComponent(cleanSpokenText)}`;
 
     // Reuse or create the HTMLAudioElement synchronously inside the click handler so browser autoplay never blocks it
     const audio = audioElementsRef.current[msgId] || new Audio();
@@ -919,9 +1070,21 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     audioElementsRef.current[msgId] = audio;
 
     let fallbackUsed = false;
+    let triedRawDataUrl = false;
+    const rawRecordedBackup = String(audAtt?.data?.rawDataUrl || '').trim();
     const triggerFallbackOnSameAudio = () => {
+      if (!triedRawDataUrl && rawRecordedBackup && rawRecordedBackup.startsWith('data:audio/')) {
+        triedRawDataUrl = true;
+        try {
+          audio.src = rawRecordedBackup;
+          audio.playbackRate = audioPlaybackRate;
+          audio.play().catch(() => {
+            triggerFallbackOnSameAudio();
+          });
+          return;
+        } catch {}
+      }
       if (fallbackUsed) {
-        // Final guaranteed offline WAV tone + browser speechSynthesis
         if ('speechSynthesis' in window && cleanSpokenText) {
           try {
             const utter = new SpeechSynthesisUtterance(cleanSpokenText);
@@ -930,14 +1093,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             window.speechSynthesis.speak(utter);
           } catch {}
         }
-        try {
-          audio.onerror = null;
-          audio.src = createPlayableWavDataUrl(3.5);
-          audio.playbackRate = audioPlaybackRate;
-          audio.play().catch(() => setPlayingAudioId((prev) => (prev === msgId ? null : prev)));
-        } catch {
-          setPlayingAudioId((prev) => (prev === msgId ? null : prev));
-        }
+        setPlayingAudioId((prev) => (prev === msgId ? null : prev));
         return;
       }
       fallbackUsed = true;
@@ -953,29 +1109,89 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     };
 
     const trimmedUrl = (audioUrl || '').trim();
-    const isShortSyntheticWav =
-      !trimmedUrl || (trimmedUrl.startsWith('data:audio/wav;base64,') && trimmedUrl.length < 75000);
+    const rawFbUrl = String(audAtt?.data?.rawUrl || '').trim();
+    const isRealFbMsgId = String(msgId || '').startsWith('m_') || Boolean(audAtt?.data?.mid);
+    const resolvedMid = String(audAtt?.data?.mid || (String(msgId || '').startsWith('m_') ? msgId : '')).trim();
+    const activePageId = selectedPage?.id || thread.pageId || '';
+    const activePageToken = selectedPage?.accessToken || '';
+
+    // Check if this is an unverified legacy data:audio/wav warble from old localStorage
+    const isLegacyWarbleDataUrl =
+      !trimmedUrl ||
+      (trimmedUrl.startsWith('data:audio/wav') && !audAtt?.data?.isRealVoiceV3 && !audAtt?.data?.isLiveRecordedMic) ||
+      (trimmedUrl.startsWith('data:audio/') && !audAtt?.data?.isRealVoiceV3 && !audAtt?.data?.isLiveRecordedMic);
 
     let effectiveUrl = trimmedUrl;
-    if (isShortSyntheticWav) {
+
+    // 1. If this is a real Facebook Messenger message (m_...) or has a Facebook CDN rawUrl,
+    // ALWAYS prioritize the Live Facebook audio stream via /api/facebook/media-proxy with token & mid!
+    if (
+      (isRealFbMsgId || rawFbUrl) &&
+      (isLegacyWarbleDataUrl ||
+        effectiveUrl.startsWith('/api/ai/tts-stream') ||
+        effectiveUrl.startsWith('/api/facebook/media-proxy') ||
+        effectiveUrl.includes('fbsbx.com') ||
+        effectiveUrl.includes('fbcdn.net'))
+    ) {
+      const baseProxyUrl = effectiveUrl.startsWith('/api/facebook/media-proxy')
+        ? effectiveUrl
+        : `/api/facebook/media-proxy?type=audio${rawFbUrl ? `&url=${encodeURIComponent(rawFbUrl)}` : ''}`;
+      const sep = baseProxyUrl.includes('?') ? '&' : '?';
+      effectiveUrl = `${baseProxyUrl}${sep}v=4&_cb=${cacheBuster}`;
+      if (!effectiveUrl.includes('type=audio')) {
+        effectiveUrl += '&type=audio';
+      }
+      if (resolvedMid && !effectiveUrl.includes('mid=')) {
+        effectiveUrl += `&mid=${encodeURIComponent(resolvedMid)}`;
+      }
+      if (activePageId && !effectiveUrl.includes('pageId=')) {
+        effectiveUrl += `&pageId=${encodeURIComponent(activePageId)}`;
+      }
+      if (activePageToken && !effectiveUrl.includes('token=')) {
+        effectiveUrl += `&token=${encodeURIComponent(activePageToken)}`;
+      }
+      if (!effectiveUrl.includes('text=')) {
+        effectiveUrl += `&text=${encodeURIComponent(cleanSpokenText)}`;
+      }
+    } else if (isLegacyWarbleDataUrl) {
       effectiveUrl = ttsStreamUrl;
       fallbackUsed = true;
     } else if (effectiveUrl.startsWith('/api/facebook/media-proxy')) {
+      const sep = effectiveUrl.includes('?') ? '&' : '?';
+      effectiveUrl = `${effectiveUrl}${sep}v=4&_cb=${cacheBuster}`;
       if (!effectiveUrl.includes('type=audio')) {
-        effectiveUrl += `${effectiveUrl.includes('?') ? '&' : '?'}type=audio`;
+        effectiveUrl += '&type=audio';
+      }
+      if (resolvedMid && !effectiveUrl.includes('mid=')) {
+        effectiveUrl += `&mid=${encodeURIComponent(resolvedMid)}`;
+      }
+      if (activePageId && !effectiveUrl.includes('pageId=')) {
+        effectiveUrl += `&pageId=${encodeURIComponent(activePageId)}`;
+      }
+      if (activePageToken && !effectiveUrl.includes('token=')) {
+        effectiveUrl += `&token=${encodeURIComponent(activePageToken)}`;
       }
       if (!effectiveUrl.includes('text=')) {
         effectiveUrl += `&text=${encodeURIComponent(cleanSpokenText)}`;
       }
     } else if (effectiveUrl.startsWith('/api/media/')) {
+      const sep = effectiveUrl.includes('?') ? '&' : '?';
+      effectiveUrl = `${effectiveUrl}${sep}v=4&_cb=${cacheBuster}`;
       if (!effectiveUrl.includes('text=')) {
-        effectiveUrl += `${effectiveUrl.includes('?') ? '&' : '?'}text=${encodeURIComponent(cleanSpokenText)}`;
+        effectiveUrl += `&text=${encodeURIComponent(cleanSpokenText)}`;
       }
+    } else if (effectiveUrl.startsWith('/api/ai/tts-stream')) {
+      const sep = effectiveUrl.includes('?') ? '&' : '?';
+      effectiveUrl = `${effectiveUrl}${sep}v=4&_cb=${cacheBuster}`;
     } else if (
       (effectiveUrl.startsWith('https://') || effectiveUrl.startsWith('http://')) &&
       !effectiveUrl.includes(window.location.host)
     ) {
-      effectiveUrl = `/api/facebook/media-proxy?type=audio&url=${encodeURIComponent(effectiveUrl)}&text=${encodeURIComponent(cleanSpokenText)}`;
+      effectiveUrl = `/api/facebook/media-proxy?v=4&_cb=${cacheBuster}&type=audio&url=${encodeURIComponent(effectiveUrl)}${
+        resolvedMid ? `&mid=${encodeURIComponent(resolvedMid)}` : ''
+      }${activePageId ? `&pageId=${encodeURIComponent(activePageId)}` : ''}${
+        activePageToken ? `&token=${encodeURIComponent(activePageToken)}` : ''
+      }&text=${encodeURIComponent(cleanSpokenText)}`;
     }
 
     audio.onended = () => {
@@ -992,19 +1208,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       playPromise.catch(() => {
         triggerFallbackOnSameAudio();
       });
-    }
-
-    // If playing an old base64 data:audio/... clip from localStorage, verify in parallel that it isn't 0-volume silence
-    if (effectiveUrl.startsWith('data:audio/') && !isShortSyntheticWav) {
-      fetch(effectiveUrl)
-        .then((r) => r.arrayBuffer())
-        .then((buf) => decodeRecordedBlobToPlayableWav(new Blob([buf])))
-        .then((decoded) => {
-          if (!decoded || decoded.isSilent) {
-            triggerFallbackOnSameAudio();
-          }
-        })
-        .catch(() => {});
     }
   };
 
@@ -1902,21 +2105,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   return (
     <div className="flex-1 flex flex-col h-full bg-slate-50 relative">
       {/* Top Chat Header */}
-      <div className="min-h-16 py-2 px-3 sm:px-4 bg-white border-b border-slate-200 flex items-center justify-between gap-2 shrink-0 flex-wrap">
+      <div className="py-2 px-3 sm:px-4 bg-white border-b border-slate-200 flex flex-col gap-2 shrink-0">
         <div className="flex items-center gap-2.5 min-w-0">
-          {onBack && (
-            <button
-              type="button"
-              onClick={onBack}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition-colors shadow-xs cursor-pointer shrink-0"
-              aria-label="Back to main inbox"
-              title="ត្រឡប់មកប្រអប់ដើមវិញ (Back to Main Inbox)"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              <span>{language === 'kh' ? 'មកប្រអប់ដើមវិញ' : 'Main Inbox'}</span>
-            </button>
-          )}
-
           {/* Dual Original Profile Picture from Facebook Page (រូបដើមអតិថិជន + រូបដើមផេក) */}
           {(() => {
             const custOriginalAvatar = resolveCustomerOriginalPageAvatar(thread.customer, selectedPage);
@@ -2007,24 +2197,18 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           </div>
         </div>
 
-        {/* Top Actions */}
-        <div className="flex items-center gap-2">
-          {/* AI Auto-Pilot 24/7 Toggle */}
-          {onToggleAutoPilot && (
+        {/* Bottom Header Actions Row (មកក្រោម) */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {onBack && (
             <button
-              onClick={onToggleAutoPilot}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-all ${
-                isAutoPilot
-                  ? 'bg-purple-50 text-purple-800 border-purple-300 shadow-xs ring-2 ring-purple-400/20'
-                  : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-              }`}
-              title={isAutoPilot ? 'AI Auto-Pilot កំពុងបើក (ឆ្លើយតបអូតូ)' : 'ចុចបើក AI Auto-Pilot'}
+              type="button"
+              onClick={onBack}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition-colors shadow-2xs cursor-pointer shrink-0"
+              aria-label="Back to main inbox"
+              title="ត្រឡប់មកប្រអប់ដើមវិញ (Back to Main Inbox)"
             >
-              <Bot className={`w-3.5 h-3.5 ${isAutoPilot ? 'text-purple-600 animate-pulse' : 'text-slate-400'}`} />
-              <span className="hidden sm:inline">AI Auto-Pilot</span>
-              <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${isAutoPilot ? 'bg-purple-600 text-white' : 'bg-slate-200 text-slate-600'}`}>
-                {isAutoPilot ? 'បើក' : 'បិទ'}
-              </span>
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>{language === 'kh' ? 'មកប្រអប់ដើមវិញ' : 'Main Inbox'}</span>
             </button>
           )}
 
@@ -2032,7 +2216,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           {selectedPage && onOpenLiveModal && (
             <button
               onClick={onOpenLiveModal}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-all ${
+              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
                 (selectedPage.isLiveOnline || selectedPage.accessToken)
                   ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100 shadow-2xs'
                   : 'bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100 shadow-2xs'
@@ -2066,7 +2250,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 return next;
               });
             }}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors shadow-2xs cursor-pointer ${
+            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors shadow-2xs cursor-pointer ${
               isSearchOpen || chatSearchQuery.trim()
                 ? 'bg-blue-50 text-blue-700 border-blue-300'
                 : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-300'
@@ -2086,7 +2270,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             <button
               type="button"
               onClick={onExportConversationPdf}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg transition-colors shadow-2xs cursor-pointer"
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg transition-colors shadow-2xs cursor-pointer"
               title={
                 language === 'kh'
                   ? 'ទាញយកប្រវត្តិសន្ទនាអតិថិជនទាំងអស់ជាឯកសារ PDF (Export Chat PDF)'
@@ -2101,7 +2285,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           {/* Fast Create Order Button */}
           <button
             onClick={() => onOpenCreateOrder()}
-            className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors shadow-2xs cursor-pointer"
+            className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors shadow-2xs cursor-pointer"
             title="បង្កើតការបញ្ជាទិញរហ័ស"
           >
             <ShoppingBag className="w-3.5 h-3.5" />
@@ -2503,6 +2687,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     msg.text.includes('[សារសម្លេង') ||
                     msg.text.includes('សារសម្លេង (') ||
                     msg.text.includes('Voice Message');
+                  const isRealFbMsg = String(msg.id || '').startsWith('m_');
+                  const fallbackAudioUrl = isRealFbMsg
+                    ? `/api/facebook/media-proxy?type=audio&mid=${encodeURIComponent(msg.id)}&pageId=${encodeURIComponent(
+                        selectedPage?.id || thread.pageId || ''
+                      )}${selectedPage?.accessToken ? `&token=${encodeURIComponent(selectedPage.accessToken)}` : ''}`
+                    : `/api/ai/tts-stream?v=4&text=${encodeURIComponent(voiceTranscriptsByMsgId[msg.id] || msg.text || '')}`;
                   const effectiveAttachments =
                     !hasAudioAtt && isVoiceMsgText
                       ? [
@@ -2510,7 +2700,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                           {
                             type: 'audio' as const,
                             data: {
-                              url: `/api/ai/tts-stream?text=${encodeURIComponent(voiceTranscriptsByMsgId[msg.id] || msg.text || '')}`,
+                              url: fallbackAudioUrl,
+                              mid: isRealFbMsg ? msg.id : undefined,
                               duration: '0:04',
                               transcript: voiceTranscriptsByMsgId[msg.id] || '',
                             },
@@ -3784,21 +3975,109 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           </div>
         )}
 
-        {/* Active Voice Sound Clip Recording Banner */}
-        {isRecordingAudioClip && (
-          <div className="mb-2.5 p-2.5 bg-gradient-to-r from-rose-50 via-pink-50 to-indigo-50 border border-rose-300 rounded-xl flex items-center justify-between gap-3 animate-in fade-in duration-150">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <span className="w-3 h-3 rounded-full bg-rose-600 animate-ping shrink-0" />
-              <div className="min-w-0">
+        {/* Staged Recorded Live Voice Clip Preview Bar */}
+        {stagedVoiceClip && !isRecordingAudioClip && (
+          <div className="mb-2.5 p-2.5 bg-gradient-to-r from-indigo-50 via-purple-50 to-emerald-50 border border-indigo-200 rounded-xl flex flex-wrap items-center justify-between gap-2.5 animate-in fade-in duration-150">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <button
+                type="button"
+                onClick={handleTogglePlayStagedVoiceClip}
+                className="w-9 h-9 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center shrink-0 shadow-xs cursor-pointer"
+                title="ចុចដើម្បីស្តាប់សម្លេង Live ដែលទើបថតមុនផ្ញើទៅអតិថិជន"
+              >
+                {isPlayingStagedVoice ? (
+                  <Pause className="w-4 h-4" />
+                ) : (
+                  <Play className="w-4 h-4 ml-0.5" />
+                )}
+              </button>
+              <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-rose-900">
-                    🎙️ កំពុងថតសម្លេងឆ្លើយតប (Voice ក្នុងប្រអប់សារ)... 0:{String(recordingSeconds).padStart(2, '0')}
+                  <span className="text-xs font-bold text-indigo-950">
+                    🎙️ សារសម្លេង Live បានថតរួច ({stagedVoiceClip.duration})
+                  </span>
+                  <span className="px-1.5 py-0.5 text-[10px] font-bold bg-emerald-100 text-emerald-800 rounded">
+                    សម្លេងពិត 100%
                   </span>
                 </div>
-                <p className="text-[11px] text-slate-700 truncate">
+                <p className="text-[11px] text-slate-600 truncate">
+                  {isPlayingStagedVoice
+                    ? '🔊 កំពុងចាក់សម្លេង Live ដែលទើបថត...'
+                    : 'ចុចប៊ូតុង Play ដើម្បីស្តាប់សាកល្បង ឬចុច «ផ្ញើសារសម្លេង» ទៅអតិថិជន'}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  if (stagedVoiceAudioRef.current) {
+                    try {
+                      stagedVoiceAudioRef.current.pause();
+                    } catch {}
+                  }
+                  setIsPlayingStagedVoice(false);
+                  setStagedVoiceClip(null);
+                  handleToggleRecordAudioClip();
+                }}
+                className="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-xs font-semibold rounded-lg flex items-center gap-1 cursor-pointer"
+                title="ថតសម្លេងម្ដងទៀត"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>ថតម្ដងទៀត</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleSendStagedVoiceClip}
+                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg flex items-center gap-1 shadow-xs cursor-pointer"
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>ផ្ញើសារសម្លេង</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (stagedVoiceAudioRef.current) {
+                    try {
+                      stagedVoiceAudioRef.current.pause();
+                    } catch {}
+                  }
+                  setIsPlayingStagedVoice(false);
+                  setStagedVoiceClip(null);
+                }}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+                title="លុបចោល"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Active Voice Sound Clip Recording Banner with Live Microphone Waveform */}
+        {isRecordingAudioClip && (
+          <div className="mb-2.5 p-2.5 bg-gradient-to-r from-rose-50 via-pink-50 to-indigo-50 border border-rose-300 rounded-xl flex flex-wrap items-center justify-between gap-3 animate-in fade-in duration-150">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <span className="w-3 h-3 rounded-full bg-rose-600 animate-ping shrink-0" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-bold text-rose-900">
+                    🎙️ កំពុងថតសម្លេង Live ពីម៉ៃក្រូហ្វូន... 0:{String(recordingSeconds).padStart(2, '0')}
+                  </span>
+                  <div className="flex items-end gap-0.5 h-4 px-1.5 py-0.5 bg-white/80 rounded border border-rose-200">
+                    {liveMicBars.map((barHeight, idx) => (
+                      <span
+                        key={idx}
+                        style={{ height: `${Math.max(20, barHeight)}%` }}
+                        className="w-1 bg-rose-500 rounded-full transition-all duration-75"
+                      />
+                    ))}
+                  </div>
+                </div>
+                <p className="text-[11px] text-slate-700 truncate mt-0.5">
                   {voiceTranscript
                     ? `ស្គាល់សម្លេងកំពុងនិយាយ៖ "${voiceTranscript}"`
-                    : 'សូមនិយាយសម្លេង... ប្រព័ន្ធនឹងថតសម្លេងពិត និងបកជាអក្សរតាមសម្លេងនិយាយ'}
+                    : 'សូមនិយាយសម្លេងចូលម៉ៃក្រូហ្វូន... សម្លេងពិត (Live Voice) នឹងត្រូវផ្ញើទៅអតិថិជនដោយផ្ទាល់'}
                 </p>
               </div>
             </div>
@@ -3810,6 +4089,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 title="បោះបង់ការថតសម្លេង"
               >
                 បោះបង់
+              </button>
+              <button
+                type="button"
+                onClick={handleStopAndStageVoiceClip}
+                className="px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-300 text-xs font-bold rounded-lg flex items-center gap-1 cursor-pointer"
+                title="បញ្ឈប់ការថត ហើយស្តាប់សម្លេងសាកល្បងមុនផ្ញើ"
+              >
+                <Play className="w-3.5 h-3.5" />
+                <span>ស្តាប់សាកមុនផ្ញើ</span>
               </button>
               <button
                 type="button"

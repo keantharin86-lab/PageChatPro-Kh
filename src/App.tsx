@@ -307,10 +307,20 @@ const mergeChatMessagesList = (primaryMsgs: ChatMessage[] = [], secondaryMsgs: C
       const existing = msgMap.get(m.id)!;
       const mergedAttachments = (existing.attachments || m.attachments || []).map((att: any, idx: number) => {
         const otherAtt = m.attachments?.[idx] || existing.attachments?.[idx];
+        const attUrl = String(att?.data?.url || '').trim();
+        const otherUrl = String(otherAtt?.data?.url || '').trim();
+        const isAttTts = attUrl.startsWith('/api/ai/tts-stream');
+        const isOtherLive =
+          otherUrl.startsWith('/api/facebook/media-proxy') ||
+          otherUrl.startsWith('/api/media/') ||
+          Boolean(otherAtt?.data?.isLiveFacebookAudio) ||
+          Boolean(otherAtt?.data?.isLiveRecordedMic);
         const bestUrl =
-          att?.data?.url && att.data.url.length > 0
-            ? att.data.url
-            : otherAtt?.data?.url || '';
+          isAttTts && isOtherLive
+            ? otherUrl
+            : attUrl.length > 0
+            ? attUrl
+            : otherUrl;
         const bestTranscript =
           att?.data?.transcript || otherAtt?.data?.transcript || '';
         return {
@@ -320,6 +330,7 @@ const mergeChatMessagesList = (primaryMsgs: ChatMessage[] = [], secondaryMsgs: C
             ...(otherAtt?.data || {}),
             ...(att?.data || {}),
             url: bestUrl,
+            ...(isOtherLive ? { rawDataUrl: otherAtt?.data?.rawDataUrl || bestUrl } : {}),
             ...(bestTranscript ? { transcript: bestTranscript } : {}),
           },
         };
@@ -455,42 +466,11 @@ const getThreadsContentSignature = (list: ChatThread[]): string =>
     )
     .join('|');
 
-const createPlayableReplyWavDataUrl = (durationSec = 3): string => {
-  try {
-    const sampleRate = 8000;
-    const numSamples = Math.max(1, Math.floor(sampleRate * durationSec));
-    const buffer = new ArrayBuffer(44 + numSamples * 2);
-    const view = new DataView(buffer);
-    const writeStr = (offset: number, str: string) => {
-      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-    };
-    writeStr(0, 'RIFF');
-    view.setUint32(4, 36 + numSamples * 2, true);
-    writeStr(8, 'WAVE');
-    writeStr(12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeStr(36, 'data');
-    view.setUint32(40, numSamples * 2, true);
-    for (let i = 0; i < numSamples; i++) {
-      const t = i / sampleRate;
-      const env = Math.sin(Math.min(1, t * 6) * (Math.PI / 2)) * Math.max(0, 1 - t / durationSec);
-      const freq = 240 + 45 * Math.sin(2 * Math.PI * 2.5 * t);
-      const s = Math.sin(2 * Math.PI * freq * t) * env * 0.6;
-      view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, s)) * 12000, true);
-    }
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    return `data:audio/wav;base64,${btoa(binary)}`;
-  } catch {
-    return '';
-  }
+const createPlayableReplyWavDataUrl = (_durationSec = 3, customSpokenText?: string): string => {
+  const clean =
+    (customSpokenText || '').trim() ||
+    'សួស្តីបង! ម៉ូដថ្មីនេះនៅមានក្នុងស្តុកអត់បង? តម្លៃប៉ុន្មានដែរ?';
+  return `/api/ai/tts-stream?v=3&text=${encodeURIComponent(clean)}`;
 };
 
 
@@ -533,12 +513,71 @@ const normalizeThreadLive = (t: ChatThread): ChatThread => {
       platform: t.customer.platform || 'messenger',
     },
     messages: sortChatMessagesChronologically(
-      (t.messages || []).map((m, idx) => ({
-        ...m,
-        createdAtMs: extractMessageTimestampMs(m, idx),
-        deliveryStatus: m.deliveryStatus === 'sent_local' || !m.deliveryStatus ? 'sent_meta' : m.deliveryStatus,
-        isLiveMeta: true,
-      }))
+      (t.messages || []).map((m, idx) => {
+        const sanitizedAttachments = Array.isArray(m.attachments)
+          ? m.attachments.map((att) => {
+              if (att?.type === 'audio' && att?.data) {
+                const rawUrl = String(att.data.url || '').trim();
+                const isRealFbMsgId = String(m.id || '').startsWith('m_');
+                if (isRealFbMsgId && (!rawUrl || rawUrl.startsWith('/api/ai/tts-stream'))) {
+                  const liveProxyUrl = `/api/facebook/media-proxy?mid=${encodeURIComponent(m.id)}&pageId=${encodeURIComponent(t.pageId || '')}`;
+                  return {
+                    ...att,
+                    data: {
+                      ...att.data,
+                      url: liveProxyUrl,
+                      rawDataUrl: liveProxyUrl,
+                      mid: m.id,
+                      isLiveFacebookAudio: true,
+                    },
+                  };
+                }
+                const isLiveMicOrMedia =
+                  Boolean(att.data.isLiveRecordedMic) ||
+                  Boolean(att.data.isLiveFacebookAudio) ||
+                  rawUrl.startsWith('/api/facebook/media-proxy') ||
+                  rawUrl.startsWith('/api/media/') ||
+                  rawUrl.startsWith('blob:');
+                const isLegacyWarbleDataUrl =
+                  !isLiveMicOrMedia &&
+                  (!rawUrl ||
+                    rawUrl.startsWith('data:audio/wav') ||
+                    (rawUrl.startsWith('data:audio/') && !att.data.isRealVoiceV3));
+                if (isLegacyWarbleDataUrl) {
+                  const defaultText =
+                    m.sender === 'customer'
+                      ? 'សួស្តីបង! ម៉ូដនេះមានក្នុងស្តុកអត់បង? តម្លៃប៉ុន្មានដែរ?'
+                      : 'ចាស៎បង! អរគុណច្រើនសម្រាប់ការទាក់ទងមកកាន់ផេកយើងខ្ញុំ';
+                  const spoken =
+                    String(att.data.transcript || m.text || defaultText)
+                      .replace(/^🎤\s*(\[.*?\]|សារសម្លេង.*?):\s*/i, '')
+                      .replace(/^🎤\s*\[.*?\]\s*/i, '')
+                      .replace(/^["']|["']$/g, '')
+                      .trim() || defaultText;
+                  const cleanStreamUrl = `/api/ai/tts-stream?v=3&text=${encodeURIComponent(spoken)}`;
+                  return {
+                    ...att,
+                    data: {
+                      ...att.data,
+                      url: cleanStreamUrl,
+                      rawDataUrl: cleanStreamUrl,
+                    },
+                  };
+                }
+              }
+              return att;
+            })
+          : m.attachments;
+
+        return {
+          ...m,
+          createdAtMs: extractMessageTimestampMs(m, idx),
+          deliveryStatus:
+            m.deliveryStatus === 'sent_local' || !m.deliveryStatus ? 'sent_meta' : m.deliveryStatus,
+          isLiveMeta: true,
+          attachments: sanitizedAttachments,
+        };
+      })
     ),
   };
 };
@@ -1490,13 +1529,27 @@ export default function App() {
             let newestAddedCustomerMsg: ChatMessage | null = null;
 
             sortedNewGraphMessages.forEach((gm) => {
-              const alreadyExists = candidateMerged.some((em) => {
-                if (em.id === gm.id) return true;
-                if (gm.sender === 'admin' && (em.sender === 'admin' || em.sender === 'bot')) {
-                  if (em.text.trim() === gm.text.trim()) return true;
+              let alreadyExists = false;
+              for (let i = 0; i < candidateMerged.length; i++) {
+                const em = candidateMerged[i];
+                if (em.id === gm.id) {
+                  alreadyExists = true;
+                  if (gm.attachments && gm.attachments.length > 0) {
+                    candidateMerged[i] = {
+                      ...em,
+                      attachments: gm.attachments,
+                    };
+                    stateChanged = true;
+                  }
+                  break;
                 }
-                return false;
-              });
+                if (gm.sender === 'admin' && (em.sender === 'admin' || em.sender === 'bot')) {
+                  if (em.text.trim() === gm.text.trim()) {
+                    alreadyExists = true;
+                    break;
+                  }
+                }
+              }
               if (!alreadyExists) {
                 candidateMerged.push(gm);
                 stateChanged = true;
@@ -2791,17 +2844,24 @@ export default function App() {
                     if (m.id === msgId) {
                       const updatedAttachments =
                         data.audioUrl && Array.isArray(m.attachments)
-                          ? m.attachments.map((att) =>
-                              att.type === 'audio'
-                                ? {
-                                    ...att,
-                                    data: {
-                                      ...(att.data || {}),
-                                      url: data.audioUrl,
-                                    },
-                                  }
-                                : att
-                            )
+                          ? m.attachments.map((att) => {
+                              if (att.type === 'audio') {
+                                const isReturnedTts = String(data.audioUrl || '').startsWith('/api/ai/tts-stream');
+                                const isLiveRec = Boolean(att.data?.isLiveRecordedMic);
+                                const nextAudioUrl =
+                                  isLiveRec && isReturnedTts
+                                    ? att.data?.url || data.audioUrl
+                                    : data.audioUrl;
+                                return {
+                                  ...att,
+                                  data: {
+                                    ...(att.data || {}),
+                                    url: nextAudioUrl,
+                                  },
+                                };
+                              }
+                              return att;
+                            })
                           : m.attachments;
                       return {
                         ...m,
@@ -2972,13 +3032,15 @@ export default function App() {
 
     const normalizedAttachments = attachments?.map((att) => {
       if (att?.type === 'audio') {
+        const spokenTranscript = att?.data?.transcript || text;
         return {
           ...att,
           data: {
             ...(att.data || {}),
-            url: att?.data?.url || createPlayableReplyWavDataUrl(3.5),
+            url: att?.data?.url || createPlayableReplyWavDataUrl(3.5, spokenTranscript),
             duration: att?.data?.duration || '0:04',
-            transcript: att?.data?.transcript || text,
+            transcript: spokenTranscript,
+            isRealVoiceV3: true,
           },
         };
       }
