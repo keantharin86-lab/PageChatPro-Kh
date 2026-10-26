@@ -2103,10 +2103,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-slate-50 relative">
+    <div className="flex-1 flex flex-col h-full min-h-0 w-full max-w-full overflow-hidden bg-slate-50 relative">
       {/* Top Chat Header */}
-      <div className="py-2 px-3 sm:px-4 bg-white border-b border-slate-200 flex flex-col gap-2 shrink-0">
-        <div className="flex items-center gap-2.5 min-w-0">
+      <div className="py-1.5 px-2.5 md:py-2 md:px-4 bg-white border-b border-slate-200 flex flex-col gap-1.5 md:gap-2 shrink-0">
+        <div className="flex items-center gap-2 md:gap-2.5 min-w-0">
           {/* Dual Original Profile Picture from Facebook Page (រូបដើមអតិថិជន + រូបដើមផេក) */}
           {(() => {
             const custOriginalAvatar = resolveCustomerOriginalPageAvatar(thread.customer, selectedPage);
@@ -2135,7 +2135,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                       selectedPage?.name
                     );
                   }}
-                  className="w-10 h-10 rounded-full object-cover border-2 border-blue-500 shadow-2xs bg-slate-100 z-10"
+                  className="w-8 h-8 md:w-10 md:h-10 rounded-full object-cover border-2 border-blue-500 shadow-2xs bg-slate-100 z-10"
                 />
                 <img
                   src={pageOriginalAvatar}
@@ -2147,19 +2147,19 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                       'FB Page'
                     );
                   }}
-                  className="w-6 h-6 rounded-full object-cover border-2 border-white shadow-xs -ml-2.5 mt-3.5 bg-white z-20"
+                  className="w-5 h-5 md:w-6 md:h-6 rounded-full object-cover border-2 border-white shadow-xs -ml-2 mt-2.5 md:-ml-2.5 md:mt-3.5 bg-white z-20"
                 />
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 absolute -bottom-0.5 right-0 border-2 border-white z-30"></span>
+                <span className="w-2 h-2 md:w-2.5 md:h-2.5 rounded-full bg-emerald-500 absolute -bottom-0.5 right-0 border-2 border-white z-30"></span>
               </div>
             );
           })()}
 
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <h2 className="text-sm font-semibold text-slate-900 truncate">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1 md:gap-1.5 flex-wrap">
+              <h2 className="text-xs md:text-sm font-semibold text-slate-900 truncate">
                 {thread.customer.name}
               </h2>
-              <span className="text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded-full flex items-center gap-1 shrink-0">
+              <span className="text-[9.5px] md:text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded-full flex items-center gap-1 shrink-0">
                 <span className="w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse"></span>
                 <span>រូបដើមពីផេក</span>
               </span>
@@ -2167,7 +2167,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 <button
                   type="button"
                   onClick={onOpenCustomerProfile}
-                  className="lg:hidden inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-bold cursor-pointer"
+                  className="lg:hidden inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[9.5px] md:text-[10px] font-bold cursor-pointer shrink-0"
                   title="បើកមើលព័ត៌មានអតិថិជន"
                 >
                   <User className="w-3 h-3 text-blue-600" />
@@ -2175,10 +2175,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 </button>
               )}
             </div>
-            <div className="flex items-center gap-1.5 text-[11px] text-slate-500 truncate">
+            <div className="flex items-center gap-1 md:gap-1.5 text-[10px] md:text-[11px] text-slate-500 truncate">
               {selectedPage && (
                 <>
-                  <span className="font-semibold text-blue-700 truncate max-w-[140px]">
+                  <span className="font-semibold text-blue-700 truncate max-w-[115px] md:max-w-[140px]">
                     {selectedPage.name.split(' - ')[0] || selectedPage.name}
                   </span>
                   <span aria-hidden="true">•</span>
@@ -2198,16 +2198,16 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         </div>
 
         {/* Bottom Header Actions Row (មកក្រោម) */}
-        <div className="flex items-center gap-1.5 flex-wrap">
+        <div className="flex items-center gap-1 md:gap-1.5 overflow-x-auto scrollbar-none flex-nowrap md:flex-wrap">
           {onBack && (
             <button
               type="button"
               onClick={onBack}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition-colors shadow-2xs cursor-pointer shrink-0"
+              className="inline-flex items-center gap-1 md:gap-1.5 px-2 py-0.5 md:px-2.5 md:py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] md:text-xs font-bold transition-colors shadow-2xs cursor-pointer shrink-0 whitespace-nowrap"
               aria-label="Back to main inbox"
               title="ត្រឡប់មកប្រអប់ដើមវិញ (Back to Main Inbox)"
             >
-              <ArrowLeft className="w-3.5 h-3.5" />
+              <ArrowLeft className="w-3 h-3 md:w-3.5 md:h-3.5" />
               <span>{language === 'kh' ? 'មកប្រអប់ដើមវិញ' : 'Main Inbox'}</span>
             </button>
           )}
@@ -2216,14 +2216,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           {selectedPage && onOpenLiveModal && (
             <button
               onClick={onOpenLiveModal}
-              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
+              className={`flex items-center gap-1 md:gap-1.5 px-2 py-0.5 md:px-2.5 md:py-1 text-[11px] md:text-xs font-semibold rounded-lg border transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 (selectedPage.isLiveOnline || selectedPage.accessToken)
                   ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100 shadow-2xs'
                   : 'bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100 shadow-2xs'
               }`}
               title={(selectedPage.isLiveOnline || selectedPage.accessToken) ? 'បានតភ្ជាប់ Live Online ជាមួយ Meta Messenger' : 'ចុចបើក Live Online ជាមួយ Facebook'}
             >
-              <span className={`w-2 h-2 rounded-full ${(selectedPage.isLiveOnline || selectedPage.accessToken) ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`}></span>
+              <span className={`w-1.5 h-1.5 md:w-2 md:h-2 rounded-full ${(selectedPage.isLiveOnline || selectedPage.accessToken) ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`}></span>
               <span className="hidden sm:inline">
                 {(selectedPage.isLiveOnline || selectedPage.accessToken)
                   ? (language === 'kh' ? '🟢 Messenger Live' : '🟢 Messenger Live') 
@@ -2250,7 +2250,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 return next;
               });
             }}
-            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors shadow-2xs cursor-pointer ${
+            className={`flex items-center gap-1 md:gap-1.5 px-2 py-0.5 md:px-2.5 md:py-1 text-[11px] md:text-xs font-semibold rounded-lg border transition-colors shadow-2xs cursor-pointer shrink-0 whitespace-nowrap ${
               isSearchOpen || chatSearchQuery.trim()
                 ? 'bg-blue-50 text-blue-700 border-blue-300'
                 : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-300'
@@ -2261,7 +2261,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 : 'Search keywords in this conversation'
             }
           >
-            <Search className="w-3.5 h-3.5 text-blue-600" />
+            <Search className="w-3 h-3 md:w-3.5 md:h-3.5 text-blue-600" />
             <span className="hidden lg:inline">{language === 'kh' ? 'ស្វែងរក' : 'Search'}</span>
           </button>
 
@@ -2270,14 +2270,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             <button
               type="button"
               onClick={onExportConversationPdf}
-              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg transition-colors shadow-2xs cursor-pointer"
+              className="flex items-center gap-1 md:gap-1.5 px-2 py-0.5 md:px-2.5 md:py-1 text-[11px] md:text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg transition-colors shadow-2xs cursor-pointer shrink-0 whitespace-nowrap"
               title={
                 language === 'kh'
                   ? 'ទាញយកប្រវត្តិសន្ទនាអតិថិជនទាំងអស់ជាឯកសារ PDF (Export Chat PDF)'
                   : 'Export entire conversation history as PDF document'
               }
             >
-              <FileDown className="w-3.5 h-3.5 text-blue-600" />
+              <FileDown className="w-3 h-3 md:w-3.5 md:h-3.5 text-blue-600" />
               <span className="hidden sm:inline">{language === 'kh' ? 'ទាញយក PDF' : 'Export PDF'}</span>
             </button>
           )}
@@ -2285,10 +2285,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           {/* Fast Create Order Button */}
           <button
             onClick={() => onOpenCreateOrder()}
-            className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors shadow-2xs cursor-pointer"
+            className="flex items-center gap-1 px-2 py-0.5 md:px-2.5 md:py-1 text-[11px] md:text-xs font-medium bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors shadow-2xs cursor-pointer shrink-0 whitespace-nowrap"
             title="បង្កើតការបញ្ជាទិញរហ័ស"
           >
-            <ShoppingBag className="w-3.5 h-3.5" />
+            <ShoppingBag className="w-3 h-3 md:w-3.5 md:h-3.5" />
             <span className="hidden md:inline">{language === 'kh' ? 'កុម្ម៉ង់' : 'Order'}</span>
           </button>
         </div>
@@ -2442,7 +2442,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       )}
 
       {/* Messages Feed */}
-      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div ref={messagesContainerRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-2.5 space-y-2.5 md:p-4 md:space-y-4">
         {displayedMessages.length === 0 && chatSearchQuery.trim() ? (
           <div className="py-12 text-center text-slate-400">
             <Search className="w-8 h-8 mx-auto mb-2 text-slate-300" />
@@ -2488,7 +2488,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               }}
               className={`flex flex-col transition-all ${isMe ? 'items-end' : 'items-start'}`}
             >
-              <div className="flex items-center gap-2 mb-1 px-1 text-[11px] text-slate-400">
+              <div className="flex items-center gap-1.5 md:gap-2 mb-0.5 md:mb-1 px-1 text-[10px] md:text-[11px] text-slate-400">
                 {/* Dual Original Profile Avatar on Every Message in Chat (រូបដើមពីផេក) */}
                 {!isMe ? (
                   <div className="relative flex items-center shrink-0" title={`រូបដើមពីផេក៖ ${thread.customer.name}`}>
@@ -2502,7 +2502,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                           selectedPage?.name
                         );
                       }}
-                      className="w-6 h-6 rounded-full object-cover border border-blue-400 bg-slate-100"
+                      className="w-5 h-5 md:w-6 md:h-6 rounded-full object-cover border border-blue-400 bg-slate-100"
                     />
                     <img
                       src={pageMsgAvatar}
@@ -2514,7 +2514,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                           'FB Page'
                         );
                       }}
-                      className="w-3.5 h-3.5 rounded-full object-cover border border-white -ml-1.5 mt-2 bg-white shadow-2xs"
+                      className="w-3 h-3 md:w-3.5 md:h-3.5 rounded-full object-cover border border-white -ml-1.5 mt-1.5 md:mt-2 bg-white shadow-2xs"
                     />
                   </div>
                 ) : (
@@ -2528,7 +2528,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                         'FB Page'
                       );
                     }}
-                    className="w-5 h-5 rounded-full object-cover border border-blue-300 bg-white shrink-0"
+                    className="w-4 h-4 md:w-5 md:h-5 rounded-full object-cover border border-blue-300 bg-white shrink-0"
                   />
                 )}
                 {isBot && (
@@ -2537,17 +2537,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     <span>AI Auto-Pilot</span>
                   </span>
                 )}
-                <span className="font-medium text-slate-600">
+                <span className="font-medium text-slate-600 truncate max-w-[140px] md:max-w-none">
                   {chatSearchQuery.trim()
                     ? renderHighlightedText(msg.senderName, chatSearchQuery, isCurrentMatch)
                     : msg.senderName}
                 </span>
                 <span>•</span>
-                <span>{msg.timestamp}</span>
+                <span className="shrink-0">{msg.timestamp}</span>
               </div>
 
               <div
-                className={`max-w-[85%] sm:max-w-[70%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-xs relative group transition-all ${
+                className={`max-w-[82%] md:max-w-[70%] rounded-xl md:rounded-2xl px-2.5 py-1.5 md:px-4 md:py-2.5 text-xs md:text-sm leading-snug md:leading-relaxed shadow-xs relative group transition-all ${
                   isMe
                     ? isBot
                       ? 'bg-gradient-to-r from-purple-700 to-indigo-700 text-white rounded-br-xs'
@@ -2562,7 +2562,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 }`}
               >
                 {editingMessageId === msg.id ? (
-                  <div className="space-y-2 py-0.5 min-w-[240px] sm:min-w-[320px]">
+                  <div className="space-y-2 py-0.5 min-w-0 w-full sm:min-w-[240px] md:min-w-[320px]">
                     <div className="flex items-center justify-between pb-1 border-b border-current/20 text-xs font-semibold">
                       <span className="flex items-center gap-1.5">
                         <Edit3 className="w-3.5 h-3.5" />
@@ -2945,24 +2945,24 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                         return (
                           <div
                             key={idx}
-                            className={`p-3 rounded-2xl border shadow-xs min-w-[260px] max-w-sm transition-all ${
+                            className={`p-2 md:p-3 rounded-xl md:rounded-2xl border shadow-xs min-w-0 w-full md:min-w-[260px] max-w-[240px] sm:max-w-xs md:max-w-sm transition-all ${
                               isMe
                                 ? 'bg-white/15 border-white/25 text-white'
                                 : 'bg-indigo-50/90 border-indigo-200/90 text-slate-900'
                             }`}
                           >
-                            <div className="flex items-center gap-2.5">
+                            <div className="flex items-center gap-2 md:gap-2.5">
                               <button
                                 type="button"
                                 onClick={() => handlePlayVoiceAttachment(msg.id, audioUrl, recognizedText)}
-                                className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 shadow-xs transition-transform active:scale-95 cursor-pointer ${
+                                className={`w-8 h-8 md:w-10 md:h-10 rounded-full flex items-center justify-center shrink-0 shadow-xs transition-transform active:scale-95 cursor-pointer ${
                                   isMe
                                     ? 'bg-white text-blue-600 hover:bg-blue-50'
                                     : 'bg-indigo-600 text-white hover:bg-indigo-700'
                                 }`}
                                 title={isPlayingThis ? 'ផ្អាកសម្លេង (Pause Voice)' : 'ចុចស្តាប់សារសម្លេង (Play Voice Sound)'}
                               >
-                                {isPlayingThis ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+                                {isPlayingThis ? <Pause className="w-3.5 h-3.5 md:w-4 md:h-4" /> : <Play className="w-3.5 h-3.5 md:w-4 md:h-4 ml-0.5" />}
                               </button>
 
                               <div className="flex-1 min-w-0">
@@ -3197,7 +3197,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                         return (
                           <div
                             key={idx}
-                            className="p-3.5 rounded-xl bg-slate-900 text-white border border-slate-700 flex flex-col gap-2.5 shadow-md min-w-[240px]"
+                            className="p-2.5 md:p-3.5 rounded-xl bg-slate-900 text-white border border-slate-700 flex flex-col gap-2 md:gap-2.5 shadow-md min-w-0 w-full md:min-w-[240px] max-w-[245px] md:max-w-none"
                           >
                             <div className="flex items-center justify-between gap-3">
                               <div className="flex items-center gap-2.5">
@@ -3934,7 +3934,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       />
 
       {/* Chat Input Toolbar & Form */}
-      <div className="p-3 bg-white border-t border-slate-200 shrink-0">
+      <div className="p-2 md:p-3 bg-white border-t border-slate-200 shrink-0">
         {/* Staged Image Preview Bar (when user pastes an image or stages before sending) */}
         {stagedImageAttachment && (
           <div className="mb-2.5 p-2.5 bg-blue-50/90 border border-blue-200 rounded-xl flex items-center justify-between gap-3 animate-in fade-in duration-150">
@@ -4111,7 +4111,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           </div>
         )}
 
-        <div className="flex items-center gap-2 mb-2 flex-wrap">
+        <div className="flex items-center gap-1.5 md:gap-2 mb-1.5 md:mb-2 overflow-x-auto scrollbar-none flex-nowrap md:flex-wrap">
           {/* Quick Reply Button */}
           <button
             type="button"
@@ -4119,7 +4119,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               setShowQuickReplyMenu(!showQuickReplyMenu);
               setShowProductPicker(false);
             }}
-            className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-md transition-colors font-medium cursor-pointer ${
+            className={`flex items-center gap-1 px-2 py-0.5 md:px-2.5 md:py-1 text-[11px] md:text-xs rounded-md transition-colors font-medium cursor-pointer shrink-0 whitespace-nowrap ${
               showQuickReplyMenu
                 ? 'bg-amber-100 text-amber-800'
                 : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
@@ -4134,10 +4134,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             type="button"
             onClick={() => chatImageInputRef.current?.click()}
             disabled={isUploadingImage}
-            className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 transition-colors font-semibold cursor-pointer"
+            className="flex items-center gap-1 px-2 py-0.5 md:px-2.5 md:py-1 text-[11px] md:text-xs rounded-md bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 transition-colors font-semibold cursor-pointer shrink-0 whitespace-nowrap"
             title="ផ្ញើរូបភាពចូលក្នុងឆាតដោយផ្ទាល់ (គ្មានសញ្ញាសួរ ?)"
           >
-            <ImageIcon className="w-3.5 h-3.5 text-blue-600" />
+            <ImageIcon className="w-3 h-3 md:w-3.5 md:h-3.5 text-blue-600" />
             <span>
               {isUploadingImage
                 ? 'កំពុងបញ្ចូលរូប...'
@@ -4151,14 +4151,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           <button
             type="button"
             onClick={handleToggleRecordAudioClip}
-            className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-md border transition-colors font-semibold cursor-pointer ${
+            className={`flex items-center gap-1 px-2 py-0.5 md:px-2.5 md:py-1 text-[11px] md:text-xs rounded-md border transition-colors font-semibold cursor-pointer shrink-0 whitespace-nowrap ${
               isRecordingAudioClip
                 ? 'bg-rose-600 text-white border-rose-700 animate-pulse'
                 : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200'
             }`}
             title="ថតសម្លេងពិតពីម៉ៃក្រូហ្វូន ដើម្បីផ្ញើសារសម្លេង (Voice) ទៅវិញក្នុងប្រអប់សារ"
           >
-            <Volume2 className="w-3.5 h-3.5" />
+            <Volume2 className="w-3 h-3 md:w-3.5 md:h-3.5" />
             <span>
               {isRecordingAudioClip
                 ? `ផ្ញើសម្លេង (0:${String(recordingSeconds).padStart(2, '0')})`
@@ -4172,14 +4172,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           <button
             type="button"
             onClick={handleAutoVoiceToTextClick}
-            className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-md border transition-colors font-bold cursor-pointer ${
+            className={`flex items-center gap-1 px-2 py-0.5 md:px-2.5 md:py-1 text-[11px] md:text-xs rounded-md border transition-colors font-bold cursor-pointer shrink-0 whitespace-nowrap ${
               isRecordingVoice
                 ? 'bg-rose-600 text-white border-rose-700 animate-pulse'
                 : 'bg-purple-50 hover:bg-purple-100 text-purple-800 border-purple-200'
             }`}
             title="បកសម្លេងជាអក្សរភ្លាមៗ (Auto Voice-to-Text) សម្រាប់សារសម្លេងចុងក្រោយ ឬនិយាយបញ្ចូលអក្សរក្នុងប្រអប់សារ"
           >
-            <Mic className="w-3.5 h-3.5 text-purple-600" />
+            <Mic className="w-3 h-3 md:w-3.5 md:h-3.5 text-purple-600" />
             <span>
               {isRecordingVoice
                 ? language === 'kh'
@@ -4196,10 +4196,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             type="button"
             onClick={() => handleSendTextAsVoiceReply()}
             disabled={!inputText.trim() || isConvertingTextToVoice}
-            className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50 text-emerald-700 border border-emerald-200 transition-colors font-semibold cursor-pointer"
+            className="flex items-center gap-1 px-2 py-0.5 md:px-2.5 md:py-1 text-[11px] md:text-xs rounded-md bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50 text-emerald-700 border border-emerald-200 transition-colors font-semibold cursor-pointer shrink-0 whitespace-nowrap"
             title="វាយអក្សរក្នុងប្រអប់សារ រួចចុចប៊ូតុងនេះដើម្បីផ្ញើចេញជាសារសម្លេង (Text-to-Voice)"
           >
-            <Volume2 className={`w-3.5 h-3.5 text-emerald-600 ${isConvertingTextToVoice ? 'animate-bounce' : ''}`} />
+            <Volume2 className={`w-3 h-3 md:w-3.5 md:h-3.5 text-emerald-600 ${isConvertingTextToVoice ? 'animate-bounce' : ''}`} />
             <span>
               {isConvertingTextToVoice
                 ? 'កំពុងបម្លែងសម្លេង...'
@@ -4213,10 +4213,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           <button
             type="button"
             onClick={() => chatAudioInputRef.current?.click()}
-            className="flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors font-medium cursor-pointer"
+            className="flex items-center gap-1 px-2 py-0.5 md:px-2 md:py-1 text-[11px] md:text-xs rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors font-medium cursor-pointer shrink-0 whitespace-nowrap"
             title="បញ្ចូលឯកសារសម្លេង (MP3 / WAV / Voice Clip)"
           >
-            <Paperclip className="w-3.5 h-3.5 text-slate-600" />
+            <Paperclip className="w-3 h-3 md:w-3.5 md:h-3.5 text-slate-600" />
             <span className="hidden md:inline">{language === 'kh' ? 'ឯកសារសម្លេង' : 'Audio File'}</span>
           </button>
 
@@ -4227,13 +4227,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               setShowProductPicker(!showProductPicker);
               setShowQuickReplyMenu(false);
             }}
-            className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-md transition-colors font-medium cursor-pointer ${
+            className={`flex items-center gap-1 px-2 py-0.5 md:px-2.5 md:py-1 text-[11px] md:text-xs rounded-md transition-colors font-medium cursor-pointer shrink-0 whitespace-nowrap ${
               showProductPicker
                 ? 'bg-blue-100 text-blue-800'
                 : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
             }`}
           >
-            <Package className="w-3.5 h-3.5 text-blue-600" />
+            <Package className="w-3 h-3 md:w-3.5 md:h-3.5 text-blue-600" />
             <span>{language === 'kh' ? 'ទំនិញ' : 'Product'}</span>
           </button>
 
@@ -4241,9 +4241,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           <button
             type="button"
             onClick={() => setShowKhqrModal(true)}
-            className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors font-medium cursor-pointer"
+            className="flex items-center gap-1 px-2 py-0.5 md:px-2.5 md:py-1 text-[11px] md:text-xs rounded-md bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors font-medium cursor-pointer shrink-0 whitespace-nowrap"
           >
-            <QrCode className="w-3.5 h-3.5 text-red-600" />
+            <QrCode className="w-3 h-3 md:w-3.5 md:h-3.5 text-red-600" />
             <span>KHQR គណនី</span>
           </button>
 
@@ -4252,10 +4252,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             type="button"
             onClick={handleGenerateAIReply}
             disabled={isGeneratingAIReply}
-            className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-gradient-to-r from-indigo-50 to-purple-50 hover:from-indigo-100 hover:to-purple-100 text-indigo-700 border border-indigo-200 transition-colors font-medium ml-auto cursor-pointer"
+            className="flex items-center gap-1 px-2 py-0.5 md:px-2.5 md:py-1 text-[11px] md:text-xs rounded-md bg-gradient-to-r from-indigo-50 to-purple-50 hover:from-indigo-100 hover:to-purple-100 text-indigo-700 border border-indigo-200 transition-colors font-medium ml-auto cursor-pointer shrink-0 whitespace-nowrap"
             title="ជំនួយការ AI Gemini 3.8 Flash ព្រាងសារ"
           >
-            <Sparkles className={`w-3.5 h-3.5 text-indigo-600 ${isGeneratingAIReply ? 'animate-spin' : ''}`} />
+            <Sparkles className={`w-3 h-3 md:w-3.5 md:h-3.5 text-indigo-600 ${isGeneratingAIReply ? 'animate-spin' : ''}`} />
             <span>
               {isGeneratingAIReply
                 ? (language === 'kh' ? 'AI កំពុងព្រាង...' : 'AI Drafting...')
@@ -4268,7 +4268,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             <button
               type="button"
               onClick={onOpenImageStudio}
-              className="hidden sm:flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 transition-colors font-medium cursor-pointer"
+              className="hidden sm:flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 transition-colors font-medium cursor-pointer shrink-0 whitespace-nowrap"
               title="បង្កើតរូបភាពផលិតផលដោយ gemini-nano-banana-2.1"
             >
               <Wand2 className="w-3.5 h-3.5 text-pink-600" />
@@ -4321,33 +4321,33 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         )}
 
         {/* Input Form with Voice Dictation, Voice Sound Recording, and Direct Image Paste */}
-        <form onSubmit={handleSend} className="flex items-center gap-1.5">
+        <form onSubmit={handleSend} className="flex items-center gap-1 md:gap-1.5">
           {/* Speech-to-Text Dictation / Auto Voice-to-Text button */}
           <button
             type="button"
             onClick={handleAutoVoiceToTextClick}
-            className={`p-2 rounded-lg border transition-all shrink-0 cursor-pointer ${
+            className={`p-1.5 md:p-2 rounded-lg border transition-all shrink-0 cursor-pointer ${
               isRecordingVoice
                 ? 'bg-rose-500 text-white border-rose-600 animate-pulse ring-2 ring-rose-400/40'
                 : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100 hover:text-slate-800'
             }`}
             title={isRecordingVoice ? 'កំពុងស្តាប់... (ចុចដើម្បីបិទ)' : '🎙️ បកសម្លេងជាអក្សរ (Auto Voice-to-Text)'}
           >
-            {isRecordingVoice ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            {isRecordingVoice ? <MicOff className="w-3.5 h-3.5 md:w-4 md:h-4" /> : <Mic className="w-3.5 h-3.5 md:w-4 md:h-4" />}
           </button>
 
           {/* Direct Voice Sound Clip Record Button in Input Bar */}
           <button
             type="button"
             onClick={handleToggleRecordAudioClip}
-            className={`px-2.5 py-2 rounded-lg border transition-all shrink-0 flex items-center gap-1 text-xs font-bold cursor-pointer ${
+            className={`px-2 py-1.5 md:px-2.5 md:py-2 rounded-lg border transition-all shrink-0 flex items-center gap-1 text-[11px] md:text-xs font-bold cursor-pointer ${
               isRecordingAudioClip
                 ? 'bg-rose-600 text-white border-rose-700 animate-pulse ring-2 ring-rose-400/40'
                 : 'bg-indigo-600 text-white border-indigo-700 hover:bg-indigo-700 shadow-2xs'
             }`}
             title={isRecordingAudioClip ? 'ចុចដើម្បីផ្ញើសារសម្លេង (Send Voice Sound)' : 'ថតផ្ញើសារសម្លេងទៅវិញក្នុងប្រអប់សារ (Record Voice Reply)'}
           >
-            {isRecordingAudioClip ? <Square className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+            {isRecordingAudioClip ? <Square className="w-3 h-3 md:w-3.5 md:h-3.5" /> : <Volume2 className="w-3 h-3 md:w-3.5 md:h-3.5" />}
             <span className="hidden sm:inline">
               {isRecordingAudioClip ? `ផ្ញើ Voice (${recordingSeconds}s)` : 'Voice ទៅវិញ'}
             </span>
@@ -4357,10 +4357,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           <button
             type="button"
             onClick={() => chatImageInputRef.current?.click()}
-            className="p-2 rounded-lg border bg-blue-50 text-blue-600 border-blue-200 hover:bg-blue-100 transition-all shrink-0 cursor-pointer"
+            className="p-1.5 md:p-2 rounded-lg border bg-blue-50 text-blue-600 border-blue-200 hover:bg-blue-100 transition-all shrink-0 cursor-pointer"
             title="ជ្រើសរើសរូបភាពផ្ញើក្នុងឆាត (គ្មានសញ្ញាសួរ ?)"
           >
-            <ImageIcon className="w-4 h-4" />
+            <ImageIcon className="w-3.5 h-3.5 md:w-4 md:h-4" />
           </button>
 
           <input
@@ -4396,7 +4396,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 ? (language === 'kh' ? `វាយសារ ឬចុច "Voice ទៅវិញ" ដើម្បីថតសម្លេងក្នុងនាមភ្ញៀវ...` : 'Type message or record voice as customer...')
                 : (language === 'kh' ? 'សរសេរសារ, ឬចុច "Voice ទៅវិញ" ដើម្បីនិយាយសម្លេងឆ្លើយតប...' : 'Type a reply, paste image, or record voice...')
             }
-            className={`flex-1 px-3.5 py-2 text-sm border rounded-lg focus:outline-none focus:ring-2 transition-all placeholder:text-slate-400 ${
+            className={`flex-1 min-w-0 px-2.5 py-1.5 md:px-3.5 md:py-2 text-xs md:text-sm border rounded-lg focus:outline-none focus:ring-2 transition-all placeholder:text-slate-400 ${
               isRecordingVoice || isRecordingAudioClip
                 ? 'bg-rose-50 border-rose-300 ring-2 ring-rose-300/30 text-rose-900 font-medium'
                 : chatSendMode === 'customer'
@@ -4410,10 +4410,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               type="button"
               onClick={() => handleSendTextAsVoiceReply()}
               disabled={isConvertingTextToVoice}
-              className="px-2.5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white font-bold text-xs rounded-lg transition-colors flex items-center gap-1 shadow-xs shrink-0 cursor-pointer"
+              className="px-2 py-1.5 md:px-2.5 md:py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white font-bold text-[11px] md:text-xs rounded-lg transition-colors flex items-center gap-1 shadow-xs shrink-0 cursor-pointer"
               title="ផ្ញើអក្សរដែលបានវាយនេះចេញជាសារសម្លេង (Send Typed Text as Voice Sound)"
             >
-              <Volume2 className="w-3.5 h-3.5" />
+              <Volume2 className="w-3 h-3 md:w-3.5 md:h-3.5" />
               <span className="hidden md:inline">ផ្ញើជា Voice</span>
             </button>
           )}
@@ -4421,13 +4421,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           <button
             type="submit"
             disabled={!inputText.trim() && !stagedImageAttachment}
-            className={`px-4 py-2 disabled:bg-slate-200 disabled:text-slate-400 text-white font-medium text-sm rounded-lg transition-colors flex items-center gap-1.5 shadow-xs shrink-0 cursor-pointer ${
+            className={`px-3 py-1.5 md:px-4 md:py-2 disabled:bg-slate-200 disabled:text-slate-400 text-white font-medium text-xs md:text-sm rounded-lg transition-colors flex items-center gap-1 md:gap-1.5 shadow-xs shrink-0 cursor-pointer ${
               chatSendMode === 'customer'
                 ? 'bg-emerald-600 hover:bg-emerald-700'
                 : 'bg-blue-600 hover:bg-blue-700'
             }`}
           >
-            <Send className="w-4 h-4" />
+            <Send className="w-3.5 h-3.5 md:w-4 md:h-4" />
             <span className="hidden sm:inline">
               {chatSendMode === 'customer'
                 ? (language === 'kh' ? 'ផ្ញើចូលផេក' : 'Send to Page')

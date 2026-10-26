@@ -3620,7 +3620,7 @@ export default function App() {
 
   return (
     <div
-      className={`flex h-screen w-screen overflow-hidden font-sans ${
+      className={`flex h-[100dvh] w-full max-w-[100vw] overflow-hidden font-sans ${
         isGlobalMobileFrame
           ? 'bg-slate-900 items-center justify-center p-2 sm:p-4'
           : 'bg-slate-100'
@@ -3629,7 +3629,7 @@ export default function App() {
       <div
         className={`flex overflow-hidden bg-slate-100 ${
           isGlobalMobileFrame
-            ? 'w-full max-w-[420px] h-[94vh] rounded-[36px] border-4 border-slate-800 shadow-2xl relative'
+            ? 'w-full max-w-[420px] h-[94dvh] rounded-[36px] border-4 border-slate-800 shadow-2xl relative'
             : 'h-full w-full'
         }`}
       >
@@ -3657,9 +3657,9 @@ export default function App() {
       )}
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col h-full overflow-hidden">
+      <div className="flex-1 flex flex-col h-full min-h-0 min-w-0 overflow-hidden">
         {/* Desktop & Mobile Top Status Bar with Offline Editable & Install Controls */}
-        <div className="flex items-center justify-between px-3.5 py-2 bg-slate-900 text-white shrink-0 shadow-xs border-b border-slate-800 gap-2">
+        <div className="flex items-center justify-between px-2.5 py-1.5 md:px-3.5 md:py-2 bg-slate-900 text-white shrink-0 shadow-xs border-b border-slate-800 gap-2">
           <div className="flex items-center gap-2.5 min-w-0">
             <button
               onClick={() => setIsMobileNavOpen(true)}
@@ -3789,10 +3789,10 @@ export default function App() {
 
         {/* 2. Main Work View */}
         {activeView === 'inbox' && (
-          <div className="flex flex-1 h-full overflow-hidden relative">
+          <div className="flex flex-1 h-full min-h-0 min-w-0 overflow-hidden relative">
             {/* Conversation list: always visible on desktop; visible full-width on mobile/phone-frame when not inside a customer chat */}
             <div
-              className={`h-full ${
+              className={`h-full min-h-0 ${
                 isMobileChatOpen && isCustomerBoxOpen
                   ? isGlobalMobileFrame
                     ? 'hidden'
@@ -3825,7 +3825,7 @@ export default function App() {
 
             {/* Active Customer Chat Window OR Main Inbox Overview when user clicks 'មកប្រអប់ដើមវិញ' */}
             <div
-              className={`flex-1 h-full ${
+              className={`flex-1 h-full min-h-0 min-w-0 overflow-hidden ${
                 !isMobileChatOpen || !isCustomerBoxOpen
                   ? isGlobalMobileFrame
                     ? 'hidden'
