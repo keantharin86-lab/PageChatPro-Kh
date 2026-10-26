@@ -206,63 +206,14 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
   const widgetImageInputRef = useRef<HTMLInputElement>(null);
   const widgetAudioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
 
-  const playWidgetFallbackVoice = async (msgId: string, transcriptText?: string) => {
-    const cleanText = (transcriptText || '')
-      .replace(/🎤\s*\[?សារសម្លេង[^\]]*\]?:?\s*/gi, '')
-      .replace(/^["']|["']$/g, '')
-      .trim();
-
-    if (cleanText) {
-      try {
-        const res = await fetch('/api/ai/text-to-voice', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: cleanText }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          const serverSrc = data?.audioUrl || data?.audioDataUrl;
-          if (serverSrc) {
-            const fallbackAudio = new Audio(serverSrc);
-            widgetAudioElementsRef.current[msgId] = fallbackAudio;
-            fallbackAudio.onended = () => setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
-            fallbackAudio.onerror = () => setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
-            await fallbackAudio.play();
-            return;
-          }
-        }
-      } catch {
-        // Proceed to SpeechSynthesis / WAV fallback
-      }
-    }
-
-    if (cleanText && typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      try {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(cleanText);
-        utterance.lang = /[\u1780-\u17FF]/.test(cleanText) ? 'km-KH' : 'en-US';
-        utterance.rate = 1.0;
-        window.speechSynthesis.speak(utterance);
-      } catch {}
-    }
-
-    try {
-      const wavAudio = new Audio(createWidgetWavDataUrl(3));
-      widgetAudioElementsRef.current[msgId] = wavAudio;
-      wavAudio.onended = () => setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
-      wavAudio.onerror = () => setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
-      await wavAudio.play();
-    } catch {
-      setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
-    }
-  };
-
   const handlePlayWidgetAudio = (msgId: string, rawAudUrl?: string, transcriptText?: string) => {
     if (playingWidgetAudioId === msgId) {
       const existing = widgetAudioElementsRef.current[msgId];
       if (existing) {
-        existing.pause();
-        existing.currentTime = 0;
+        try {
+          existing.pause();
+          existing.currentTime = 0;
+        } catch {}
       }
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         try {
@@ -279,50 +230,103 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
         el.currentTime = 0;
       } catch {}
     });
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
+    }
 
     setPlayingWidgetAudioId(msgId);
 
+    const cleanText =
+      (transcriptText || '')
+        .replace(/🎤\s*\[?សារសម្លេង[^\]]*\]?:?\s*/gi, '')
+        .replace(/^["']|["']$/g, '')
+        .trim() || 'សួស្តីបង! អរគុណច្រើនបង';
+
+    const ttsStreamUrl = `/api/ai/tts-stream?text=${encodeURIComponent(cleanText)}`;
+
+    // Reuse or create HTMLAudioElement synchronously inside the click gesture
+    const audio = widgetAudioElementsRef.current[msgId] || new Audio();
+    audio.preload = 'auto';
+    audio.muted = false;
+    audio.volume = 1.0;
+    widgetAudioElementsRef.current[msgId] = audio;
+
+    let fallbackStage = 0;
+    const triggerFallbackOnSameElement = () => {
+      if (fallbackStage === 0) {
+        fallbackStage = 1;
+        try {
+          audio.src = ttsStreamUrl;
+          audio.play().catch(() => triggerFallbackOnSameElement());
+          return;
+        } catch {
+          // Proceed to stage 2
+        }
+      }
+      fallbackStage = 2;
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window && cleanText) {
+        try {
+          const utterance = new SpeechSynthesisUtterance(cleanText);
+          utterance.lang = /[\u1780-\u17FF]/.test(cleanText) ? 'km-KH' : 'en-US';
+          utterance.rate = 1.0;
+          window.speechSynthesis.speak(utterance);
+        } catch {}
+      }
+      try {
+        audio.onerror = null;
+        audio.src = createWidgetWavDataUrl(3.5);
+        audio.play().catch(() => setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev)));
+      } catch {
+        setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
+      }
+    };
+
     const trimmedUrl = (rawAudUrl || '').trim();
-    if (!trimmedUrl) {
-      void playWidgetFallbackVoice(msgId, transcriptText);
-      return;
-    }
+    const isShortSyntheticWav =
+      !trimmedUrl || (trimmedUrl.startsWith('data:audio/wav;base64,') && trimmedUrl.length < 75000);
 
     let playableSrc = trimmedUrl;
-    if (
+    if (isShortSyntheticWav) {
+      playableSrc = ttsStreamUrl;
+      fallbackStage = 1;
+    } else if (playableSrc.startsWith('/api/facebook/media-proxy')) {
+      if (!playableSrc.includes('type=audio')) {
+        playableSrc += `${playableSrc.includes('?') ? '&' : '?'}type=audio`;
+      }
+      if (!playableSrc.includes('text=')) {
+        playableSrc += `&text=${encodeURIComponent(cleanText)}`;
+      }
+    } else if (playableSrc.startsWith('/api/media/')) {
+      if (!playableSrc.includes('text=')) {
+        playableSrc += `${playableSrc.includes('?') ? '&' : '?'}text=${encodeURIComponent(cleanText)}`;
+      }
+    } else if (
       playableSrc.startsWith('http') &&
       !playableSrc.includes(window.location.host) &&
       !playableSrc.includes('/api/facebook/media-proxy')
     ) {
-      playableSrc = `/api/facebook/media-proxy?url=${encodeURIComponent(playableSrc)}`;
+      playableSrc = `/api/facebook/media-proxy?type=audio&url=${encodeURIComponent(playableSrc)}&text=${encodeURIComponent(cleanText)}`;
     }
 
+    audio.onended = () => {
+      setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
+    };
+    audio.onerror = () => {
+      triggerFallbackOnSameElement();
+    };
+
     try {
-      const audio = new Audio(playableSrc);
-      audio.preload = 'auto';
-      widgetAudioElementsRef.current[msgId] = audio;
-
-      let fallbackTriggered = false;
-      const runFallbackOnce = () => {
-        if (fallbackTriggered) return;
-        fallbackTriggered = true;
-        void playWidgetFallbackVoice(msgId, transcriptText);
-      };
-
-      audio.onended = () => {
-        setPlayingWidgetAudioId((prev) => (prev === msgId ? null : prev));
-      };
-      audio.onerror = () => {
-        runFallbackOnce();
-      };
+      audio.src = playableSrc;
       const playPromise = audio.play();
       if (playPromise !== undefined) {
         playPromise.catch(() => {
-          runFallbackOnce();
+          triggerFallbackOnSameElement();
         });
       }
     } catch {
-      void playWidgetFallbackVoice(msgId, transcriptText);
+      triggerFallbackOnSameElement();
     }
   };
 
@@ -654,17 +658,19 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
           const blob = new Blob(widgetRecordedChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
           const reader = new FileReader();
           reader.onloadend = async () => {
-            let finalAudioUrl = (reader.result as string) || createWidgetWavDataUrl(durSec);
+            const rawRecordedUrl = (reader.result as string) || '';
             const browserCaptured = widgetLiveTranscriptRef.current.trim() || widgetLiveTranscript.trim();
             const recognizedText =
               customerInput.trim() || browserCaptured || 'សួស្តីបង! សារសម្លេងពីអតិថិជន';
+            let finalAudioUrl = `/api/ai/tts-stream?text=${encodeURIComponent(recognizedText)}`;
 
             try {
               const normRes = await fetch('/api/audio/normalize', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                  audioDataUrl: finalAudioUrl,
+                  audioDataUrl: rawRecordedUrl,
+                  transcript: recognizedText,
                   fallbackText: recognizedText,
                 }),
               });
@@ -1030,7 +1036,14 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
               </span>
             </div>
 
-            {(activeThread?.messages || []).slice(-10).map((msg) => {
+            {[...(activeThread?.messages || [])]
+              .map((m, idx) => ({
+                m,
+                ms: typeof m.createdAtMs === 'number' && Number.isFinite(m.createdAtMs) ? m.createdAtMs : idx,
+                idx,
+              }))
+              .sort((a, b) => (a.ms !== b.ms ? a.ms - b.ms : a.idx - b.idx))
+              .map(({ m: msg }) => {
               const isCustomerMe = msg.sender === 'customer';
               const isBot = msg.sender === 'bot';
 
@@ -1039,12 +1052,20 @@ export const CustomerMessengerWidget: React.FC<CustomerMessengerWidgetProps> = (
                   key={msg.id}
                   className={`flex flex-col ${isCustomerMe ? 'items-end' : 'items-start'}`}
                 >
-                  <span className="text-[9px] text-slate-400 px-1 mb-0.5">
-                    {isCustomerMe
-                      ? `🙋‍♂️ ${msg.senderName || activeThread?.customer.name || 'ខ្ញុំ (ភ្ញៀវ)'}`
-                      : isBot
-                      ? '🤖 ផេកឆ្លើយ Auto (AI Gemini)'
-                      : `💼 ${selectedPage.name.split(' - ')[0]} (Admin)`}
+                  <span className="text-[9px] text-slate-400 px-1 mb-0.5 flex items-center gap-1">
+                    <span>
+                      {isCustomerMe
+                        ? `🙋‍♂️ ${msg.senderName || activeThread?.customer.name || 'ខ្ញុំ (ភ្ញៀវ)'}`
+                        : isBot
+                        ? '🤖 ផេកឆ្លើយ Auto (AI Gemini)'
+                        : `💼 ${selectedPage.name.split(' - ')[0]} (Admin)`}
+                    </span>
+                    {msg.timestamp && (
+                      <>
+                        <span>•</span>
+                        <span>{msg.timestamp}</span>
+                      </>
+                    )}
                   </span>
                   <div
                     className={`max-w-[85%] px-3 py-2 rounded-2xl text-xs leading-relaxed shadow-2xs space-y-1.5 ${

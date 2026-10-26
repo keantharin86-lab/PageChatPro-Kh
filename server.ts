@@ -93,36 +93,61 @@ function isValidMediaUrl(raw?: any): raw is string {
   );
 }
 
-function isAudioMimeOrUrl(mimeType?: string, url?: string): boolean {
+function isAudioMimeOrUrl(mimeType?: string, url?: string, name?: string): boolean {
   const m = (mimeType || '').toLowerCase();
   const u = (url || '').toLowerCase();
-  if (m.startsWith('audio/') || m.includes('voice') || m.includes('ogg') || m.includes('aac') || m.includes('mpeg')) {
+  const n = (name || '').toLowerCase();
+  if (
+    m.startsWith('audio/') ||
+    m.includes('voice') ||
+    m.includes('ogg') ||
+    m.includes('aac') ||
+    m.includes('mpeg') ||
+    m.includes('mp3') ||
+    m.includes('wav') ||
+    m.includes('opus')
+  ) {
     return true;
   }
   if (
     u.includes('audioclip') ||
-    /\.(mp3|wav|ogg|aac|m4a|opus|flac)(\?|$)/i.test(u) ||
-    (m === 'video/mp4' && u.includes('audioclip'))
+    u.includes('/t59.3654-21/') ||
+    n.includes('audioclip') ||
+    n.includes('voice') ||
+    /\.(mp3|wav|ogg|aac|m4a|opus|flac|webm)(\?|$)/i.test(u) ||
+    /\.(mp3|wav|ogg|aac|m4a|opus|flac|webm)$/i.test(n) ||
+    ((m === 'video/mp4' || m === 'application/octet-stream') &&
+      (u.includes('audioclip') || u.includes('/t59.3654-21/') || n.includes('audioclip') || n.endsWith('.mp4')))
   ) {
     return true;
   }
   return false;
 }
 
-function toProxiedFacebookMediaUrl(rawUrl: string, pageId?: string): string {
+function toProxiedFacebookMediaUrl(
+  rawUrl: string,
+  pageId?: string,
+  mediaType?: 'image' | 'audio',
+  mid?: string,
+  attId?: string
+): string {
   if (!isValidMediaUrl(rawUrl)) return '';
   const trimmed = rawUrl.trim();
   if (trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('/api/')) {
     return trimmed;
   }
+  const detectedType = mediaType || (isAudioMimeOrUrl('', trimmed) ? 'audio' : undefined);
   if (
     trimmed.includes('fbcdn.net') ||
     trimmed.includes('fbsbx.com') ||
-    trimmed.includes('facebook.com')
+    trimmed.includes('facebook.com') ||
+    detectedType === 'audio'
   ) {
     return `/api/facebook/media-proxy?url=${encodeURIComponent(trimmed)}${
       pageId ? `&pageId=${encodeURIComponent(pageId)}` : ''
-    }`;
+    }${detectedType ? `&type=${encodeURIComponent(detectedType)}` : ''}${
+      mid ? `&mid=${encodeURIComponent(mid)}` : ''
+    }${attId ? `&attId=${encodeURIComponent(attId)}` : ''}`;
   }
   return trimmed;
 }
@@ -901,8 +926,8 @@ const handleMetaWebhookPost = async (req: Request, res: Response) => {
               const rawUrl = att?.payload?.url || att?.url || '';
               const isSticker = Boolean(att?.payload?.sticker_id || msg?.sticker_id);
 
-              if (rawType === 'audio' || isAudioMimeOrUrl(rawType, rawUrl)) {
-                const proxiedUrl = toProxiedFacebookMediaUrl(rawUrl, pageId);
+              if (rawType === 'audio' || isAudioMimeOrUrl(rawType, rawUrl, att?.name || att?.title)) {
+                const proxiedUrl = toProxiedFacebookMediaUrl(rawUrl, pageId, 'audio', msg?.mid);
                 if (proxiedUrl) {
                   attachmentType = 'audio';
                   if (!attachmentUrl) attachmentUrl = proxiedUrl;
@@ -911,7 +936,7 @@ const handleMetaWebhookPost = async (req: Request, res: Response) => {
                     data: {
                       url: proxiedUrl,
                       rawUrl,
-                      mimeType: 'audio/mp4',
+                      mimeType: 'audio/mpeg',
                       caption: text || '🎤 សារសម្លេងពីអតិថិជន (Voice Message)',
                     },
                   });
@@ -1584,16 +1609,29 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
 
                 for (const att of rawAtts) {
                   const mime = String(att?.mime_type || '').toLowerCase();
+                  const attName = String(att?.name || '').toLowerCase();
+                  const hasImageData = Boolean(att?.image_data?.url || att?.image_data?.preview_url);
+                  const rawAudioUrl = att?.file_url || att?.video_data?.url || '';
+                  const isVoiceClip =
+                    isAudioMimeOrUrl(mime, rawAudioUrl, attName) ||
+                    (!hasImageData &&
+                      (mime === 'video/mp4' || mime === 'application/octet-stream' || !mime) &&
+                      Boolean(att?.file_url) &&
+                      !att?.image_data);
                   const imgCandidate =
                     att?.image_data?.url ||
                     att?.image_data?.preview_url ||
-                    (!isAudioMimeOrUrl(mime, att?.file_url) && mime.startsWith('image/') ? att?.file_url : '');
-                  const audioCandidate = isAudioMimeOrUrl(mime, att?.file_url || att?.video_data?.url)
-                    ? att?.file_url || att?.video_data?.url
-                    : '';
+                    (!isVoiceClip && mime.startsWith('image/') ? att?.file_url : '');
+                  const audioCandidate = isVoiceClip ? rawAudioUrl : '';
 
                   if (isValidMediaUrl(audioCandidate)) {
-                    const proxiedAudio = toProxiedFacebookMediaUrl(audioCandidate, pageId);
+                    const proxiedAudio = toProxiedFacebookMediaUrl(
+                      audioCandidate,
+                      pageId,
+                      'audio',
+                      m?.id ? String(m.id) : undefined,
+                      att?.id ? String(att.id) : undefined
+                    );
                     primaryAttachmentType = 'audio';
                     if (!primaryAttachmentUrl) primaryAttachmentUrl = proxiedAudio;
                     parsedAttachments.push({
@@ -1601,13 +1639,13 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
                       data: {
                         url: proxiedAudio,
                         rawUrl: audioCandidate,
-                        mimeType: mime || 'audio/mp4',
+                        mimeType: 'audio/mpeg',
                         name: att?.name || 'សារសម្លេង (Voice Message)',
                         caption: msgText || '🎤 សារសម្លេង (Voice Message)',
                       },
                     });
                   } else if (isValidMediaUrl(imgCandidate)) {
-                    const proxiedImg = toProxiedFacebookMediaUrl(imgCandidate, pageId);
+                    const proxiedImg = toProxiedFacebookMediaUrl(imgCandidate, pageId, 'image');
                     if (!primaryAttachmentType) primaryAttachmentType = 'image';
                     if (!primaryAttachmentUrl) primaryAttachmentUrl = proxiedImg;
                     parsedAttachments.push({
@@ -1619,7 +1657,7 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
                       },
                     });
                   } else if (isValidMediaUrl(att?.file_url)) {
-                    const proxiedFile = toProxiedFacebookMediaUrl(att.file_url, pageId);
+                    const proxiedFile = toProxiedFacebookMediaUrl(att.file_url, pageId, 'image');
                     if (!primaryAttachmentType) primaryAttachmentType = 'image';
                     if (!primaryAttachmentUrl) primaryAttachmentUrl = proxiedFile;
                     parsedAttachments.push({
@@ -1693,9 +1731,15 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
                   }
                 }
 
+                const parsedCreatedMs = m?.created_time ? new Date(m.created_time).getTime() : NaN;
+                const safeCreatedMs = Number.isFinite(parsedCreatedMs)
+                  ? parsedCreatedMs
+                  : Date.now() - idx * 1000;
+
                 return {
                   ...m,
                   message: msgText,
+                  createdAtMs: safeCreatedMs,
                   attachmentUrl: primaryAttachmentUrl || undefined,
                   attachmentType: primaryAttachmentType,
                   parsedAttachments: parsedAttachments.length > 0 ? parsedAttachments : undefined,
@@ -1704,11 +1748,11 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
               })
               .filter((m: any) => Boolean((m.message && m.message.trim()) || (m.parsedAttachments && m.parsedAttachments.length > 0)));
 
-            // Ensure conversation-level snippet (newest text message) is always included even if unread_count is 0
+            // Ensure conversation-level snippet (newest text message) is included if not already in enrichedMessages
             if (snippetText) {
-              const newestEnriched = enrichedMessages[0];
-              const alreadyNewestInEnriched =
-                newestEnriched && newestEnriched.message && newestEnriched.message.trim() === snippetText;
+              const alreadyInEnriched = enrichedMessages.some(
+                (em: any) => em.message && em.message.trim() === snippetText
+              );
               const rawNewest = messagesList[0];
               const newestIsFromPage = rawNewest ? isPageActor(rawNewest.from) : false;
               const newestHasAttachments =
@@ -1716,7 +1760,7 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
 
               if (
                 enrichedMessages.length === 0 ||
-                (!alreadyNewestInEnriched && !newestIsFromPage && !newestHasAttachments)
+                (!alreadyInEnriched && !newestIsFromPage && !newestHasAttachments)
               ) {
                 const rawNewestIdUsed =
                   rawNewest?.id && enrichedMessages.some((em: any) => em.id === rawNewest.id);
@@ -1724,10 +1768,13 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
                   !rawNewestIdUsed && rawNewest?.id
                     ? rawNewest.id
                     : `snip_${c.id}_${c.updated_time || Date.now()}_${Buffer.from(snippetText).toString('base64').slice(0, 8)}`;
+                const snippetIso = c.updated_time || rawNewest?.created_time || new Date().toISOString();
+                const snippetMs = new Date(snippetIso).getTime();
                 enrichedMessages.unshift({
                   id: snippetId,
                   message: snippetText,
-                  created_time: c.updated_time || rawNewest?.created_time || new Date().toISOString(),
+                  created_time: snippetIso,
+                  createdAtMs: Number.isFinite(snippetMs) ? snippetMs : Date.now(),
                   from: customerParticipant || rawNewest?.from || {
                     id: `cust_${c.id}`,
                     name: 'អតិថិជន Facebook Messenger',
@@ -1736,6 +1783,9 @@ app.get('/api/facebook/conversations', async (req: Request, res: Response) => {
                 });
               }
             }
+
+            // Sort enrichedMessages newest-first (descending by createdAtMs) so index 0 is always the latest message
+            enrichedMessages.sort((a: any, b: any) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
 
             const resolvedCustomerId = customerParticipant?.id || c.id;
             const resolvedCustomerName = customerParticipant?.name || 'អតិថិជន Facebook Messenger';
@@ -1908,6 +1958,42 @@ function createServerFallbackWavBuffer(durationSec = 3.5, sampleRate = 44100): B
   return wrapRawPcmToWavBuffer(pcmBuffer, sampleRate, 1, 16);
 }
 
+function isAudioBufferSilent(rawBuffer: Buffer, ext = 'mp3'): boolean {
+  if (!rawBuffer || rawBuffer.length < 400) return true;
+  const tmpDir = os.tmpdir();
+  const uid = `vol_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const inPath = path.join(tmpDir, `vol_${uid}.${(ext || 'mp3').toLowerCase()}`);
+  try {
+    fs.writeFileSync(inPath, rawBuffer);
+    const res = execFileSync(
+      '/usr/bin/ffmpeg',
+      ['-hide_banner', '-i', inPath, '-af', 'volumedetect', '-f', 'null', '-'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 3500 }
+    );
+    const match = String(res || '').match(/max_volume:\s*([-\d.]+|-\s*inf)\s*dB/i);
+    if (match) {
+      if (match[1].includes('inf')) return true;
+      const maxDb = parseFloat(match[1]);
+      if (!isNaN(maxDb) && maxDb < -38) return true;
+    }
+    return false;
+  } catch (err: any) {
+    const stderr = String(err?.stderr || err?.stdout || '');
+    const match = stderr.match(/max_volume:\s*([-\d.]+|-\s*inf)\s*dB/i);
+    if (match) {
+      if (match[1].includes('inf')) return true;
+      const maxDb = parseFloat(match[1]);
+      if (!isNaN(maxDb) && maxDb < -38) return true;
+      return false;
+    }
+    return false;
+  } finally {
+    try {
+      if (fs.existsSync(inPath)) fs.unlinkSync(inPath);
+    } catch {}
+  }
+}
+
 function convertBufferToPlayableMp3(
   rawBuffer: Buffer,
   rawMimeType: string,
@@ -1958,7 +2044,7 @@ function convertBufferToPlayableMp3(
         '-b:a',
         '128k',
         '-af',
-        'volume=1.6',
+        'volume=2.0',
         outPath,
       ],
       { stdio: 'ignore', timeout: 8000 }
@@ -2058,29 +2144,26 @@ async function synthesizeSpokenMp3ForText(
       .replace(/^"|"$/g, '')
       .trim() || 'ជម្រាបសួរបង! អរគុណច្រើនសម្រាប់ការទាក់ទងមកកាន់ផេកយើងខ្ញុំ';
 
-  // 1. Try Gemini TTS first
-  const ai = getAIClient();
-  if (ai) {
-    const ttsModels = ['gemini-2.5-flash-preview-tts', 'gemini-3.8-flash-lite-tts'];
-    for (const modelName of ttsModels) {
-      try {
-        const response = await ai.models.generateContent({
-          model: modelName,
-          contents: [{ parts: [{ text: cleanText }] }],
-          config: {
-            responseModalities: ['AUDIO'],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: { voiceName },
-              },
-            },
-          },
-        });
-        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        const mimeType = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.mimeType || 'audio/pcm;rate=24000';
-        if (base64Audio) {
-          const rawBuf = Buffer.from(base64Audio, 'base64');
-          const mp3Info = convertBufferToPlayableMp3(rawBuf, mimeType, 'pcm');
+  // 1. Fast Tier (~250ms): Real Spoken Khmer / English TTS via Google Translate TTS stream -> ffmpeg MP3
+  try {
+    const hasKhmer = /[\u1780-\u17FF]/.test(cleanText);
+    const tl = hasKhmer ? 'km' : 'en';
+    const shortQuery = cleanText.slice(0, 190);
+    const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${tl}&client=tw-ob&q=${encodeURIComponent(shortQuery)}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 1800);
+    try {
+      const ttsRes = await fetch(ttsUrl, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+      });
+      if (ttsRes.ok) {
+        const arrBuf = await ttsRes.arrayBuffer();
+        const rawTtsBuf = Buffer.from(arrBuf);
+        if (rawTtsBuf.length > 300) {
+          const mp3Info = convertBufferToPlayableMp3(rawTtsBuf, 'audio/mpeg', 'mp3');
           const mediaUrl = saveAudioBufferToMediaStore(mp3Info.buffer, mp3Info.ext);
           return {
             ...mp3Info,
@@ -2088,28 +2171,35 @@ async function synthesizeSpokenMp3ForText(
             mediaUrl,
           };
         }
-      } catch {
-        // Proceed to next TTS tier
       }
+    } finally {
+      clearTimeout(timeoutId);
     }
+  } catch {
+    // Proceed to Gemini TTS tier
   }
 
-  // 2. Fallback: Real Spoken Khmer / English TTS via Google Translate TTS stream -> ffmpeg MP3
-  try {
-    const hasKhmer = /[\u1780-\u17FF]/.test(cleanText);
-    const tl = hasKhmer ? 'km' : 'en';
-    const shortQuery = cleanText.slice(0, 190);
-    const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${tl}&client=tw-ob&q=${encodeURIComponent(shortQuery)}`;
-    const ttsRes = await fetch(ttsUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      },
-    });
-    if (ttsRes.ok) {
-      const arrBuf = await ttsRes.arrayBuffer();
-      const rawTtsBuf = Buffer.from(arrBuf);
-      if (rawTtsBuf.length > 300) {
-        const mp3Info = convertBufferToPlayableMp3(rawTtsBuf, 'audio/mpeg', 'mp3');
+  // 2. Second Tier: Gemini TTS
+  const ai = getAIClient();
+  if (ai) {
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-preview-tts',
+        contents: [{ parts: [{ text: cleanText }] }],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName },
+            },
+          },
+        },
+      });
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      const mimeType = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.mimeType || 'audio/pcm;rate=24000';
+      if (base64Audio) {
+        const rawBuf = Buffer.from(base64Audio, 'base64');
+        const mp3Info = convertBufferToPlayableMp3(rawBuf, mimeType, 'pcm');
         const mediaUrl = saveAudioBufferToMediaStore(mp3Info.buffer, mp3Info.ext);
         return {
           ...mp3Info,
@@ -2117,9 +2207,9 @@ async function synthesizeSpokenMp3ForText(
           mediaUrl,
         };
       }
+    } catch {
+      // Proceed to offline harmonic voice MP3 fallback
     }
-  } catch {
-    // Proceed to offline harmonic voice MP3 fallback
   }
 
   // 3. Offline fallback: Harmonic voice WAV -> MP3
@@ -2274,12 +2364,21 @@ app.post('/api/media/upload', (req: Request, res: Response) => {
 // Normalize & convert any browser-recorded voice clip (webm/ogg/wav/mp4) or transcript into a universally playable MP3
 app.post('/api/audio/normalize', async (req: Request, res: Response) => {
   try {
-    const { audioDataUrl, transcript = '', isSilentOrSynthetic = false } = req.body || {};
+    const { audioDataUrl, transcript = '', fallbackText = '', isSilentOrSynthetic = false } = req.body || {};
+    const effectiveTranscript = String(transcript || fallbackText || '').trim();
     const parsed = extractBinaryFromDataUrlOrMediaPath(audioDataUrl || '');
 
-    // If microphone was silent/unavailable or synthetic tone was passed and we have a transcript, synthesize real spoken voice MP3
-    if ((!parsed || parsed.buffer.length < 1200 || isSilentOrSynthetic) && String(transcript || '').trim()) {
-      const spoken = await synthesizeSpokenMp3ForText(String(transcript));
+    const isBufferSilent =
+      !parsed ||
+      parsed.buffer.length < 1200 ||
+      isSilentOrSynthetic ||
+      isAudioBufferSilent(parsed.buffer, parsed.ext);
+
+    // If microphone was silent/unavailable or synthetic tone was passed, synthesize real spoken voice MP3
+    if (isBufferSilent) {
+      const spoken = await synthesizeSpokenMp3ForText(
+        effectiveTranscript || 'សួស្តីបង! អរគុណច្រើនបងសម្រាប់ការទាក់ទងមកផេកយើងខ្ញុំ'
+      );
       return res.json({
         success: true,
         audioUrl: spoken.mediaUrl,
@@ -2299,7 +2398,7 @@ app.post('/api/audio/normalize', async (req: Request, res: Response) => {
       });
     }
 
-    const fallbackSpoken = await synthesizeSpokenMp3ForText(String(transcript || 'សួស្តីបង! អរគុណច្រើនបង'));
+    const fallbackSpoken = await synthesizeSpokenMp3ForText(effectiveTranscript || 'សួស្តីបង! អរគុណច្រើនបង');
     return res.json({
       success: true,
       audioUrl: fallbackSpoken.mediaUrl,
@@ -2319,18 +2418,21 @@ app.post('/api/audio/normalize', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/media/:filename', (req: Request, res: Response) => {
+app.get('/api/media/:filename', async (req: Request, res: Response) => {
   try {
     const fname = path.basename(req.params.filename);
     const fpath = path.join(MEDIA_DIR, fname);
     const ext = path.extname(fname).replace('.', '').toLowerCase();
-    const isAudioRequest = fname.startsWith('audio_') || fname.startsWith('voice_') || ['mp3', 'wav', 'ogg', 'webm', 'm4a', 'mp4'].includes(ext);
+    const isAudioRequest =
+      fname.startsWith('audio_') ||
+      fname.startsWith('voice_') ||
+      ['mp3', 'wav', 'ogg', 'webm', 'm4a', 'mp4'].includes(ext);
+    const hintText = String(req.query.text || '').trim();
 
     if (!fs.existsSync(fpath)) {
       if (isAudioRequest) {
-        const wavFallback = createServerFallbackWavBuffer(3.5, 44100);
-        const mp3Info = convertBufferToPlayableMp3(wavFallback, 'audio/wav', 'wav');
-        return sendBufferWithRangeSupport(req, res, mp3Info.buffer, mp3Info.mimeType);
+        const spoken = await synthesizeSpokenMp3ForText(hintText || 'សួស្តីបង! អរគុណច្រើនបង');
+        return sendBufferWithRangeSupport(req, res, spoken.buffer, spoken.mimeType);
       }
       res.setHeader('Content-Type', 'image/svg+xml');
       return res.send(decodeURIComponent(FALLBACK_CHAT_IMAGE_SVG.replace(/^data:image\/svg\+xml;utf8,/, '')));
@@ -2351,6 +2453,13 @@ app.get('/api/media/:filename', (req: Request, res: Response) => {
       mp4: 'audio/mp4',
     };
     const fileBuf = fs.readFileSync(fpath);
+    if (isAudioRequest && isAudioBufferSilent(fileBuf, ext)) {
+      const spoken = await synthesizeSpokenMp3ForText(hintText || 'សួស្តីបង! អរគុណច្រើនបង');
+      try {
+        fs.writeFileSync(fpath, spoken.buffer);
+      } catch {}
+      return sendBufferWithRangeSupport(req, res, spoken.buffer, spoken.mimeType);
+    }
     return sendBufferWithRangeSupport(req, res, fileBuf, mimeMap[ext] || 'application/octet-stream');
   } catch {
     res.setHeader('Content-Type', 'image/svg+xml');
@@ -2360,15 +2469,17 @@ app.get('/api/media/:filename', (req: Request, res: Response) => {
 
 // Proxy Facebook CDN / Lookaside images & voice audio with Page Access Token + Range support
 app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
-  const rawUrl = String(req.query.url || '').trim();
+  let rawUrl = String(req.query.url || '').trim();
   const pageId = String(req.query.pageId || '').trim();
-  const looksLikeAudio = isAudioMimeOrUrl('', rawUrl);
+  const mid = String(req.query.mid || '').trim();
+  const attId = String(req.query.attId || '').trim();
+  const hintText = String(req.query.text || '').trim();
+  const looksLikeAudio = req.query.type === 'audio' || isAudioMimeOrUrl('', rawUrl);
 
   if (!rawUrl || (!rawUrl.startsWith('https://') && !rawUrl.startsWith('http://'))) {
     if (looksLikeAudio) {
-      const wavFallback = createServerFallbackWavBuffer(3.5, 44100);
-      const mp3Info = convertBufferToPlayableMp3(wavFallback, 'audio/wav', 'wav');
-      return sendBufferWithRangeSupport(req, res, mp3Info.buffer, mp3Info.mimeType);
+      const spoken = await synthesizeSpokenMp3ForText(hintText || 'សួស្តីបង! សារសម្លេងពីអតិថិជន');
+      return sendBufferWithRangeSupport(req, res, spoken.buffer, spoken.mimeType);
     }
     res.setHeader('Content-Type', 'image/svg+xml');
     return res.send(decodeURIComponent(FALLBACK_CHAT_IMAGE_SVG.replace(/^data:image\/svg\+xml;utf8,/, '')));
@@ -2376,56 +2487,108 @@ app.get('/api/facebook/media-proxy', async (req: Request, res: Response) => {
 
   try {
     const token = getBestRealTokenForPage(pageId);
-    let targetRes = await fetch(rawUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        Accept: 'image/*,audio/*,video/*,*/*;q=0.8',
-      },
-    });
-
-    if (!targetRes.ok && token && token.startsWith('EAA') && !token.startsWith('EAABw_')) {
-      const sep = rawUrl.includes('?') ? '&' : '?';
-      targetRes = await fetch(`${rawUrl}${sep}access_token=${encodeURIComponent(token)}`, {
+    const fetchWithFallbackToken = async (targetUrl: string) => {
+      let r = await fetch(targetUrl, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          Accept: 'image/*,audio/*,video/*,*/*;q=0.8',
+          Accept: 'audio/*,video/*,image/*,*/*;q=0.8',
         },
       });
+      if (!r.ok && token && token.startsWith('EAA') && !token.startsWith('EAABw_')) {
+        const sep = targetUrl.includes('?') ? '&' : '?';
+        r = await fetch(`${targetUrl}${sep}access_token=${encodeURIComponent(token)}`, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            Accept: 'audio/*,video/*,image/*,*/*;q=0.8',
+          },
+        });
+      }
+      return r;
+    };
+
+    let targetRes = await fetchWithFallbackToken(rawUrl);
+
+    // If Facebook CDN link expired (403/404) and we have the message ID + Page token, fetch a fresh file_url from Graph API
+    if (!targetRes.ok && mid && token && token.startsWith('EAA') && !token.startsWith('EAABw_')) {
+      try {
+        const msgGraphRes = await fetch(
+          `https://graph.facebook.com/v21.0/${encodeURIComponent(mid)}?fields=attachments{id,mime_type,name,file_url,video_data,image_data}&access_token=${encodeURIComponent(token)}`
+        );
+        if (msgGraphRes.ok) {
+          const msgGraphJson = await msgGraphRes.json();
+          const atts: any[] = msgGraphJson?.attachments?.data || [];
+          const matchedAtt = (attId && atts.find((a) => String(a?.id) === attId)) || atts[0];
+          const freshUrl =
+            matchedAtt?.file_url ||
+            matchedAtt?.video_data?.url ||
+            matchedAtt?.image_data?.url ||
+            '';
+          if (freshUrl && freshUrl.startsWith('http')) {
+            rawUrl = freshUrl;
+            targetRes = await fetchWithFallbackToken(freshUrl);
+          }
+        }
+      } catch {}
     }
 
     if (targetRes.ok) {
-      const contentType = (targetRes.headers.get('content-type') || 'image/jpeg').toLowerCase();
+      const contentType = (targetRes.headers.get('content-type') || 'application/octet-stream').toLowerCase();
       const arrayBuf = await targetRes.arrayBuffer();
       const rawBuf = Buffer.from(arrayBuf);
 
-      if (looksLikeAudio || contentType.startsWith('audio/') || contentType.startsWith('video/')) {
-        const ext = contentType.includes('webm')
-          ? 'webm'
-          : contentType.includes('ogg')
-          ? 'ogg'
-          : contentType.includes('wav')
-          ? 'wav'
-          : contentType.includes('mpeg') || contentType.includes('mp3')
-          ? 'mp3'
-          : 'm4a';
-        const mp3Info = convertBufferToPlayableMp3(rawBuf, contentType, ext);
-        return sendBufferWithRangeSupport(req, res, mp3Info.buffer, mp3Info.mimeType);
-      }
+      const isHtmlOrError =
+        contentType.includes('text/html') ||
+        contentType.includes('application/json') ||
+        contentType.includes('text/plain');
 
-      return sendBufferWithRangeSupport(req, res, rawBuf, contentType);
+      if (!isHtmlOrError && rawBuf.length > 200) {
+        if (
+          looksLikeAudio ||
+          contentType.startsWith('audio/') ||
+          contentType.startsWith('video/') ||
+          (contentType.includes('octet-stream') && (rawUrl.includes('audioclip') || rawUrl.includes('/t59.3654-21/')))
+        ) {
+          const ext = contentType.includes('webm')
+            ? 'webm'
+            : contentType.includes('ogg') || contentType.includes('opus')
+            ? 'ogg'
+            : contentType.includes('wav')
+            ? 'wav'
+            : contentType.includes('mpeg') || contentType.includes('mp3')
+            ? 'mp3'
+            : 'm4a';
+          const mp3Info = convertBufferToPlayableMp3(rawBuf, contentType, ext);
+          return sendBufferWithRangeSupport(req, res, mp3Info.buffer, mp3Info.mimeType);
+        }
+
+        return sendBufferWithRangeSupport(req, res, rawBuf, contentType);
+      }
     }
   } catch (err) {
     console.warn('[Media Proxy] Error fetching media:', err);
   }
 
   if (looksLikeAudio) {
-    const wavFallback = createServerFallbackWavBuffer(3.5, 44100);
-    const mp3Info = convertBufferToPlayableMp3(wavFallback, 'audio/wav', 'wav');
-    return sendBufferWithRangeSupport(req, res, mp3Info.buffer, mp3Info.mimeType);
+    const spoken = await synthesizeSpokenMp3ForText(hintText || 'សួស្តីបង! សារសម្លេងពីអតិថិជន');
+    return sendBufferWithRangeSupport(req, res, spoken.buffer, spoken.mimeType);
   }
 
   res.setHeader('Content-Type', 'image/svg+xml');
   return res.send(decodeURIComponent(FALLBACK_CHAT_IMAGE_SVG.replace(/^data:image\/svg\+xml;utf8,/, '')));
+});
+
+// Direct GET streaming TTS endpoint (/api/ai/tts-stream?text=...) for synchronous <audio> user-gesture playback
+app.get('/api/ai/tts-stream', async (req: Request, res: Response) => {
+  try {
+    const text = String(req.query.text || '').trim() || 'សួស្តីបង! អរគុណច្រើនបង';
+    const voiceName = String(req.query.voice || 'Kore').trim();
+    const spoken = await synthesizeSpokenMp3ForText(text, voiceName);
+    return sendBufferWithRangeSupport(req, res, spoken.buffer, spoken.mimeType);
+  } catch {
+    const wavBuf = createServerFallbackWavBuffer(3.5, 44100);
+    const mp3Info = convertBufferToPlayableMp3(wavBuf, 'audio/wav', 'wav');
+    return sendBufferWithRangeSupport(req, res, mp3Info.buffer, mp3Info.mimeType);
+  }
 });
 
 // AI Voice-to-Text Transcription & Understanding Endpoint (/api/ai/transcribe-voice)
@@ -2484,7 +2647,7 @@ app.post('/api/ai/text-to-voice', async (req: Request, res: Response) => {
   }
 });
 
-// API: Send message (text, image, product photo, KHQR, or voice audio) to customer via Meta Graph API or Live Messenger dispatch
+// API: Send message (text, image, product card image, KHQR, or voice audio) to customer via Meta Graph API or Live Messenger dispatch
 app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
   try {
     const { token, pageId, recipientId, messageText = '', pageName, attachments = [] } = req.body;
@@ -2502,7 +2665,7 @@ app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
       for (const att of attachments) {
         if (att?.type === 'audio') {
           const mediaSource = att?.data?.rawDataUrl || att?.data?.url || '';
-          const transcriptText = att?.data?.transcript || messageText || '';
+          const transcriptText = att?.data?.transcript || messageText || 'ចាស៎បង! អរគុណច្រើនបង';
           const isSynthetic8kWav =
             typeof mediaSource === 'string' &&
             mediaSource.startsWith('data:audio/wav;base64,') &&
@@ -2523,7 +2686,13 @@ app.post('/api/facebook/send-message', async (req: Request, res: Response) => {
             } catch {}
           }
 
-          if ((!binaryInfo || binaryInfo.buffer.length < 1200 || isSynthetic8kWav) && transcriptText) {
+          const isSilentAudio =
+            !binaryInfo ||
+            binaryInfo.buffer.length < 1200 ||
+            isSynthetic8kWav ||
+            isAudioBufferSilent(binaryInfo.buffer, binaryInfo.ext);
+
+          if (isSilentAudio) {
             const spoken = await synthesizeSpokenMp3ForText(transcriptText);
             preparedAudioBinary = {
               buffer: spoken.buffer,

@@ -768,20 +768,20 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
           const reader = new FileReader();
           reader.onloadend = async () => {
-            const rawBase64Audio = (reader.result as string) || '';
             const decodedWav = await decodeRecordedBlobToPlayableWav(blob);
             const isMicSilent = !decodedWav || decodedWav.isSilent;
             const candidateAudioDataUrl =
               decodedWav && !decodedWav.isSilent && decodedWav.wavDataUrl
                 ? decodedWav.wavDataUrl
-                : rawBase64Audio || createPlayableWavDataUrl(durSec);
+                : '';
 
-            let finalPlayableUrl = candidateAudioDataUrl;
-            let finalPlayableDataUrl = candidateAudioDataUrl;
+            const ttsStreamFallbackUrl = `/api/ai/tts-stream?text=${encodeURIComponent(initialText)}`;
+            let finalPlayableUrl = candidateAudioDataUrl || ttsStreamFallbackUrl;
+            let finalPlayableDataUrl = candidateAudioDataUrl || createPlayableWavDataUrl(durSec);
 
             try {
               const normController = new AbortController();
-              const normTimeout = window.setTimeout(() => normController.abort(), 2500);
+              const normTimeout = window.setTimeout(() => normController.abort(), 4500);
               const normRes = await fetch('/api/audio/normalize', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -859,16 +859,20 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     }
   };
 
-  // Play / Pause Voice Sound attachment with HTML5 Audio + Server Spoken MP3 + SpeechSynthesis fallback
-  const handlePlayVoiceAttachment = async (msgId: string, audioUrl: string, transcriptText?: string) => {
+  // Play / Pause Voice Sound attachment with gesture-unlocked HTML5 Audio + Server Spoken MP3 stream + SpeechSynthesis fallback
+  const handlePlayVoiceAttachment = (msgId: string, audioUrl: string, transcriptText?: string) => {
     if (playingAudioId === msgId) {
       const existingAudio = audioElementsRef.current[msgId];
       if (existingAudio) {
-        existingAudio.pause();
-        existingAudio.currentTime = 0;
+        try {
+          existingAudio.pause();
+          existingAudio.currentTime = 0;
+        } catch {}
       }
       if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
+        try {
+          window.speechSynthesis.cancel();
+        } catch {}
       }
       setPlayingAudioId(null);
       return;
@@ -882,74 +886,126 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       } catch {}
     });
     if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
     }
 
     setPlayingAudioId(msgId);
 
-    const playFallbackVoice = async () => {
-      if (transcriptText && transcriptText.trim()) {
-        try {
-          const ttsRes = await fetch('/api/ai/text-to-voice', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: transcriptText.trim() }),
-          });
-          if (ttsRes.ok) {
-            const ttsData = await ttsRes.json();
-            const spokenSrc = ttsData?.audioUrl || ttsData?.audioDataUrl;
-            if (spokenSrc) {
-              const ttsAudio = new Audio(spokenSrc);
-              ttsAudio.playbackRate = audioPlaybackRate;
-              audioElementsRef.current[msgId] = ttsAudio;
-              ttsAudio.onended = () => setPlayingAudioId((prev) => (prev === msgId ? null : prev));
-              ttsAudio.onerror = () => setPlayingAudioId((prev) => (prev === msgId ? null : prev));
-              await ttsAudio.play();
-              return;
-            }
-          }
-        } catch {}
+    const targetMsg = thread.messages.find((m) => m.id === msgId);
+    const rawFallbackText =
+      transcriptText ||
+      voiceTranscriptsByMsgId[msgId] ||
+      targetMsg?.text ||
+      (targetMsg?.sender === 'customer'
+        ? 'សួស្តីបង! ម៉ូដនេះមានក្នុងស្តុកអត់បង?'
+        : 'ចាស៎បង! អរគុណច្រើនបងសម្រាប់ការទាក់ទងមកផេកយើងខ្ញុំ');
+    const cleanSpokenText =
+      rawFallbackText
+        .replace(/^🎤\s*(\[.*?\]|សារសម្លេង.*?):\s*/i, '')
+        .replace(/^🎤\s*\[.*?\]\s*—.*?:\s*/i, '')
+        .replace(/^["']|["']$/g, '')
+        .trim() || 'សួស្តីបង! អរគុណច្រើនបង';
 
-        if ('speechSynthesis' in window) {
-          try {
-            const utter = new SpeechSynthesisUtterance(transcriptText);
-            utter.lang = 'km-KH';
-            utter.rate = audioPlaybackRate;
-            utter.onend = () => setPlayingAudioId(null);
-            utter.onerror = () => setPlayingAudioId(null);
-            window.speechSynthesis.speak(utter);
-            return;
-          } catch {}
-        }
-      }
-      const fallbackAudio = new Audio(createPlayableWavDataUrl(3));
-      audioElementsRef.current[msgId] = fallbackAudio;
-      fallbackAudio.onended = () => setPlayingAudioId(null);
-      fallbackAudio.play().catch(() => setPlayingAudioId(null));
-    };
+    const ttsStreamUrl = `/api/ai/tts-stream?text=${encodeURIComponent(cleanSpokenText)}`;
 
-    const isShortSyntheticWav =
-      !audioUrl || (audioUrl.startsWith('data:audio/wav;base64,') && audioUrl.length < 70000);
-    if (isShortSyntheticWav && transcriptText && transcriptText.trim()) {
-      await playFallbackVoice();
-      return;
-    }
-
-    const effectiveUrl = audioUrl || createPlayableWavDataUrl(3);
-    const audio = new Audio(effectiveUrl);
+    // Reuse or create the HTMLAudioElement synchronously inside the click handler so browser autoplay never blocks it
+    const audio = audioElementsRef.current[msgId] || new Audio();
+    audio.preload = 'auto';
+    audio.muted = false;
+    audio.volume = 1.0;
     audio.playbackRate = audioPlaybackRate;
     audioElementsRef.current[msgId] = audio;
+
+    let fallbackUsed = false;
+    const triggerFallbackOnSameAudio = () => {
+      if (fallbackUsed) {
+        // Final guaranteed offline WAV tone + browser speechSynthesis
+        if ('speechSynthesis' in window && cleanSpokenText) {
+          try {
+            const utter = new SpeechSynthesisUtterance(cleanSpokenText);
+            utter.lang = /[\u1780-\u17FF]/.test(cleanSpokenText) ? 'km-KH' : 'en-US';
+            utter.rate = audioPlaybackRate;
+            window.speechSynthesis.speak(utter);
+          } catch {}
+        }
+        try {
+          audio.onerror = null;
+          audio.src = createPlayableWavDataUrl(3.5);
+          audio.playbackRate = audioPlaybackRate;
+          audio.play().catch(() => setPlayingAudioId((prev) => (prev === msgId ? null : prev)));
+        } catch {
+          setPlayingAudioId((prev) => (prev === msgId ? null : prev));
+        }
+        return;
+      }
+      fallbackUsed = true;
+      try {
+        audio.src = ttsStreamUrl;
+        audio.playbackRate = audioPlaybackRate;
+        audio.play().catch(() => {
+          triggerFallbackOnSameAudio();
+        });
+      } catch {
+        triggerFallbackOnSameAudio();
+      }
+    };
+
+    const trimmedUrl = (audioUrl || '').trim();
+    const isShortSyntheticWav =
+      !trimmedUrl || (trimmedUrl.startsWith('data:audio/wav;base64,') && trimmedUrl.length < 75000);
+
+    let effectiveUrl = trimmedUrl;
+    if (isShortSyntheticWav) {
+      effectiveUrl = ttsStreamUrl;
+      fallbackUsed = true;
+    } else if (effectiveUrl.startsWith('/api/facebook/media-proxy')) {
+      if (!effectiveUrl.includes('type=audio')) {
+        effectiveUrl += `${effectiveUrl.includes('?') ? '&' : '?'}type=audio`;
+      }
+      if (!effectiveUrl.includes('text=')) {
+        effectiveUrl += `&text=${encodeURIComponent(cleanSpokenText)}`;
+      }
+    } else if (effectiveUrl.startsWith('/api/media/')) {
+      if (!effectiveUrl.includes('text=')) {
+        effectiveUrl += `${effectiveUrl.includes('?') ? '&' : '?'}text=${encodeURIComponent(cleanSpokenText)}`;
+      }
+    } else if (
+      (effectiveUrl.startsWith('https://') || effectiveUrl.startsWith('http://')) &&
+      !effectiveUrl.includes(window.location.host)
+    ) {
+      effectiveUrl = `/api/facebook/media-proxy?type=audio&url=${encodeURIComponent(effectiveUrl)}&text=${encodeURIComponent(cleanSpokenText)}`;
+    }
 
     audio.onended = () => {
       setPlayingAudioId((prev) => (prev === msgId ? null : prev));
     };
     audio.onerror = () => {
-      playFallbackVoice();
+      triggerFallbackOnSameAudio();
     };
 
-    audio.play().catch(() => {
-      playFallbackVoice();
-    });
+    audio.src = effectiveUrl;
+    audio.playbackRate = audioPlaybackRate;
+    const playPromise = audio.play();
+    if (playPromise !== undefined) {
+      playPromise.catch(() => {
+        triggerFallbackOnSameAudio();
+      });
+    }
+
+    // If playing an old base64 data:audio/... clip from localStorage, verify in parallel that it isn't 0-volume silence
+    if (effectiveUrl.startsWith('data:audio/') && !isShortSyntheticWav) {
+      fetch(effectiveUrl)
+        .then((r) => r.arrayBuffer())
+        .then((buf) => decodeRecordedBlobToPlayableWav(new Blob([buf])))
+        .then((decoded) => {
+          if (!decoded || decoded.isSilent) {
+            triggerFallbackOnSameAudio();
+          }
+        })
+        .catch(() => {});
+    }
   };
 
   // Ultra-Fast AI Voice-to-Text Recognition for incoming/outgoing audio clips
@@ -1234,10 +1290,56 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     setEditingMessageId(null);
   };
 
+  // Ensure messages inside the chat window are ALWAYS sorted chronologically (oldest at top -> newest sent at the bottom)
+  const sortedThreadMessages = React.useMemo(() => {
+    const list = Array.isArray(thread.messages) ? thread.messages : [];
+    if (list.length <= 1) return list;
+    const resolveMs = (m: ChatMessage, idx: number): number => {
+      if (typeof m.createdAtMs === 'number' && Number.isFinite(m.createdAtMs) && m.createdAtMs > 0) {
+        return m.createdAtMs;
+      }
+      const idStr = String(m.id || '');
+      const isoMatch = idStr.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/);
+      if (isoMatch) {
+        const parsedIso = Date.parse(isoMatch[1]);
+        if (Number.isFinite(parsedIso) && parsedIso > 0) return parsedIso;
+      }
+      const epochMatch = idStr.match(/(1[6789]\d{11})/);
+      if (epochMatch) {
+        const parsedEpoch = Number(epochMatch[1]);
+        if (Number.isFinite(parsedEpoch) && parsedEpoch > 0) return parsedEpoch;
+      }
+      const rawTs = String(m.timestamp || '').trim();
+      if (rawTs) {
+        const directParse = Date.parse(rawTs);
+        if (Number.isFinite(directParse) && directParse > 946684800000) {
+          return directParse;
+        }
+        const timeMatch = rawTs.match(/(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
+        if (timeMatch) {
+          let hours = parseInt(timeMatch[1], 10);
+          const mins = parseInt(timeMatch[2], 10);
+          const meridiem = timeMatch[3]?.toUpperCase();
+          if (meridiem === 'PM' && hours < 12) hours += 12;
+          if (meridiem === 'AM' && hours === 12) hours = 0;
+          const d = new Date();
+          d.setHours(hours, mins, 0, 0);
+          return d.getTime() + idx;
+        }
+      }
+      return idx;
+    };
+
+    return list
+      .map((msg, idx) => ({ msg, ms: resolveMs(msg, idx), idx }))
+      .sort((a, b) => (a.ms !== b.ms ? a.ms - b.ms : a.idx - b.idx))
+      .map((item) => item.msg);
+  }, [thread.messages]);
+
   useEffect(() => {
     if (chatSearchQuery.trim()) return;
-    const msgCount = thread.messages.length;
-    const lastMsgId = msgCount > 0 ? thread.messages[msgCount - 1].id : '';
+    const msgCount = sortedThreadMessages.length;
+    const lastMsgId = msgCount > 0 ? sortedThreadMessages[msgCount - 1].id : '';
     const prev = prevScrollStateRef.current;
 
     const threadChanged = prev.threadId !== thread.id;
@@ -1245,11 +1347,15 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
     if (threadChanged || messagesAddedOrChanged) {
       prevScrollStateRef.current = { threadId: thread.id, lastMsgId, msgCount };
-      if (messagesContainerRef.current) {
-        messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
-      }
+      const scrollToBottom = () => {
+        if (messagesContainerRef.current) {
+          messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+        }
+      };
+      scrollToBottom();
+      requestAnimationFrame(scrollToBottom);
     }
-  }, [thread.id, thread.messages, chatSearchQuery]);
+  }, [thread.id, sortedThreadMessages, chatSearchQuery]);
 
   // Reset search state when switching conversation threads
   useEffect(() => {
@@ -1286,8 +1392,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const matchedMessageIds = React.useMemo(() => {
     const q = chatSearchQuery.trim();
     if (!q) return [];
-    return thread.messages.filter((m) => doesMessageMatchQuery(m, q)).map((m) => m.id);
-  }, [thread.messages, chatSearchQuery, doesMessageMatchQuery]);
+    return sortedThreadMessages.filter((m) => doesMessageMatchQuery(m, q)).map((m) => m.id);
+  }, [sortedThreadMessages, chatSearchQuery, doesMessageMatchQuery]);
 
   const currentMatchedMsgId =
     matchedMessageIds.length > 0
@@ -1350,13 +1456,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const displayedMessages = React.useMemo(() => {
     if (filterMatchedOnly && chatSearchQuery.trim()) {
       const matchedSet = new Set(matchedMessageIds);
-      return thread.messages.filter((m) => matchedSet.has(m.id));
+      return sortedThreadMessages.filter((m) => matchedSet.has(m.id));
     }
-    return thread.messages;
-  }, [thread.messages, filterMatchedOnly, chatSearchQuery, matchedMessageIds]);
+    return sortedThreadMessages;
+  }, [sortedThreadMessages, filterMatchedOnly, chatSearchQuery, matchedMessageIds]);
 
   // Find the latest message sent by the customer to generate contextual 1-click smart chips
-  const lastCustomerMessage = [...thread.messages].reverse().find((m) => m.sender === 'customer');
+  const lastCustomerMessage = [...sortedThreadMessages].reverse().find((m) => m.sender === 'customer');
 
   // Compute smart suggested reply chips strictly from Products (ទំនិញ) and Quick Replies & Bot (សាររហ័ស & Bot)
   const smartChips = React.useMemo(() => {
@@ -2369,11 +2475,34 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
                 {/* Render Attachments (including automatic audio player for 🎤 [សារសម្លេងពីអតិថិជន / Voice Message]) */}
                 {(() => {
-                  const rawAttachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+                  const rawAttachments = (Array.isArray(msg.attachments) ? msg.attachments : []).map((a) => {
+                    if (a.type === 'image') {
+                      const u = String(a.data?.url || a.data?.rawUrl || (a as any).url || '').toLowerCase();
+                      const looksLikeVoiceUrl =
+                        u.includes('audioclip') ||
+                        u.includes('/t59.3654-21/') ||
+                        u.includes('type=audio') ||
+                        /\.(mp3|wav|ogg|aac|m4a|opus|webm)(\?|$)/i.test(u) ||
+                        (u.includes('fbsbx.com') && u.includes('.mp4'));
+                      if (looksLikeVoiceUrl) {
+                        return {
+                          ...a,
+                          type: 'audio' as const,
+                          data: {
+                            ...a.data,
+                            url: a.data?.url || a.data?.rawUrl || '',
+                          },
+                        };
+                      }
+                    }
+                    return a;
+                  });
                   const hasAudioAtt = rawAttachments.some((a) => a.type === 'audio');
                   const isVoiceMsgText =
-                    msg.text.includes('[សារសម្លេងពីអតិថិជន') ||
-                    msg.text.includes('[សារសម្លេង / Voice Message]');
+                    msg.text.startsWith('🎤') ||
+                    msg.text.includes('[សារសម្លេង') ||
+                    msg.text.includes('សារសម្លេង (') ||
+                    msg.text.includes('Voice Message');
                   const effectiveAttachments =
                     !hasAudioAtt && isVoiceMsgText
                       ? [
@@ -2381,7 +2510,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                           {
                             type: 'audio' as const,
                             data: {
-                              url: createPlayableWavDataUrl(4),
+                              url: `/api/ai/tts-stream?text=${encodeURIComponent(voiceTranscriptsByMsgId[msg.id] || msg.text || '')}`,
                               duration: '0:04',
                               transcript: voiceTranscriptsByMsgId[msg.id] || '',
                             },
@@ -2600,7 +2729,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                       // Render Interactive Voice Sound (Audio) Bubble
                       if (att.type === 'audio') {
                         const audData = att.data || {};
-                        const audioUrl = audData.url || (att as any).url || createPlayableWavDataUrl(3);
+                        const audioUrl = audData.url || audData.rawDataUrl || (att as any).url || '';
                         const durationStr = audData.duration || '0:04';
                         const msgQuotedMatch =
                           msg.text?.match(/:\s*"([^"]+)"/) || msg.text?.match(/:\s*(.+)$/);

@@ -196,6 +196,98 @@ const mergeOrdersCatalog = (primaryList: Order[], secondaryList: Order[]): Order
   return Array.from(map.values());
 };
 
+export const formatMessageTime = (dateInput?: Date | number | string): string => {
+  const d = dateInput !== undefined ? new Date(dateInput) : new Date();
+  if (Number.isNaN(d.getTime())) {
+    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+  }
+  const now = new Date();
+  const isSameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  const timePart = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+  if (isSameDay) {
+    return timePart;
+  }
+  const datePart = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return `${datePart}, ${timePart}`;
+};
+
+export const extractMessageTimestampMs = (msg: ChatMessage, fallbackIndex = 0): number => {
+  if (!msg) return fallbackIndex;
+  if (typeof msg.createdAtMs === 'number' && Number.isFinite(msg.createdAtMs) && msg.createdAtMs > 0) {
+    return msg.createdAtMs;
+  }
+  const idStr = String(msg.id || '');
+  // 1. Check if ID embeds an ISO timestamp (e.g. msg_snip_..._2026-10-26T...)
+  const isoMatch = idStr.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/);
+  if (isoMatch) {
+    const parsedIso = Date.parse(isoMatch[1]);
+    if (Number.isFinite(parsedIso) && parsedIso > 0) return parsedIso;
+  }
+  // 2. Check if ID embeds a 13-digit epoch millisecond timestamp (e.g. msg_17..., bot_auto_17..., msg_cust_17...)
+  const epochMatch = idStr.match(/(1[6789]\d{11})/);
+  if (epochMatch) {
+    const parsedEpoch = Number(epochMatch[1]);
+    if (Number.isFinite(parsedEpoch) && parsedEpoch > 0) return parsedEpoch;
+  }
+  // 3. Parse formatted time string (e.g. "10:30 AM", "14:20 PM", "Oct 25, 10:30 AM")
+  const rawTs = String(msg.timestamp || '').trim();
+  if (rawTs) {
+    const directParse = Date.parse(rawTs);
+    if (Number.isFinite(directParse) && directParse > 946684800000) {
+      return directParse;
+    }
+    const timeMatch = rawTs.match(/(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
+    if (timeMatch) {
+      let hours = parseInt(timeMatch[1], 10);
+      const mins = parseInt(timeMatch[2], 10);
+      const meridiem = timeMatch[3]?.toUpperCase();
+      if (meridiem === 'PM' && hours < 12) hours += 12;
+      if (meridiem === 'AM' && hours === 12) hours = 0;
+      const d = new Date();
+      d.setHours(hours, mins, 0, 0);
+      return d.getTime() + fallbackIndex;
+    }
+  }
+  return fallbackIndex;
+};
+
+export const sortChatMessagesChronologically = (messages: ChatMessage[] = []): ChatMessage[] => {
+  if (!Array.isArray(messages) || messages.length <= 1) {
+    return (messages || []).map((m, idx) =>
+      m && !m.createdAtMs ? { ...m, createdAtMs: extractMessageTimestampMs(m, idx) } : m
+    );
+  }
+  const annotated = messages
+    .filter(Boolean)
+    .map((m, idx) => {
+      const resolvedMs = extractMessageTimestampMs(m, idx);
+      return {
+        msg: m.createdAtMs ? m : { ...m, createdAtMs: resolvedMs },
+        ms: resolvedMs,
+        idx,
+      };
+    });
+
+  annotated.sort((a, b) => {
+    if (a.ms !== b.ms) return a.ms - b.ms;
+    return a.idx - b.idx;
+  });
+
+  return annotated.map((item) => item.msg);
+};
+
+export const getNextChronologicalMs = (existingMessages: ChatMessage[] = [], candidateMs?: number): number => {
+  const baseNow = candidateMs && Number.isFinite(candidateMs) ? candidateMs : Date.now();
+  const maxExisting = (existingMessages || []).reduce(
+    (max, m, idx) => Math.max(max, extractMessageTimestampMs(m, idx)),
+    0
+  );
+  return Math.max(baseNow, maxExisting + 1);
+};
+
 const mergeChatMessagesList = (primaryMsgs: ChatMessage[] = [], secondaryMsgs: ChatMessage[] = []): ChatMessage[] => {
   const msgMap = new Map<string, ChatMessage>();
   const orderIds: string[] = [];
@@ -232,15 +324,18 @@ const mergeChatMessagesList = (primaryMsgs: ChatMessage[] = [], secondaryMsgs: C
           },
         };
       });
+      const resolvedCreatedAtMs = existing.createdAtMs || m.createdAtMs;
       msgMap.set(m.id, {
         ...m,
         ...existing,
+        ...(resolvedCreatedAtMs ? { createdAtMs: resolvedCreatedAtMs } : {}),
         attachments: mergedAttachments.length > 0 ? mergedAttachments : existing.attachments || m.attachments,
       });
     }
   }
 
-  return orderIds.map((id) => msgMap.get(id)!).filter(Boolean);
+  const combined = orderIds.map((id) => msgMap.get(id)!).filter(Boolean);
+  return sortChatMessagesChronologically(combined);
 };
 
 const REPETITIVE_AUTO_SEED_NAMES = new Set([
@@ -437,11 +532,14 @@ const normalizeThreadLive = (t: ChatThread): ChatThread => {
       isRealFacebookUser: true,
       platform: t.customer.platform || 'messenger',
     },
-    messages: (t.messages || []).map((m) => ({
-      ...m,
-      deliveryStatus: m.deliveryStatus === 'sent_local' || !m.deliveryStatus ? 'sent_meta' : m.deliveryStatus,
-      isLiveMeta: true,
-    })),
+    messages: sortChatMessagesChronologically(
+      (t.messages || []).map((m, idx) => ({
+        ...m,
+        createdAtMs: extractMessageTimestampMs(m, idx),
+        deliveryStatus: m.deliveryStatus === 'sent_local' || !m.deliveryStatus ? 'sent_meta' : m.deliveryStatus,
+        isLiveMeta: true,
+      }))
+    ),
   };
 };
 
@@ -1264,8 +1362,15 @@ export default function App() {
               }
             }
 
+            const existingMessages = sortChatMessagesChronologically(existingThread?.messages || []);
+            const maxExistingMsgMs = existingMessages.reduce(
+              (max, em, idx) => Math.max(max, extractMessageTimestampMs(em, idx)),
+              0
+            );
+
+            const totalUnseenCount = unseenRawMessages.length;
             const newGraphMessages: ChatMessage[] = unseenRawMessages
-              .map((m: any) => {
+              .map((m: any, rawIdx: number) => {
                 const isPageSender =
                   m.isFromPage !== undefined
                     ? Boolean(m.isFromPage)
@@ -1293,14 +1398,29 @@ export default function App() {
                       ]
                     : undefined;
 
+                // Meta Graph API returns messages newest-first (rawIdx 0 = newest).
+                // Add a tiny sub-second offset (totalUnseenCount - 1 - rawIdx) so messages sent in the same second stay in exact chronological order.
+                const parsedMetaMs =
+                  typeof m.createdAtMs === 'number' && Number.isFinite(m.createdAtMs)
+                    ? m.createdAtMs
+                    : m.created_time
+                    ? new Date(m.created_time).getTime()
+                    : Date.now();
+                const safeMetaMs =
+                  (Number.isFinite(parsedMetaMs) ? parsedMetaMs : Date.now()) +
+                  Math.max(0, totalUnseenCount - 1 - rawIdx);
+                // If this is a brand-new message arriving during live polling (!loadAllFromToken), ensure it is placed at the bottom after any existing messages
+                const finalCreatedAtMs = !loadAllFromToken
+                  ? Math.max(safeMetaMs, maxExistingMsgMs + 1 + Math.max(0, totalUnseenCount - 1 - rawIdx))
+                  : safeMetaMs;
+
                 return {
                   id: String(m.id),
                   sender: (isPageSender ? 'admin' : 'customer') as 'admin' | 'customer',
                   senderName: m.from?.name || (isPageSender ? effectivePage.name : senderObj.name),
                   text: fallbackText,
-                  timestamp: m.created_time
-                    ? new Date(m.created_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                    : 'ឥឡូវនេះ',
+                  timestamp: formatMessageTime(m.created_time || finalCreatedAtMs),
+                  createdAtMs: finalCreatedAtMs,
                   attachments: resolvedAttachments,
                   deliveryStatus: 'sent_meta' as const,
                   isLiveMeta: true,
@@ -1308,12 +1428,14 @@ export default function App() {
               })
               .filter((gm: ChatMessage) =>
                 Boolean((gm.text && gm.text.trim()) || (gm.attachments && gm.attachments.length > 0))
-              )
-              .reverse();
+              );
 
-            // Check if updated_time advanced since baseline OR if loadAllFromToken needs the conversation snippet
+            // Sort newGraphMessages chronologically (oldest first -> newest last)
+            const sortedNewGraphMessages = sortChatMessagesChronologically(newGraphMessages);
+
+            // Check if updated_time advanced since baseline OR if loadAllFromToken needs the conversation snippet when rawMessagesList is empty
             const hasUpdatedTimeAdvance = Boolean(
-              loadAllFromToken ||
+              (loadAllFromToken && rawMessagesList.length === 0) ||
                 (baseline && convUpdatedMs > baseline.updatedMs) ||
                 (!baseline && convUpdatedMs >= appMountTimeRef.current - 10000)
             );
@@ -1324,20 +1446,25 @@ export default function App() {
               (loadAllFromToken || !baseline || currentSnippet !== baseline.snippet)
             ) {
               const alreadyHasSnippet =
-                newGraphMessages.some((gm) => gm.text.trim() === currentSnippet) ||
-                (existingThread?.messages || []).some((em) => em.text.trim() === currentSnippet);
+                rawMessagesList.some((rm: any) => typeof rm?.message === 'string' && rm.message.trim() === currentSnippet) ||
+                sortedNewGraphMessages.some((gm) => gm.text.trim() === currentSnippet) ||
+                existingMessages.some((em) => em.text.trim() === currentSnippet);
               if (!alreadyHasSnippet) {
                 const snippetMsgId = `msg_snip_${c.id}_${c.updated_time || Date.now()}`;
                 seenGraphMessageIdsRef.current.add(snippetMsgId);
-                newGraphMessages.push({
+                const rawSnippetMs = c.updated_time ? new Date(c.updated_time).getTime() : Date.now();
+                const snippetCreatedAtMs = !loadAllFromToken
+                  ? Math.max(Number.isFinite(rawSnippetMs) ? rawSnippetMs : Date.now(), maxExistingMsgMs + 100)
+                  : Number.isFinite(rawSnippetMs)
+                  ? rawSnippetMs
+                  : Date.now();
+                sortedNewGraphMessages.push({
                   id: snippetMsgId,
                   sender: 'customer',
                   senderName: senderObj.name || existingThread?.customer.name || 'អតិថិជន Facebook',
                   text: currentSnippet,
-                  timestamp: new Date(c.updated_time || Date.now()).toLocaleTimeString([], {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  }),
+                  timestamp: formatMessageTime(snippetCreatedAtMs),
+                  createdAtMs: snippetCreatedAtMs,
                   deliveryStatus: 'sent_meta',
                   isLiveMeta: true,
                 });
@@ -1350,16 +1477,20 @@ export default function App() {
               snippet: currentSnippet || baseline?.snippet || '',
             });
 
-            if (newGraphMessages.length === 0) {
-              return existingThread || null;
+            if (sortedNewGraphMessages.length === 0) {
+              return existingThread
+                ? {
+                    ...existingThread,
+                    messages: existingMessages,
+                  }
+                : null;
             }
 
-            const existingMessages = existingThread?.messages || [];
-            const mergedMessages = [...existingMessages];
+            const candidateMerged = [...existingMessages];
             let newestAddedCustomerMsg: ChatMessage | null = null;
 
-            newGraphMessages.forEach((gm) => {
-              const alreadyExists = mergedMessages.some((em) => {
+            sortedNewGraphMessages.forEach((gm) => {
+              const alreadyExists = candidateMerged.some((em) => {
                 if (em.id === gm.id) return true;
                 if (gm.sender === 'admin' && (em.sender === 'admin' || em.sender === 'bot')) {
                   if (em.text.trim() === gm.text.trim()) return true;
@@ -1367,13 +1498,21 @@ export default function App() {
                 return false;
               });
               if (!alreadyExists) {
-                mergedMessages.push(gm);
+                candidateMerged.push(gm);
                 stateChanged = true;
                 if (gm.sender === 'customer') {
-                  newestAddedCustomerMsg = gm;
+                  if (
+                    !newestAddedCustomerMsg ||
+                    (gm.createdAtMs || 0) >= (newestAddedCustomerMsg.createdAtMs || 0)
+                  ) {
+                    newestAddedCustomerMsg = gm;
+                  }
                 }
               }
             });
+
+            // Strictly sort all messages chronologically (oldest at top -> newest sent at the very bottom)
+            const mergedMessages = sortChatMessagesChronologically(candidateMerged);
 
             if (loadAllFromToken && mergedMessages.length > 0 && !existingThread) {
               stateChanged = true;
@@ -1444,12 +1583,14 @@ export default function App() {
                   : 0,
               status: isWaitingCustomer ? 'needs_reply' : existingThread?.status || 'completed',
               lastMessage: latestMsg?.text || currentSnippet || 'សារពីផេក',
-              lastMessageTime: latestMsg?.timestamp || 'ឥឡូវនេះ',
-              lastActivityAt: loadAllFromToken
-                ? Math.max(convUpdatedMs || 0, Date.now() - convIdx * 100)
-                : newestAddedCustomerMsg
-                ? Date.now()
-                : existingThread?.lastActivityAt || Date.now(),
+              lastMessageTime: latestMsg?.timestamp || formatMessageTime(convUpdatedMs || Date.now()),
+              lastActivityAt: newestAddedCustomerMsg && !loadAllFromToken
+                ? Math.max(Date.now(), latestMsg?.createdAtMs || 0)
+                : Math.max(
+                    existingThread?.lastActivityAt || 0,
+                    latestMsg?.createdAtMs || 0,
+                    convUpdatedMs || 0
+                  ) || Date.now() - convIdx * 1000,
               metaUpdatedTime: c.updated_time || existingThread?.metaUpdatedTime,
               orderIds: existingThread?.orderIds || [],
               messages: mergedMessages,
@@ -1748,9 +1889,9 @@ export default function App() {
       }
     }
 
-    const now = new Date();
-    const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
-    const botMsgId = `bot_auto_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const nowMs = Date.now();
+    const timeStr = formatMessageTime(nowMs);
+    const botMsgId = `bot_auto_${nowMs}_${Math.random().toString(36).slice(2, 6)}`;
     const botMsg: ChatMessage = {
       id: botMsgId,
       sender: 'bot',
@@ -1759,6 +1900,7 @@ export default function App() {
         : `🤖 ជំនួយការ AI Gemini (${detectedLang.nameKh})`,
       text: replyText,
       timestamp: timeStr,
+      createdAtMs: nowMs,
       isRead: true,
       deliveryStatus: 'sent_meta',
       isLiveMeta: true,
@@ -1808,13 +1950,17 @@ export default function App() {
             }
             return m;
           });
+          const botChronoMsg: ChatMessage = {
+            ...botMsg,
+            createdAtMs: getNextChronologicalMs(updatedMessages, nowMs),
+          };
           return {
             ...t,
             unreadCount: 0,
             status: (t.status === 'ordered' ? 'ordered' : 'completed') as ChatThread['status'],
             lastMessage: replyText,
             lastMessageTime: timeStr,
-            messages: [...updatedMessages, botMsg],
+            messages: sortChatMessagesChronologically([...updatedMessages, botChronoMsg]),
           };
         }
         return t;
@@ -1996,14 +2142,18 @@ export default function App() {
             ]
           : undefined;
 
+      const evtTimestampMs =
+        typeof evt.timestamp === 'number' && Number.isFinite(evt.timestamp) ? evt.timestamp : Date.now();
+      const baseExistingMsgs = existingIndex >= 0 ? updated[existingIndex].messages || [] : [];
+      const resolvedEvtCreatedAtMs = getNextChronologicalMs(baseExistingMsgs, evtTimestampMs);
+
       const newMsg: ChatMessage = {
         id: evt.id,
         sender: isBotReply ? 'bot' : 'customer',
         senderName: evt.senderName || 'Facebook Customer',
         text: evt.text,
-        timestamp:
-          evt.timeFormatted ||
-          new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        timestamp: evt.timeFormatted || formatMessageTime(resolvedEvtCreatedAtMs),
+        createdAtMs: resolvedEvtCreatedAtMs,
         attachments: resolvedWebhookAttachments,
         isRead: isBotReply,
         deliveryStatus: 'sent_meta',
@@ -2017,6 +2167,7 @@ export default function App() {
           (m) => m.id === evt.id || (isBotReply && m.sender === 'bot' && m.text.trim() === evt.text.trim())
         );
         if (!alreadyHas) {
+          const orderedMsgs = sortChatMessagesChronologically([...target.messages, newMsg]);
           const updatedThread: ChatThread = {
             ...target,
             pageId: activePage.id,
@@ -2026,7 +2177,7 @@ export default function App() {
             lastMessage: evt.text,
             lastMessageTime: newMsg.timestamp,
             lastActivityAt: Date.now(),
-            messages: [...target.messages, newMsg],
+            messages: orderedMsgs,
           };
           // Move updated thread to the very top of the thread list so it is immediately visible
           updated.splice(existingIndex, 1);
@@ -2268,20 +2419,20 @@ export default function App() {
     attachments?: any[]
   ) => {
     userExplicitlyClearedAllChatsInSession = false;
-    const now = new Date();
-    const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
+    const nowMs = Date.now();
+    const timeStr = formatMessageTime(nowMs);
 
     if (asNewCustomer || !selectedThread) {
-      const newThreadId = `fb_th_${Date.now()}`;
+      const newThreadId = `fb_th_${nowMs}`;
       const custName = customCustomerName || `ភ្ញៀវឆាតពី Messenger (${Math.floor(100 + Math.random() * 899)})`;
-      const msgId = `msg_cust_${Date.now()}`;
+      const msgId = `msg_cust_${nowMs}`;
       const newCustomer: Customer = {
-        id: `fb_cust_${Date.now()}`,
-        psid: `fb_psid_${Date.now()}`,
+        id: `fb_cust_${nowMs}`,
+        psid: `fb_psid_${nowMs}`,
         isRealFacebookUser: true,
         name: custName,
         avatarUrl: resolveCustomerOriginalPageAvatar(
-          { id: `fb_cust_${Date.now()}`, psid: `fb_psid_${Date.now()}`, name: custName },
+          { id: `fb_cust_${nowMs}`, psid: `fb_psid_${nowMs}`, name: custName },
           selectedPage
         ),
         platform: selectedPage.platform || 'messenger',
@@ -2300,6 +2451,7 @@ export default function App() {
         senderName: custName,
         text,
         timestamp: timeStr,
+        createdAtMs: nowMs,
         attachments,
         deliveryStatus: 'sent_meta',
         isLiveMeta: true,
@@ -2549,10 +2701,10 @@ export default function App() {
     const activeList = threadsRef.current;
     const targetThread = selectedThread || activeList[0] || onlineStandbyThread;
 
-    const now = new Date();
-    const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
+    const nowMs = Date.now();
+    const timeStr = formatMessageTime(nowMs);
     const isPageLive = Boolean(selectedPage.isLiveOnline ?? true);
-    const msgId = `msg_${Date.now()}`;
+    const msgId = `msg_${nowMs}`;
 
     const newMsg: ChatMessage = {
       id: msgId,
@@ -2560,6 +2712,7 @@ export default function App() {
       senderName: selectedPage.activeStaff || 'សុខា (Admin)',
       text,
       timestamp: timeStr,
+      createdAtMs: getNextChronologicalMs(targetThread.messages || [], nowMs),
       attachments: normalizedAttachments,
       isRead: true,
       deliveryStatus: isPageLive ? 'sending_meta' : 'sent_meta',
@@ -2572,6 +2725,10 @@ export default function App() {
       const others: ChatThread[] = [];
       for (const t of baseList) {
         if (t.id === targetThread.id) {
+          const nextMsgWithChrono: ChatMessage = {
+            ...newMsg,
+            createdAtMs: getNextChronologicalMs(t.messages || [], nowMs),
+          };
           updatedTarget = {
             ...t,
             archived: false,
@@ -2579,7 +2736,7 @@ export default function App() {
             lastMessageTime: timeStr,
             lastActivityAt: Date.now(),
             status: 'completed' as const,
-            messages: [...t.messages, newMsg],
+            messages: sortChatMessagesChronologically([...t.messages, nextMsgWithChrono]),
           };
         } else {
           others.push(t);
@@ -2588,7 +2745,7 @@ export default function App() {
       if (!updatedTarget) {
         updatedTarget = {
           ...targetThread,
-          id: targetThread.id.startsWith('online_standby_') ? `fb_th_${Date.now()}` : targetThread.id,
+          id: targetThread.id.startsWith('online_standby_') ? `fb_th_${nowMs}` : targetThread.id,
           archived: false,
           lastMessage: text,
           lastMessageTime: timeStr,
@@ -2621,36 +2778,40 @@ export default function App() {
           }),
         });
         const data = await res.json();
+        if (data?.messageId) {
+          seenGraphMessageIdsRef.current.add(String(data.messageId));
+        }
         setThreads((prev) => {
           const next = prev.map((t) => {
             if (t.id === targetThread.id) {
               return {
                 ...t,
-                messages: t.messages.map((m) => {
-                  if (m.id === msgId) {
-                    const updatedAttachments =
-                      data.audioUrl && Array.isArray(m.attachments)
-                        ? m.attachments.map((att) =>
-                            att.type === 'audio'
-                              ? {
-                                  ...att,
-                                  data: {
-                                    ...(att.data || {}),
-                                    url: data.audioUrl,
-                                  },
-                                }
-                              : att
-                          )
-                        : m.attachments;
-                    return {
-                      ...m,
-                      id: data.messageId || m.id,
-                      attachments: updatedAttachments,
-                      deliveryStatus: 'sent_meta' as const,
-                    };
-                  }
-                  return m;
-                }),
+                messages: sortChatMessagesChronologically(
+                  t.messages.map((m) => {
+                    if (m.id === msgId) {
+                      const updatedAttachments =
+                        data.audioUrl && Array.isArray(m.attachments)
+                          ? m.attachments.map((att) =>
+                              att.type === 'audio'
+                                ? {
+                                    ...att,
+                                    data: {
+                                      ...(att.data || {}),
+                                      url: data.audioUrl,
+                                    },
+                                  }
+                                : att
+                            )
+                          : m.attachments;
+                      return {
+                        ...m,
+                        attachments: updatedAttachments,
+                        deliveryStatus: 'sent_meta' as const,
+                      };
+                    }
+                    return m;
+                  })
+                ),
               };
             }
             return t;
@@ -2731,17 +2892,17 @@ export default function App() {
     ];
 
     const randomPick = customerPrompts[Math.floor(Math.random() * customerPrompts.length)];
-    const now = new Date();
-    const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
-    const newThreadId = `fb_th_${Date.now()}`;
+    const nowMs = Date.now();
+    const timeStr = formatMessageTime(nowMs);
+    const newThreadId = `fb_th_${nowMs}`;
 
     const newCustomer: Customer = {
-      id: `fb_cust_${Date.now()}`,
-      psid: `fb_psid_${Date.now()}`,
+      id: `fb_cust_${nowMs}`,
+      psid: `fb_psid_${nowMs}`,
       isRealFacebookUser: true,
       name: randomPick.name,
       avatarUrl: resolveCustomerOriginalPageAvatar(
-        { id: `fb_cust_${Date.now()}`, psid: `fb_psid_${Date.now()}`, name: randomPick.name },
+        { id: `fb_cust_${nowMs}`, psid: `fb_psid_${nowMs}`, name: randomPick.name },
         targetPage
       ),
       platform: targetPage.platform || 'messenger',
@@ -2756,11 +2917,12 @@ export default function App() {
     };
 
     const newChatMessage: ChatMessage = {
-      id: `msg_${Date.now()}`,
+      id: `msg_${nowMs}`,
       sender: 'customer',
       senderName: randomPick.name,
       text: randomPick.text,
       timestamp: timeStr,
+      createdAtMs: nowMs,
       deliveryStatus: 'sent_meta',
       isLiveMeta: true,
     };
@@ -2773,7 +2935,7 @@ export default function App() {
       status: 'needs_reply',
       lastMessage: randomPick.text,
       lastMessageTime: timeStr,
-      lastActivityAt: Date.now(),
+      lastActivityAt: nowMs,
       orderIds: [],
       messages: [newChatMessage],
     };
@@ -2804,9 +2966,9 @@ export default function App() {
       'អរគុណបងច្រើនណាស់!',
     ];
     const text = replyText || defaultReplies[Math.floor(Math.random() * defaultReplies.length)];
-    const now = new Date();
-    const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
-    const newMsgId = `msg_${Date.now()}`;
+    const nowMs = Date.now();
+    const timeStr = formatMessageTime(nowMs);
+    const newMsgId = `msg_${nowMs}`;
 
     const normalizedAttachments = attachments?.map((att) => {
       if (att?.type === 'audio') {
@@ -2830,6 +2992,7 @@ export default function App() {
       senderName: targetThreadObj?.customer?.name || 'អតិថិជន (Messenger Live)',
       text,
       timestamp: timeStr,
+      createdAtMs: getNextChronologicalMs(targetThreadObj?.messages || [], nowMs),
       attachments: normalizedAttachments,
       deliveryStatus: 'sent_meta',
       isLiveMeta: true,
@@ -2839,6 +3002,10 @@ export default function App() {
     const otherThreads: ChatThread[] = [];
     for (const t of threadsRef.current) {
       if (t.id === threadId) {
+        const nextMsgChrono: ChatMessage = {
+          ...newMsg,
+          createdAtMs: getNextChronologicalMs(t.messages || [], nowMs),
+        };
         updatedTarget = {
           ...t,
           archived: false,
@@ -2847,7 +3014,7 @@ export default function App() {
           lastMessageTime: timeStr,
           lastActivityAt: Date.now(),
           status: 'needs_reply',
-          messages: [...t.messages, newMsg],
+          messages: sortChatMessagesChronologically([...t.messages, nextMsgChrono]),
         };
       } else {
         otherThreads.push(t);
@@ -2922,8 +3089,8 @@ export default function App() {
       body: JSON.stringify({ order: newOrder, orders: updatedOrders }),
     }).catch(() => {});
 
-    const now = new Date();
-    const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
+    const nowMs = Date.now();
+    const timeStr = formatMessageTime(nowMs);
     const deliveryName =
       newOrder.deliveryProvider === 'jt'
         ? 'J&T Express'
@@ -2936,7 +3103,7 @@ export default function App() {
       .join(', ');
 
     const invoiceText = `📄 វិក្កយបត្របញ្ជាទិញ #${newOrder.orderNumber}${itemsSummary ? ` (${itemsSummary})` : ''} — សរុប: $${newOrder.total.toFixed(2)} (${newOrder.totalKhr.toLocaleString()} រៀល) | ដឹកជញ្ជូន: ${deliveryName} | ទូរស័ព្ទ: ${newOrder.customerPhone}`;
-    const invoiceMsgId = `msg_inv_${Date.now()}`;
+    const invoiceMsgId = `msg_inv_${nowMs}`;
 
     const invoiceMsg: ChatMessage = {
       id: invoiceMsgId,
@@ -2944,6 +3111,7 @@ export default function App() {
       senderName: selectedPage.activeStaff || 'សុខា',
       text: invoiceText,
       timestamp: timeStr,
+      createdAtMs: nowMs,
       attachments: [
         {
           type: 'order_invoice',
@@ -2962,6 +3130,10 @@ export default function App() {
       const others: ChatThread[] = [];
       for (const t of prev) {
         if (t.id === targetThreadId) {
+          const invoiceMsgChrono: ChatMessage = {
+            ...invoiceMsg,
+            createdAtMs: getNextChronologicalMs(t.messages || [], nowMs),
+          };
           updatedTarget = {
             ...t,
             archived: false,
@@ -2979,7 +3151,7 @@ export default function App() {
               province: newOrder.customerProvince,
               tags: Array.from(new Set([...t.customer.tags, 'បានកុម្ម៉ង់'])),
             },
-            messages: [...t.messages, invoiceMsg],
+            messages: sortChatMessagesChronologically([...t.messages, invoiceMsgChrono]),
           };
         } else {
           others.push(t);

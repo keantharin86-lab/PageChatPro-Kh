@@ -52,6 +52,7 @@ export interface ChatMessage {
   senderName: string;
   text: string;
   timestamp: string;
+  createdAtMs?: number;
   attachments?: {
     type: 'image' | 'product' | 'order_invoice' | 'audio' | 'khqr_card';
     data: any;
