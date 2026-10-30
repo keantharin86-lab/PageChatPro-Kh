@@ -15,7 +15,8 @@ import {
   FileDown,
   ArrowLeft,
   RefreshCw,
-  Upload
+  Upload,
+  Palette
 } from 'lucide-react';
 import { Customer, Order, PageAccount } from '../types';
 import {
@@ -23,6 +24,17 @@ import {
   resolvePageOriginalAvatar,
   buildClientFallbackAvatarDataUrl,
 } from '../utils/avatarUtils';
+import {
+  TAG_COLOR_PALETTE,
+  DEFAULT_TAG_PRESETS,
+  TagColorKey,
+  TagPresetItem,
+  loadSavedTagColorMap,
+  saveTagColorMap,
+  loadSavedTagPresets,
+  saveTagPresets,
+  getTagColorTheme,
+} from '../utils/tagColors';
 
 interface CustomerPanelProps {
   customer: Customer;
@@ -80,7 +92,15 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   const [province, setProvince] = useState(customer.province);
   const [notes, setNotes] = useState(customer.notes);
   const [newTagInput, setNewTagInput] = useState('');
+  const [selectedNewTagColor, setSelectedNewTagColor] = useState<TagColorKey>('blue');
   const [showAddTag, setShowAddTag] = useState(false);
+  const [editingColorForTag, setEditingColorForTag] = useState<string | null>(null);
+  const [tagColorMap, setTagColorMap] = useState<Record<string, TagColorKey>>(() =>
+    loadSavedTagColorMap()
+  );
+  const [tagPresets, setTagPresets] = useState<TagPresetItem[]>(() =>
+    loadSavedTagPresets()
+  );
   const avatarFileInputRef = useRef<HTMLInputElement>(null);
 
   // Sync when customer changes
@@ -90,6 +110,7 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
     setProvince(customer.province);
     setNotes(customer.notes);
     setIsEditing(false);
+    setEditingColorForTag(null);
   }, [customer.id]);
 
   const handleSave = () => {
@@ -125,20 +146,105 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
   };
 
   const handleAddTag = () => {
-    if (!newTagInput.trim()) return;
-    if (!customer.tags.includes(newTagInput.trim())) {
+    const trimmed = newTagInput.trim();
+    if (!trimmed) return;
+
+    const updatedColorMap: Record<string, TagColorKey> = {
+      ...tagColorMap,
+      [trimmed]: selectedNewTagColor,
+    };
+    setTagColorMap(updatedColorMap);
+    saveTagColorMap(updatedColorMap);
+
+    // Save to reusable presets if not already present
+    if (!tagPresets.some((p) => p.label === trimmed)) {
+      const updatedPresets: TagPresetItem[] = [
+        ...tagPresets,
+        { label: trimmed, color: selectedNewTagColor, isSystem: false },
+      ];
+      setTagPresets(updatedPresets);
+      saveTagPresets(updatedPresets);
+    }
+
+    const updatedCustomerTagColors = {
+      ...(customer.tagColors || {}),
+      [trimmed]: selectedNewTagColor,
+    };
+
+    if (!customer.tags.includes(trimmed)) {
       onUpdateCustomer({
-        tags: [...customer.tags, newTagInput.trim()],
+        tags: [...customer.tags, trimmed],
+        tagColors: updatedCustomerTagColors,
+      });
+    } else {
+      onUpdateCustomer({
+        tagColors: updatedCustomerTagColors,
       });
     }
     setNewTagInput('');
-    setShowAddTag(false);
+  };
+
+  const handleTogglePresetTag = (preset: TagPresetItem) => {
+    const exists = customer.tags.includes(preset.label);
+    if (exists) {
+      onUpdateCustomer({
+        tags: customer.tags.filter((t) => t !== preset.label),
+      });
+    } else {
+      const chosenColor = tagColorMap[preset.label] || preset.color;
+      const updatedCustomerTagColors = {
+        ...(customer.tagColors || {}),
+        [preset.label]: chosenColor,
+      };
+      onUpdateCustomer({
+        tags: [...customer.tags, preset.label],
+        tagColors: updatedCustomerTagColors,
+      });
+    }
+  };
+
+  const handleChangeTagColor = (tag: string, newColor: TagColorKey) => {
+    const updatedColorMap: Record<string, TagColorKey> = {
+      ...tagColorMap,
+      [tag]: newColor,
+    };
+    setTagColorMap(updatedColorMap);
+    saveTagColorMap(updatedColorMap);
+
+    const updatedPresets = tagPresets.map((p) =>
+      p.label === tag ? { ...p, color: newColor } : p
+    );
+    setTagPresets(updatedPresets);
+    saveTagPresets(updatedPresets);
+
+    onUpdateCustomer({
+      tagColors: {
+        ...(customer.tagColors || {}),
+        [tag]: newColor,
+      },
+    });
+    setEditingColorForTag(null);
+  };
+
+  const handleDeleteCustomPreset = (labelToDelete: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const updatedPresets = tagPresets.filter((p) => p.label !== labelToDelete);
+    setTagPresets(updatedPresets);
+    saveTagPresets(updatedPresets);
+  };
+
+  const handleResetDefaultPresets = () => {
+    setTagPresets(DEFAULT_TAG_PRESETS);
+    saveTagPresets(DEFAULT_TAG_PRESETS);
   };
 
   const handleRemoveTag = (tagToRemove: string) => {
     onUpdateCustomer({
       tags: customer.tags.filter((t) => t !== tagToRemove),
     });
+    if (editingColorForTag === tagToRemove) {
+      setEditingColorForTag(null);
+    }
   };
 
   const customerOrders = orders.filter(
@@ -370,55 +476,280 @@ export const CustomerPanel: React.FC<CustomerPanelProps> = ({
           </div>
         </div>
 
-        {/* Customer Tags */}
-        <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-xs font-semibold text-slate-700 flex items-center gap-1">
-              <Tag className="w-3 h-3 text-slate-400" />
-              {language === 'kh' ? 'ស្លាកសម្គាល់ (Tags)' : 'Tags'}
+        {/* Customer Color-Coded Tags */}
+        <div className="bg-slate-50/70 border border-slate-200/80 rounded-xl p-2.5 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+              <Tag className="w-3.5 h-3.5 text-blue-600" />
+              <span>
+                {language === 'kh' ? 'ស្លាកសម្គាល់ពណ៌ (Customer Tags)' : 'Color-Coded Tags'}
+              </span>
+              {customer.tags.length > 0 && (
+                <span className="px-1.5 py-0.2 text-[10px] font-bold bg-blue-100 text-blue-700 rounded-full">
+                  {customer.tags.length}
+                </span>
+              )}
             </span>
             <button
-              onClick={() => setShowAddTag(!showAddTag)}
-              className="text-[11px] text-blue-600 hover:text-blue-700 flex items-center gap-0.5 cursor-pointer"
+              type="button"
+              onClick={() => {
+                setShowAddTag(!showAddTag);
+                setEditingColorForTag(null);
+              }}
+              className={`text-[11px] font-semibold px-2 py-0.5 rounded-md border flex items-center gap-1 transition-colors cursor-pointer ${
+                showAddTag
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white text-blue-600 border-blue-200 hover:bg-blue-50'
+              }`}
             >
-              <Plus className="w-3 h-3" />
-              <span>{language === 'kh' ? 'ថែម' : 'Add'}</span>
+              <Palette className="w-3 h-3" />
+              <span>
+                {showAddTag
+                  ? language === 'kh'
+                    ? 'បិទផ្ទាំងពណ៌'
+                    : 'Done'
+                  : language === 'kh'
+                  ? '+ ថែម / គ្រប់គ្រងពណ៌'
+                  : '+ Add / Colors'}
+              </span>
             </button>
           </div>
 
-          {showAddTag && (
-            <div className="flex items-center gap-1 mb-2">
-              <input
-                type="text"
-                value={newTagInput}
-                onChange={(e) => setNewTagInput(e.target.value)}
-                placeholder="ឧ. VIP, ទិញដុំ..."
-                className="flex-1 px-2 py-1 text-xs border border-slate-200 rounded-md"
-              />
-              <button
-                onClick={handleAddTag}
-                className="px-2 py-1 text-xs bg-blue-600 text-white rounded-md font-medium cursor-pointer"
-              >
-                +
-              </button>
+          {/* Active Customer Tags with Color Coding */}
+          {customer.tags.length === 0 ? (
+            <p className="text-[11px] text-slate-400 italic py-0.5">
+              {language === 'kh'
+                ? 'មិនទាន់មានស្លាកសម្គាល់ — ចុចជ្រើសរើសស្លាករហ័សខាងក្រោម'
+                : 'No tags assigned — click a quick tag below'}
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {customer.tags.map((tag) => {
+                const theme = getTagColorTheme(tag, customer.tagColors, tagColorMap);
+                const isEditingThisTag = editingColorForTag === tag;
+                return (
+                  <span
+                    key={tag}
+                    className={`inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-semibold rounded-md border transition-all ${theme.bgClass} ${theme.textClass} ${theme.borderClass}`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditingColorForTag(isEditingThisTag ? null : tag)
+                      }
+                      className={`w-2.5 h-2.5 rounded-full shrink-0 cursor-pointer ring-offset-1 hover:ring-2 ${theme.dotClass} ${theme.ringClass}`}
+                      title={
+                        language === 'kh'
+                          ? 'ចុចប្តូរពណ៌ស្លាកនេះ'
+                          : 'Click to change tag color'
+                      }
+                    />
+                    <span>{tag}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveTag(tag)}
+                      className="opacity-70 hover:opacity-100 hover:text-rose-600 cursor-pointer ml-0.5"
+                      title={language === 'kh' ? 'ដកស្លាកចេញ' : 'Remove tag'}
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                );
+              })}
             </div>
           )}
 
-          <div className="flex flex-wrap gap-1.5">
-            {customer.tags.map((tag) => (
-              <span
-                key={tag}
-                className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 text-slate-700 text-xs rounded-md"
-              >
-                <span>{tag}</span>
+          {/* Inline Color Changer when clicking a tag's dot */}
+          {editingColorForTag && (
+            <div className="p-2 bg-white border border-slate-200 rounded-lg shadow-2xs space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] font-semibold text-slate-700">
+                <span>
+                  {language === 'kh'
+                    ? `ប្តូរពណ៌សម្រាប់ "${editingColorForTag}"៖`
+                    : `Change color for "${editingColorForTag}":`}
+                </span>
                 <button
-                  onClick={() => handleRemoveTag(tag)}
-                  className="hover:text-red-500 text-slate-400 cursor-pointer"
+                  type="button"
+                  onClick={() => setEditingColorForTag(null)}
+                  className="text-slate-400 hover:text-slate-600 cursor-pointer"
                 >
                   <X className="w-3 h-3" />
                 </button>
+              </div>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {TAG_COLOR_PALETTE.map((c) => {
+                  const activeKey = getTagColorTheme(
+                    editingColorForTag,
+                    customer.tagColors,
+                    tagColorMap
+                  ).key;
+                  const isCurrent = activeKey === c.key;
+                  return (
+                    <button
+                      key={c.key}
+                      type="button"
+                      onClick={() => handleChangeTagColor(editingColorForTag, c.key)}
+                      className={`w-5 h-5 rounded-full transition-transform cursor-pointer flex items-center justify-center ${
+                        c.swatchClass
+                      } ${isCurrent ? 'ring-2 ring-offset-1 ring-slate-800 scale-110' : ''}`}
+                      title={language === 'kh' ? c.labelKh : c.labelEn}
+                    >
+                      {isCurrent && <Check className="w-3 h-3 text-white stroke-[3]" />}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Custom Tag Creator & Color Picker Drawer */}
+          {showAddTag && (
+            <div className="p-2.5 bg-white border border-blue-200 rounded-lg space-y-2.5 shadow-2xs">
+              <div className="text-[11px] font-semibold text-slate-700">
+                {language === 'kh'
+                  ? 'បង្កើតស្លាកសម្គាល់ថ្មី & ជ្រើសពណ៌៖'
+                  : 'Create Custom Color-Coded Tag:'}
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={newTagInput}
+                  onChange={(e) => setNewTagInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddTag();
+                    }
+                  }}
+                  placeholder={
+                    language === 'kh'
+                      ? 'វាយឈ្មោះស្លាក (ឧ. សួរស្តុក, រង់ចាំឆ្លើយ)...'
+                      : 'Tag name (e.g. Follow Up, Wholesale)...'
+                  }
+                  className="flex-1 px-2.5 py-1.5 text-xs border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleAddTag}
+                  disabled={!newTagInput.trim()}
+                  className="px-2.5 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-md font-semibold cursor-pointer shrink-0 flex items-center gap-1"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>{language === 'kh' ? 'ថែម' : 'Add'}</span>
+                </button>
+              </div>
+
+              {/* Swatch Selector for New Tag */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[10px] text-slate-500">
+                  <span>{language === 'kh' ? 'ជ្រើសរើសពណ៌ស្លាក៖' : 'Select tag color:'}</span>
+                  {newTagInput.trim() && (
+                    <span
+                      className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded border text-[10px] font-semibold ${
+                        TAG_COLOR_PALETTE.find((p) => p.key === selectedNewTagColor)?.bgClass
+                      } ${
+                        TAG_COLOR_PALETTE.find((p) => p.key === selectedNewTagColor)?.textClass
+                      } ${
+                        TAG_COLOR_PALETTE.find((p) => p.key === selectedNewTagColor)?.borderClass
+                      }`}
+                    >
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          TAG_COLOR_PALETTE.find((p) => p.key === selectedNewTagColor)?.dotClass
+                        }`}
+                      />
+                      {newTagInput.trim()}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                  {TAG_COLOR_PALETTE.map((c) => {
+                    const isSelected = selectedNewTagColor === c.key;
+                    return (
+                      <button
+                        key={c.key}
+                        type="button"
+                        onClick={() => setSelectedNewTagColor(c.key)}
+                        className={`w-5 h-5 rounded-full transition-transform cursor-pointer flex items-center justify-center ${
+                          c.swatchClass
+                        } ${
+                          isSelected ? 'ring-2 ring-offset-1 ring-slate-800 scale-110' : 'opacity-80 hover:opacity-100'
+                        }`}
+                        title={language === 'kh' ? c.labelKh : c.labelEn}
+                      >
+                        {isSelected && <Check className="w-3 h-3 text-white stroke-[3]" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Quick 1-Click Inquiry Organization Tags */}
+          <div className="pt-1 border-t border-slate-200/70">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10.5px] font-semibold text-slate-500">
+                {language === 'kh'
+                  ? 'ចុចជ្រើសរើសរហ័ស (ចំណាត់ថ្នាក់សារអតិថិជន)៖'
+                  : 'Quick Inquiry Tags (Click to toggle):'}
               </span>
-            ))}
+              {showAddTag && (
+                <button
+                  type="button"
+                  onClick={handleResetDefaultPresets}
+                  className="text-[10px] text-slate-400 hover:text-blue-600 cursor-pointer"
+                  title={language === 'kh' ? 'កំណត់ស្លាកដើមឡើងវិញ' : 'Reset default tags'}
+                >
+                  {language === 'kh' ? 'កំណត់ដើមវិញ' : 'Reset'}
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {tagPresets.map((preset) => {
+                const isAssigned = customer.tags.includes(preset.label);
+                const theme = getTagColorTheme(
+                  preset.label,
+                  customer.tagColors,
+                  { ...tagColorMap, [preset.label]: tagColorMap[preset.label] || preset.color }
+                );
+                return (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => handleTogglePresetTag(preset)}
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-md border transition-all cursor-pointer ${
+                      isAssigned
+                        ? `${theme.bgClass} ${theme.textClass} ${theme.borderClass} font-bold ring-1 ${theme.ringClass}/30`
+                        : 'bg-white hover:bg-slate-100 text-slate-600 border-slate-200 font-medium opacity-85 hover:opacity-100'
+                    }`}
+                    title={
+                      isAssigned
+                        ? language === 'kh'
+                          ? 'កំពុងប្រើ — ចុចដើម្បីដកចេញ'
+                          : 'Assigned — click to remove'
+                        : language === 'kh'
+                        ? 'ចុចដើម្បីដាក់ស្លាកសម្គាល់នេះ'
+                        : 'Click to assign tag'
+                    }
+                  >
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${theme.dotClass}`} />
+                    <span>{preset.label}</span>
+                    {isAssigned && <Check className="w-2.5 h-2.5 stroke-[2.5]" />}
+                    {showAddTag && !preset.isSystem && (
+                      <span
+                        onClick={(e) => handleDeleteCustomPreset(preset.label, e)}
+                        className="ml-0.5 text-slate-400 hover:text-rose-600"
+                        title={language === 'kh' ? 'លុបស្លាកនេះពីបញ្ជីរហ័ស' : 'Delete custom preset'}
+                      >
+                        <X className="w-2.5 h-2.5" />
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
 

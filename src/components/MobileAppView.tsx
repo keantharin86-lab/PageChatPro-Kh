@@ -856,17 +856,24 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                       </button>
                     </div>
 
-                    {orders.map((ord) => (
+                    {orders.map((ord, idx) => (
                       <div
                         key={ord.id}
-                        className="p-3 bg-white border border-slate-200 rounded-2xl space-y-2"
+                        className={`p-3 bg-white border rounded-2xl space-y-2 ${
+                          idx === 0 ? 'border-blue-400 ring-1 ring-blue-100' : 'border-slate-200'
+                        }`}
                       >
                         <div className="flex items-center justify-between">
-                          <div>
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="text-xs font-bold text-blue-600 tabular-nums">
                               #{ord.orderNumber}
                             </span>
-                            <span className="mx-1.5 text-slate-300">·</span>
+                            {idx === 0 && (
+                              <span className="px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-blue-600 text-white">
+                                {language === 'kh' ? 'ថ្មី' : 'NEW'}
+                              </span>
+                            )}
+                            <span className="text-slate-300">·</span>
                             <span className="text-xs font-bold text-slate-900">
                               {ord.customerName}
                             </span>
@@ -875,6 +882,10 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                             ${ord.total.toFixed(2)}
                           </span>
                         </div>
+
+                        <p className="text-[10px] text-slate-500 font-medium tabular-nums">
+                          🕒 {ord.createdAt}
+                        </p>
 
                         <p className="text-[11px] text-slate-500 truncate">
                           {(ord.items || [])

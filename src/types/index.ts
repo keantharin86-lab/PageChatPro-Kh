@@ -40,7 +40,9 @@ export interface Order {
   deliveryProvider: 'jt' | 'virak_buntham' | 'capitol' | 'grab';
   status: OrderStatus;
   createdAt: string;
+  createdAtMs?: number;
   orderDate?: string; // YYYY-MM-DD format for daily/monthly analytics
+  updatedAt?: number;
   pageId: string;
   threadId: string;
   notes?: string;
@@ -74,6 +76,7 @@ export interface Customer {
   province: string;
   address: string;
   tags: string[];
+  tagColors?: Record<string, string>;
   totalOrders: number;
   totalSpent: number;
   notes: string;

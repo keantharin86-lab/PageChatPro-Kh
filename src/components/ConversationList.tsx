@@ -17,6 +17,7 @@ import {
   resolvePageOriginalAvatar,
   buildClientFallbackAvatarDataUrl,
 } from '../utils/avatarUtils';
+import { getTagColorTheme } from '../utils/tagColors';
 
 interface ConversationListProps {
   threads: ChatThread[];
@@ -69,6 +70,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({
   const [showInlineTokenBox, setShowInlineTokenBox] = useState(false);
   const [inlineTokenInput, setInlineTokenInput] = useState('');
   const [selectedThreadIds, setSelectedThreadIds] = useState<string[]>([]);
+  const [isSelectOneByOneMode, setIsSelectOneByOneMode] = useState<boolean>(false);
   const [bulkFeedback, setBulkFeedback] = useState<string | null>(null);
   const listContainerRef = useRef<HTMLDivElement>(null);
   const prevTopThreadKeyRef = useRef<string>('');
@@ -236,6 +238,23 @@ export const ConversationList: React.FC<ConversationListProps> = ({
     setSelectedThreadIds((prev) =>
       prev.includes(threadId) ? prev.filter((id) => id !== threadId) : [...prev, threadId]
     );
+  };
+
+  const handleSelectOneByOneButtonClick = () => {
+    setIsSelectOneByOneMode((prev) => {
+      const nextState = !prev;
+      if (!nextState) {
+        setSelectedThreadIds([]);
+        showTemporaryFeedback(
+          language === 'kh' ? 'បានបិទ ការជ្រើសមួយៗ' : 'One-by-one selection OFF'
+        );
+      } else {
+        showTemporaryFeedback(
+          language === 'kh' ? 'បានបើក ការជ្រើសមួយៗ' : 'One-by-one selection ON'
+        );
+      }
+      return nextState;
+    });
   };
 
   const toggleSelectAllVisible = () => {
@@ -543,211 +562,203 @@ export const ConversationList: React.FC<ConversationListProps> = ({
         </div>
       </div>
 
-      {/* Bulk Selection & Auto-Chat Toggle Bar */}
+      {/* Bulk Selection & One-by-One Customer Message Selection Bar */}
       <div
-        className={`px-3 py-2 border-b transition-colors flex items-center justify-between gap-2 ${
-          selectedThreadIds.length > 0
+        className={`px-3 py-2 border-b transition-colors flex flex-col gap-2 ${
+          selectedThreadIds.length > 0 || isSelectOneByOneMode
             ? 'bg-blue-50/90 border-blue-200'
             : 'bg-slate-50/70 border-slate-200/80'
         }`}
       >
-        <label
-          className={`flex items-center gap-2 text-xs font-medium text-slate-700 select-none ${
-            filteredThreads.length > 0 ? 'cursor-pointer' : 'opacity-50 cursor-default'
-          }`}
-        >
-          <input
-            type="checkbox"
-            disabled={filteredThreads.length === 0}
-            checked={allVisibleSelected}
-            ref={(el) => {
-              if (el) el.indeterminate = someVisibleSelected;
-            }}
-            onChange={toggleSelectAllVisible}
-            className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer accent-blue-600 disabled:cursor-default"
-          />
-          <span>
-            {selectedThreadIds.length > 0
-              ? language === 'kh'
-                ? `បានជ្រើសរើស ${selectedThreadIds.length}`
-                : `${selectedThreadIds.length} selected`
-              : language === 'kh'
-              ? 'ជ្រើសរើសទាំងអស់'
-              : 'Select all'}
-          </span>
-        </label>
+        <div className="flex items-center justify-between gap-2">
+          <label
+            className={`flex items-center gap-1.5 text-xs font-medium text-slate-700 select-none shrink-0 ${
+              filteredThreads.length > 0 ? 'cursor-pointer' : 'opacity-50 cursor-default'
+            }`}
+          >
+            <input
+              type="checkbox"
+              disabled={filteredThreads.length === 0}
+              checked={allVisibleSelected}
+              ref={(el) => {
+                if (el) el.indeterminate = someVisibleSelected;
+              }}
+              onChange={toggleSelectAllVisible}
+              className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer accent-blue-600 disabled:cursor-default"
+            />
+            <span>
+              {selectedThreadIds.length > 0
+                ? language === 'kh'
+                  ? `បានជ្រើសរើស ${selectedThreadIds.length}`
+                  : `${selectedThreadIds.length} selected`
+                : language === 'kh'
+                ? 'ជ្រើសរើសទាំងអស់'
+                : 'Select all'}
+            </span>
+          </label>
 
-        {selectedThreadIds.length > 0 ? (
-          <div className="flex items-center gap-1 flex-wrap justify-end">
-            {onBulkAutoReply && isAutoPilot && (
-              <button
-                type="button"
-                onClick={() => {
-                  const ids = [...selectedThreadIds];
-                  setSelectedThreadIds([]);
-                  onBulkAutoReply(ids);
-                }}
-                disabled={batchAutoPilotProgress?.isRunning}
-                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
-                title={language === 'kh' ? 'ឱ្យ AI Gemini ឆាត Auto លើសារដែលបានជ្រើសរើស' : 'AI Auto-Reply selected threads'}
-              >
-                <Bot className="w-3.5 h-3.5 text-indigo-600" />
-                <span>{language === 'kh' ? 'AI Auto' : 'AI Reply'}</span>
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={handleBulkMarkReadClick}
-              className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-blue-700 bg-white hover:bg-blue-100 border border-blue-200 rounded-md shadow-2xs transition-colors cursor-pointer"
-              title={language === 'kh' ? 'ដាក់សម្គាល់ថាអានរួច' : 'Mark selected as read'}
-            >
-              <CheckCheck className="w-3.5 h-3.5" />
-              <span>{language === 'kh' ? 'អានរួច' : 'Mark Read'}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleBulkArchiveClick}
-              className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded-md shadow-2xs transition-colors cursor-pointer"
-              title={
-                statusFilter === 'archived'
-                  ? language === 'kh'
-                    ? 'ស្ដារចេញពីបណ្ណសារ'
-                    : 'Unarchive selected'
-                  : language === 'kh'
-                  ? 'ទុកក្នុងបណ្ណសារ'
-                  : 'Archive selected'
-              }
-            >
-              {statusFilter === 'archived' ? (
-                <>
-                  <ArchiveRestore className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>{language === 'kh' ? 'ស្ដារវិញ' : 'Unarchive'}</span>
-                </>
-              ) : (
-                <>
-                  <Archive className="w-3.5 h-3.5 text-amber-600" />
-                  <span>{language === 'kh' ? 'ទុកបណ្ណសារ' : 'Archive'}</span>
-                </>
-              )}
-            </button>
-
-            {onBulkDelete && (
-              <button
-                type="button"
-                onClick={handleBulkDeleteClick}
-                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-md shadow-2xs transition-colors cursor-pointer"
-                title={language === 'kh' ? 'លុបសារដែលបានជ្រើសរើស' : 'Delete selected'}
-              >
-                <Trash2 className="w-3.5 h-3.5 text-rose-600" />
-                <span>{language === 'kh' ? 'លុប' : 'Delete'}</span>
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={() => setSelectedThreadIds([])}
-              className="p-1 text-slate-400 hover:text-slate-600 hover:bg-white rounded-md transition-colors cursor-pointer"
-              title={language === 'kh' ? 'បោះបង់ការជ្រើសរើស' : 'Clear selection'}
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        ) : (
-          <div className="flex items-center gap-1.5">
-            {bulkFeedback && (
-              <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md truncate max-w-[140px]">
+          <div className="flex items-center gap-1.5 min-w-0">
+            {bulkFeedback && selectedThreadIds.length === 0 && (
+              <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded truncate max-w-[110px]">
                 {bulkFeedback}
               </span>
             )}
 
-            {/* Toggle ON/OFF Button for ឆាត Auto គ្រប់សារ */}
+            {/* Button: ចុចជ្រើសមួយៗ សារអតិថិជន (Select Customer Messages One-by-One) with បិទ / បើក Toggle */}
             <button
               type="button"
-              onClick={() => {
-                const nextState = !isAutoPilot;
-                if (onToggleAutoPilot) {
-                  onToggleAutoPilot();
-                }
-                showTemporaryFeedback(
-                  nextState
-                    ? language === 'kh'
-                      ? 'បានបើក ឆាត Auto គ្រប់សារ (ON)'
-                      : 'Auto Chat All: ON'
-                    : language === 'kh'
-                    ? 'បានបិទ ឆាត Auto គ្រប់សារ (OFF)'
-                    : 'Auto Chat All: OFF'
-                );
-              }}
-              aria-pressed={isAutoPilot}
+              role="switch"
+              aria-checked={isSelectOneByOneMode}
+              onClick={handleSelectOneByOneButtonClick}
               className={`inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-bold rounded-md border shadow-2xs transition-all cursor-pointer select-none ${
-                isAutoPilot
-                  ? 'text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border-emerald-300'
-                  : 'text-slate-600 bg-slate-100 hover:bg-slate-200 border-slate-300'
+                isSelectOneByOneMode
+                  ? 'text-emerald-900 bg-emerald-50 hover:bg-emerald-100/90 border-emerald-300 ring-1 ring-emerald-400/40'
+                  : 'text-slate-700 bg-white hover:bg-slate-100 border-slate-300'
               }`}
               title={
-                isAutoPilot
-                  ? language === 'kh'
-                    ? 'កំពុងបើក ឆាត Auto គ្រប់សារ (ចុចដើម្បីបិទ OFF)'
-                    : 'Auto Chat All is ON (Click to turn OFF)'
-                  : language === 'kh'
-                  ? 'កំពុងបិទ ឆាត Auto គ្រប់សារ (ចុចដើម្បីបើក ON)'
-                  : 'Auto Chat All is OFF (Click to turn ON)'
+                language === 'kh'
+                  ? isSelectOneByOneMode
+                    ? 'កំពុងបើក៖ ចុចដើម្បីបិទការជ្រើសមួយៗ សារអតិថិជន'
+                    : 'កំពុងបិទ៖ ចុចដើម្បីបើកការជ្រើសមួយៗ សារអតិថិជន'
+                  : isSelectOneByOneMode
+                  ? 'ON: Click to turn OFF one-by-one selection'
+                  : 'OFF: Click to turn ON one-by-one selection'
               }
             >
-              <Bot
+              <CheckCheck
                 className={`w-3.5 h-3.5 shrink-0 ${
-                  isAutoPilot ? 'text-emerald-600' : 'text-slate-400'
-                } ${batchAutoPilotProgress?.isRunning ? 'animate-spin' : ''}`}
+                  isSelectOneByOneMode ? 'text-emerald-600' : 'text-slate-500'
+                }`}
               />
-              <span>
-                {language === 'kh' ? 'ឆាត Auto គ្រប់សារ' : 'Auto Chat All'}
+              <span className="truncate">
+                {language === 'kh' ? 'ចុចជ្រើសមួយៗ សារអតិថិជន' : 'Select One by One'}
               </span>
-              <span
-                className={`px-1.5 py-0.2 rounded text-[10px] font-extrabold ${
-                  isAutoPilot
-                    ? 'bg-emerald-600 text-white'
-                    : 'bg-slate-400 text-white'
-                }`}
-              >
-                {isAutoPilot
-                  ? language === 'kh'
-                    ? 'បើក'
-                    : 'ON'
-                  : language === 'kh'
-                  ? 'បិទ'
-                  : 'OFF'}
-              </span>
-              <span
-                className={`relative inline-flex h-3.5 w-6 shrink-0 items-center rounded-full transition-colors ${
-                  isAutoPilot ? 'bg-emerald-600' : 'bg-slate-300'
-                }`}
-              >
-                <span
-                  className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform shadow-2xs ${
-                    isAutoPilot ? 'translate-x-3' : 'translate-x-0.5'
-                  }`}
-                />
-              </span>
-            </button>
 
-            {/* Quick Run Batch button when ឆាត Auto គ្រប់សារ is ON and threads exist */}
-            {onBulkAutoReply && isAutoPilot && filteredThreads.length > 0 && (
+              {/* បិទ / បើក Status Badge + Toggle Switch */}
+              <span
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-extrabold transition-colors shrink-0 ${
+                  isSelectOneByOneMode
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-slate-200 text-slate-700'
+                }`}
+              >
+                <span>
+                  {isSelectOneByOneMode
+                    ? language === 'kh'
+                      ? 'បើក'
+                      : 'ON'
+                    : language === 'kh'
+                    ? 'បិទ'
+                    : 'OFF'}
+                </span>
+                <span
+                  className={`relative inline-flex h-3 w-5 shrink-0 items-center rounded-full transition-colors ${
+                    isSelectOneByOneMode ? 'bg-emerald-800/60' : 'bg-slate-400'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-2 w-2 transform rounded-full bg-white transition-transform ${
+                      isSelectOneByOneMode ? 'translate-x-2.5' : 'translate-x-0.5'
+                    }`}
+                  />
+                </span>
+              </span>
+
+              {selectedThreadIds.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-extrabold bg-blue-600 text-white tabular-nums">
+                  {selectedThreadIds.length}/{filteredThreads.length}
+                </span>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {selectedThreadIds.length > 0 && (
+          <div className="flex items-center justify-between gap-1 pt-1 border-t border-blue-200/70 flex-wrap">
+            <span className="text-[10px] font-semibold text-blue-700">
+              {language === 'kh'
+                ? `សកម្មភាពលើសារបានជ្រើស (${selectedThreadIds.length})៖`
+                : `Actions (${selectedThreadIds.length}):`}
+            </span>
+            <div className="flex items-center gap-1 flex-wrap justify-end">
+              {onBulkAutoReply && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const ids = [...selectedThreadIds];
+                    setSelectedThreadIds([]);
+                    onBulkAutoReply(ids);
+                  }}
+                  disabled={batchAutoPilotProgress?.isRunning}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                  title={language === 'kh' ? 'ឱ្យ AI ឆ្លើយតបលើសារដែលបានជ្រើសរើស' : 'AI Reply selected threads'}
+                >
+                  <Bot className="w-3 h-3 text-indigo-600" />
+                  <span>{language === 'kh' ? 'AI ឆ្លើយ' : 'AI Reply'}</span>
+                </button>
+              )}
+
               <button
                 type="button"
-                onClick={() => onBulkAutoReply()}
-                disabled={batchAutoPilotProgress?.isRunning}
-                className="inline-flex items-center justify-center px-1.5 py-1 text-[11px] font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                onClick={handleBulkMarkReadClick}
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-blue-700 bg-white hover:bg-blue-100 border border-blue-200 rounded-md shadow-2xs transition-colors cursor-pointer"
+                title={language === 'kh' ? 'ដាក់សម្គាល់ថាអានរួច' : 'Mark selected as read'}
+              >
+                <CheckCheck className="w-3 h-3" />
+                <span>{language === 'kh' ? 'អានរួច' : 'Mark Read'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleBulkArchiveClick}
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded-md shadow-2xs transition-colors cursor-pointer"
                 title={
-                  language === 'kh'
-                    ? 'ឱ្យ AI Gemini ឆ្លើយតបគ្រប់សាររង់ចាំទាំងអស់ឥឡូវនេះ'
-                    : 'Run batch AI reply on all pending messages now'
+                  statusFilter === 'archived'
+                    ? language === 'kh'
+                      ? 'ស្ដារចេញពីបណ្ណសារ'
+                      : 'Unarchive selected'
+                    : language === 'kh'
+                    ? 'ទុកក្នុងបណ្ណសារ'
+                    : 'Archive selected'
                 }
               >
-                <span>⚡</span>
+                {statusFilter === 'archived' ? (
+                  <>
+                    <ArchiveRestore className="w-3 h-3 text-emerald-600" />
+                    <span>{language === 'kh' ? 'ស្ដារវិញ' : 'Unarchive'}</span>
+                  </>
+                ) : (
+                  <>
+                    <Archive className="w-3 h-3 text-amber-600" />
+                    <span>{language === 'kh' ? 'ទុកបណ្ណសារ' : 'Archive'}</span>
+                  </>
+                )}
               </button>
-            )}
+
+              {onBulkDelete && (
+                <button
+                  type="button"
+                  onClick={handleBulkDeleteClick}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 rounded-md shadow-2xs transition-colors cursor-pointer"
+                  title={language === 'kh' ? 'លុបសារដែលបានជ្រើសរើស' : 'Delete selected'}
+                >
+                  <Trash2 className="w-3 h-3 text-rose-600" />
+                  <span>{language === 'kh' ? 'លុប' : 'Delete'}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedThreadIds([]);
+                  setIsSelectOneByOneMode(false);
+                }}
+                className="p-1 text-slate-400 hover:text-slate-600 hover:bg-white rounded-md transition-colors cursor-pointer"
+                title={language === 'kh' ? 'បោះបង់ការជ្រើសរើស' : 'Clear selection'}
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -832,7 +843,12 @@ export const ConversationList: React.FC<ConversationListProps> = ({
             return (
               <div
                 key={thread.id}
-                onClick={() => onSelectThread(thread.id)}
+                onClick={(e) => {
+                  if (isSelectOneByOneMode) {
+                    toggleSelectThread(thread.id, e);
+                  }
+                  onSelectThread(thread.id);
+                }}
                 className={`p-3 cursor-pointer transition-colors relative flex items-start gap-2.5 ${
                   isChecked
                     ? 'bg-blue-50/90 border-l-3 border-blue-600'
@@ -841,20 +857,22 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     : 'hover:bg-slate-50'
                 }`}
               >
-                {/* Bulk Action Checkbox */}
-                <div
-                  onClick={(e) => toggleSelectThread(thread.id, e)}
-                  className="pt-2.5 shrink-0 flex items-center justify-center"
-                >
-                  <input
-                    type="checkbox"
-                    checked={isChecked}
-                    onChange={(e) => toggleSelectThread(thread.id, e)}
-                    onClick={(e) => e.stopPropagation()}
-                    aria-label={`Select conversation with ${thread.customer.name}`}
-                    className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer accent-blue-600"
-                  />
-                </div>
+                {/* One-by-One Checkbox (shown when ចុចជ្រើសមួយៗ សារអតិថិជន is បើក or items are selected) */}
+                {(isSelectOneByOneMode || selectedThreadIds.length > 0) && (
+                  <div
+                    onClick={(e) => toggleSelectThread(thread.id, e)}
+                    className="pt-2.5 shrink-0 flex items-center justify-center"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isChecked}
+                      onChange={(e) => toggleSelectThread(thread.id, e)}
+                      onClick={(e) => e.stopPropagation()}
+                      aria-label={`Select conversation with ${thread.customer.name}`}
+                      className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer accent-blue-600"
+                    />
+                  </div>
+                )}
 
                 {/* Dual Original Profile Avatar from Facebook Page (រូបដើមអតិថិជន + រូបដើមផេក) */}
                 {(() => {
@@ -910,14 +928,25 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     </span>
                   </div>
 
-                  {/* Customer Province / Tag metadata */}
-                  <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mb-1 flex-wrap">
+                  {/* Customer Province / Color-Coded Tag metadata */}
+                  <div className="flex items-center gap-1 text-[11px] text-slate-500 mb-1 flex-wrap">
                     <span>{thread.customer.province}</span>
-                    {thread.customer.tags.length > 0 && (
-                      <>
-                        <span aria-hidden="true">•</span>
-                        <span className="truncate text-blue-600">{thread.customer.tags[0]}</span>
-                      </>
+                    {thread.customer.tags.slice(0, 3).map((tag) => {
+                      const tagTheme = getTagColorTheme(tag, thread.customer.tagColors);
+                      return (
+                        <span
+                          key={tag}
+                          className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded border text-[10px] font-semibold truncate max-w-[110px] ${tagTheme.bgClass} ${tagTheme.textClass} ${tagTheme.borderClass}`}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${tagTheme.dotClass}`} />
+                          <span className="truncate">{tag}</span>
+                        </span>
+                      );
+                    })}
+                    {thread.customer.tags.length > 3 && (
+                      <span className="text-[10px] font-semibold text-slate-500 bg-slate-100 px-1 rounded">
+                        +{thread.customer.tags.length - 3}
+                      </span>
                     )}
                     {pageScope === 'all' && (
                       <>
@@ -934,12 +963,40 @@ export const ConversationList: React.FC<ConversationListProps> = ({
                     )}
                   </div>
 
-                  {/* Last message preview */}
+                  {/* Last message preview & per-item Select button */}
                   <div className="flex items-center justify-between gap-2">
                     <p className={`text-xs truncate ${thread.unreadCount > 0 ? 'text-slate-900 font-medium' : 'text-slate-500'}`}>
                       {thread.lastMessage}
                     </p>
-                    <div className="flex items-center gap-1.5 shrink-0">
+                    <div className="flex items-center gap-1 shrink-0">
+                      {(isSelectOneByOneMode || selectedThreadIds.length > 0) && (
+                        <button
+                          type="button"
+                          onClick={(e) => toggleSelectThread(thread.id, e)}
+                          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold border transition-colors cursor-pointer ${
+                            isChecked
+                              ? 'bg-emerald-600 text-white border-emerald-600'
+                              : 'bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-blue-700 border-slate-200'
+                          }`}
+                          title={
+                            language === 'kh'
+                              ? isChecked
+                                ? 'កំពុងជ្រើស (បើក) - ចុចដើម្បីដកចេញ (បិទ)'
+                                : 'ចុចដើម្បីជ្រើសសារអតិថិជននេះ (បើក)'
+                              : 'Toggle selection for this customer message'
+                          }
+                        >
+                          <span>
+                            {isChecked
+                              ? language === 'kh'
+                                ? '✓ ជ្រើស (បើក)'
+                                : '✓ ON'
+                              : language === 'kh'
+                              ? 'ជ្រើស (បិទ)'
+                              : 'OFF'}
+                          </span>
+                        </button>
+                      )}
                       {thread.unreadCount > 0 && (
                         <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[11px] font-bold flex items-center justify-center tabular-nums">
                           {thread.unreadCount}

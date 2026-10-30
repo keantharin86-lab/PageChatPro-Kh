@@ -102,6 +102,11 @@ export const OrderModal: React.FC<OrderModalProps> = ({
     setCustomerProvince(customer.province || 'ភ្នំពេញ');
     setCustomerAddress(detectedAddress || customer.province || 'ភ្នំពេញ');
 
+    const now = new Date();
+    setOrderDate(
+      `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    );
+
     const targetProd = initialProduct || products[0];
     if (targetProd) {
       setItems([
@@ -173,8 +178,17 @@ export const OrderModal: React.FC<OrderModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const orderNumber = `ORD-${Math.floor(1000 + Math.random() * 9000)}`;
-    const now = new Date();
-    const formattedDate = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} ${now.getHours() >= 12 ? 'PM' : 'AM'}`;
+    const nowMs = Date.now();
+    const now = new Date(nowMs);
+    const formattedTime = now.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    });
+    const currentRealDate =
+      orderDate ||
+      `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
     const safeName = customerName.trim() || customer.name || 'អតិថិជន (Messenger)';
     const safePhone = customerPhone.trim() || customer.phone || 'មិនទាន់បញ្ជាក់';
@@ -182,7 +196,7 @@ export const OrderModal: React.FC<OrderModalProps> = ({
     const safeAddress = customerAddress.trim() || customer.address || safeProvince;
 
     const newOrder: Order = {
-      id: `ord_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id: `ord_${nowMs}_${Math.random().toString(36).slice(2, 6)}`,
       orderNumber,
       customerName: safeName,
       customerPhone: safePhone,
@@ -197,8 +211,10 @@ export const OrderModal: React.FC<OrderModalProps> = ({
       paymentMethod,
       deliveryProvider,
       status: 'pending',
-      createdAt: `${orderDate}, ${formattedDate}`,
-      orderDate,
+      createdAt: `${currentRealDate}, ${formattedTime}`,
+      createdAtMs: nowMs,
+      orderDate: currentRealDate,
+      updatedAt: nowMs,
       pageId,
       threadId,
       notes,

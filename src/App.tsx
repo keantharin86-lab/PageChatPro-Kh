@@ -163,17 +163,102 @@ const saveOrdersToLocalStorageSafely = (list: Order[]) => {
   }
 };
 
+export const extractOrderCreatedAtMs = (order: Order | any, fallbackIndex = 0): number => {
+  if (!order) return fallbackIndex;
+  if (
+    typeof order.createdAtMs === 'number' &&
+    Number.isFinite(order.createdAtMs) &&
+    order.createdAtMs > 0
+  ) {
+    return order.createdAtMs;
+  }
+  const idStr = String(order.id || '');
+  if (idStr === 'ord_1001') return 1700000002000;
+  if (idStr === 'ord_1002') return 1700000001000;
+
+  // Extract 12-14 digit epoch ms embedded in order ID (e.g. ord_1729999999999_abcd)
+  const idEpochMatch = idStr.match(/ord_(\d{12,14})/);
+  if (idEpochMatch) {
+    const parsedEpoch = Number(idEpochMatch[1]);
+    if (Number.isFinite(parsedEpoch) && parsedEpoch > 0) {
+      return parsedEpoch;
+    }
+  }
+
+  // Try parsing createdAt or orderDate strings (e.g. "2026-10-27, 05:06:26 AM" or "2026-10-27, 14:30 PM")
+  const rawCreated = String(order.createdAt || '').trim();
+  const rawOrderDate = String(order.orderDate || '').trim();
+  if (rawCreated) {
+    const cleaned = rawCreated.replace(/(\b(?:1[3-9]|2[0-3]):\d{2}(?::\d{2})?)\s*(?:AM|PM)/i, '$1');
+    const directMs = Date.parse(cleaned);
+    if (Number.isFinite(directMs) && directMs > 946684800000) {
+      return directMs;
+    }
+    const dateTimeMatch = rawCreated.match(
+      /(\d{4}-\d{2}-\d{2})[,\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*(AM|PM))?/i
+    );
+    if (dateTimeMatch) {
+      const [y, m, d] = dateTimeMatch[1].split('-').map(Number);
+      let hr = parseInt(dateTimeMatch[2], 10);
+      const min = parseInt(dateTimeMatch[3], 10);
+      const sec = dateTimeMatch[4] ? parseInt(dateTimeMatch[4], 10) : 0;
+      const mer = dateTimeMatch[5]?.toUpperCase();
+      if (mer === 'PM' && hr < 12) hr += 12;
+      if (mer === 'AM' && hr === 12) hr = 0;
+      const dt = new Date(y, m - 1, d, hr, min, sec);
+      if (!Number.isNaN(dt.getTime())) return dt.getTime();
+    }
+  }
+  if (rawOrderDate && /^\d{4}-\d{2}-\d{2}$/.test(rawOrderDate)) {
+    const [y, m, d] = rawOrderDate.split('-').map(Number);
+    const dt = new Date(y, m - 1, d, 12, 0, 0);
+    if (!Number.isNaN(dt.getTime())) return dt.getTime();
+  }
+  if (typeof order.updatedAt === 'number' && Number.isFinite(order.updatedAt) && order.updatedAt > 0) {
+    return order.updatedAt;
+  }
+  return 1700000000000 - fallbackIndex;
+};
+
+export const sortOrdersNewestFirst = (list: Order[]): Order[] => {
+  if (!Array.isArray(list) || list.length === 0) return [];
+  const annotated = list
+    .filter((o) => o && o.id)
+    .map((o, idx) => {
+      const createdAtMs = extractOrderCreatedAtMs(o, idx);
+      return {
+        order: o.createdAtMs === createdAtMs ? o : { ...o, createdAtMs },
+        createdAtMs,
+        idx,
+      };
+    });
+
+  annotated.sort((a, b) => {
+    if (b.createdAtMs !== a.createdAtMs) {
+      return b.createdAtMs - a.createdAtMs;
+    }
+    return a.idx - b.idx;
+  });
+
+  return annotated.map((item) => item.order);
+};
+
 const mergeOrdersCatalog = (primaryList: Order[], secondaryList: Order[]): Order[] => {
   const map = new Map<string, Order>();
   const numberToId = new Map<string, string>();
 
-  for (const o of primaryList) {
+  for (let i = 0; i < (primaryList || []).length; i++) {
+    const o = primaryList[i];
     if (!o || !o.id) continue;
-    map.set(o.id, o);
+    const resolvedCreatedMs = extractOrderCreatedAtMs(o, i);
+    const normalizedOrder: Order =
+      o.createdAtMs === resolvedCreatedMs ? o : { ...o, createdAtMs: resolvedCreatedMs };
+    map.set(o.id, normalizedOrder);
     if (o.orderNumber) numberToId.set(o.orderNumber, o.id);
   }
 
-  for (const o of secondaryList) {
+  for (let i = 0; i < (secondaryList || []).length; i++) {
+    const o = secondaryList[i];
     if (!o || !o.id) continue;
     const matchedId = map.has(o.id)
       ? o.id
@@ -181,20 +266,51 @@ const mergeOrdersCatalog = (primaryList: Order[], secondaryList: Order[]): Order
       ? numberToId.get(o.orderNumber)!
       : null;
 
+    const incomingCreatedMs = extractOrderCreatedAtMs(o, i);
+
     if (!matchedId) {
-      map.set(o.id, o);
+      map.set(o.id, o.createdAtMs === incomingCreatedMs ? o : { ...o, createdAtMs: incomingCreatedMs });
       if (o.orderNumber) numberToId.set(o.orderNumber, o.id);
     } else {
       const existing = map.get(matchedId)!;
-      map.set(matchedId, {
-        ...o,
-        ...existing,
-      });
+      const existingUpdated = Number(existing.updatedAt || 0);
+      const incomingUpdated = Number(o.updatedAt || 0);
+      const resolvedCreatedMs =
+        Math.max(Number(existing.createdAtMs || 0), incomingCreatedMs) || incomingCreatedMs;
+      if (incomingUpdated > existingUpdated) {
+        map.set(matchedId, {
+          ...existing,
+          ...o,
+          id: matchedId,
+          createdAtMs: resolvedCreatedMs,
+          updatedAt: incomingUpdated,
+        });
+      } else {
+        map.set(matchedId, {
+          ...o,
+          ...existing,
+          id: matchedId,
+          createdAtMs: resolvedCreatedMs,
+          ...(existingUpdated || incomingUpdated
+            ? { updatedAt: Math.max(existingUpdated, incomingUpdated) }
+            : {}),
+        });
+      }
     }
   }
 
-  return Array.from(map.values());
+  return sortOrdersNewestFirst(Array.from(map.values()));
 };
+
+const getOrdersContentSignature = (list: Order[]): string =>
+  (list || [])
+    .map(
+      (o) =>
+        `${o.id}:${o.orderNumber}:${o.status}:${o.total}:${o.totalKhr}:${o.customerName}:${o.customerPhone}:${o.customerProvince}:${o.customerAddress}:${o.deliveryProvider}:${o.paymentMethod}:${o.notes || ''}:${o.createdAtMs || 0}:${(o.items || [])
+          .map((i) => `${i.productId}:${i.quantity}:${i.price}`)
+          .join(',')}`
+    )
+    .join('|');
 
 export const formatMessageTime = (dateInput?: Date | number | string): string => {
   const d = dateInput !== undefined ? new Date(dateInput) : new Date();
@@ -736,12 +852,14 @@ export default function App() {
         savedPrimary && savedPrimary !== '[]' ? savedPrimary : savedBackup || savedPrimary;
       if (rawToUse) {
         const parsed = JSON.parse(rawToUse);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return sortOrdersNewestFirst(parsed);
+        }
       }
     } catch (e) {
       console.error(e);
     }
-    return INITIAL_ORDERS;
+    return sortOrdersNewestFirst(INITIAL_ORDERS);
   });
 
   const [activeView, setActiveView] = useState<ActiveViewType>('inbox');
@@ -852,6 +970,8 @@ export default function App() {
   };
 
   const lastPersistedThreadsSigRef = useRef<string>('');
+  const lastPersistedOrdersSigRef = useRef<string>(getOrdersContentSignature(orders));
+  const lastLocalOrderMutationAtRef = useRef<number>(0);
 
   // Helper to safely persist threads to IndexedDB, localStorage, and backend server without starving localStorage quota for products
   const persistThreadsToStorageAndServer = (nextThreads: ChatThread[]) => {
@@ -1081,6 +1201,11 @@ export default function App() {
   useEffect(() => {
     if (orders.length === 0) return;
     ordersRef.current = orders;
+    const sig = getOrdersContentSignature(orders);
+    if (sig === lastPersistedOrdersSigRef.current) {
+      return;
+    }
+    lastPersistedOrdersSigRef.current = sig;
     saveToDesktopIndexedDB('pagechat_orders', orders);
     saveOrdersToLocalStorageSafely(orders);
     markLocalComputerSave();
@@ -1149,6 +1274,10 @@ export default function App() {
       if (combinedIdbOrders.length > 0) {
         setOrders((prev) => {
           const merged = mergeOrdersCatalog(prev, combinedIdbOrders);
+          if (getOrdersContentSignature(merged) === getOrdersContentSignature(prev)) {
+            return prev;
+          }
+          lastPersistedOrdersSigRef.current = getOrdersContentSignature(merged);
           ordersRef.current = merged;
           saveOrdersToLocalStorageSafely(merged);
           saveToDesktopIndexedDB('pagechat_orders', merged);
@@ -1225,6 +1354,12 @@ export default function App() {
           if (ordJson.success && Array.isArray(ordJson.data) && ordJson.data.length > 0) {
             setOrders((prev) => {
               const merged = mergeOrdersCatalog(prev, ordJson.data);
+              const mergedSig = getOrdersContentSignature(merged);
+              const prevSig = getOrdersContentSignature(prev);
+              if (mergedSig === prevSig) {
+                return prev;
+              }
+              lastPersistedOrdersSigRef.current = mergedSig;
               ordersRef.current = merged;
               saveOrdersToLocalStorageSafely(merged);
               saveToDesktopIndexedDB('pagechat_orders', merged);
@@ -2325,11 +2460,17 @@ export default function App() {
         try {
           const parsed = JSON.parse(event.data);
           if (parsed && parsed.type === 'orders_updated' && Array.isArray(parsed.orders)) {
+            if (Date.now() - lastLocalOrderMutationAtRef.current < 4500) {
+              return;
+            }
             setOrders((prev) => {
-              const merged = mergeOrdersCatalog(parsed.orders, prev);
-              if (merged.length === prev.length && JSON.stringify(merged) === JSON.stringify(prev)) {
+              const merged = mergeOrdersCatalog(prev, parsed.orders);
+              const mergedSig = getOrdersContentSignature(merged);
+              const prevSig = getOrdersContentSignature(prev);
+              if (mergedSig === prevSig) {
                 return prev;
               }
+              lastPersistedOrdersSigRef.current = mergedSig;
               ordersRef.current = merged;
               saveOrdersToLocalStorageSafely(merged);
               saveToDesktopIndexedDB('pagechat_orders', merged);
@@ -2398,12 +2539,21 @@ export default function App() {
         if (!isMounted) return;
         if (ordRes) {
           const ordJson = await ordRes.json().catch(() => null);
-          if (ordJson && ordJson.success && Array.isArray(ordJson.data) && ordJson.data.length > 0) {
+          if (
+            ordJson &&
+            ordJson.success &&
+            Array.isArray(ordJson.data) &&
+            ordJson.data.length > 0 &&
+            Date.now() - lastLocalOrderMutationAtRef.current >= 4500
+          ) {
             setOrders((prev) => {
-              const merged = mergeOrdersCatalog(ordJson.data, prev);
-              if (merged.length === prev.length && JSON.stringify(merged) === JSON.stringify(prev)) {
+              const merged = mergeOrdersCatalog(prev, ordJson.data);
+              const mergedSig = getOrdersContentSignature(merged);
+              const prevSig = getOrdersContentSignature(prev);
+              if (mergedSig === prevSig) {
                 return prev;
               }
+              lastPersistedOrdersSigRef.current = mergedSig;
               ordersRef.current = merged;
               saveOrdersToLocalStorageSafely(merged);
               saveToDesktopIndexedDB('pagechat_orders', merged);
@@ -3138,17 +3288,36 @@ export default function App() {
   };
 
   const handleSaveOrder = async (newOrder: Order) => {
-    const updatedOrders = mergeOrdersCatalog([newOrder], ordersRef.current);
+    const nowTs = Date.now();
+    const nowDate = new Date(nowTs);
+    const todayIso = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, '0')}-${String(nowDate.getDate()).padStart(2, '0')}`;
+    const realTimeClock = nowDate.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    });
+    const stampedOrder: Order = {
+      ...newOrder,
+      createdAtMs: newOrder.createdAtMs || nowTs,
+      orderDate: newOrder.orderDate || todayIso,
+      createdAt: newOrder.createdAt || `${todayIso}, ${realTimeClock}`,
+      updatedAt: nowTs,
+    };
+    lastLocalOrderMutationAtRef.current = nowTs;
+    const updatedOrders = mergeOrdersCatalog([stampedOrder], ordersRef.current);
+    lastPersistedOrdersSigRef.current = getOrdersContentSignature(updatedOrders);
     ordersRef.current = updatedOrders;
     setOrders(updatedOrders);
     saveOrdersToLocalStorageSafely(updatedOrders);
     saveToDesktopIndexedDB('pagechat_orders', updatedOrders);
+    markLocalComputerSave();
     soundNotifier.playOrderSuccess();
 
     fetch('/api/orders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ order: newOrder, orders: updatedOrders }),
+      body: JSON.stringify({ order: stampedOrder, orders: updatedOrders }),
     }).catch(() => {});
 
     const nowMs = Date.now();
@@ -3273,30 +3442,64 @@ export default function App() {
   };
 
   const handleUpdateOrderStatus = (orderId: string, status: Order['status']) => {
+    const nowTs = Date.now();
+    lastLocalOrderMutationAtRef.current = nowTs;
     setOrders((prev) => {
-      const next = prev.map((o) => (o.id === orderId ? { ...o, status } : o));
+      const target = prev.find((o) => o.id === orderId);
+      if (target && target.status === status) {
+        return prev;
+      }
+      const next = prev.map((o) => (o.id === orderId ? { ...o, status, updatedAt: nowTs } : o));
+      lastPersistedOrdersSigRef.current = getOrdersContentSignature(next);
       ordersRef.current = next;
       saveOrdersToLocalStorageSafely(next);
       saveToDesktopIndexedDB('pagechat_orders', next);
       fetch(`/api/orders/${encodeURIComponent(orderId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
+        body: JSON.stringify({ status, updatedAt: nowTs }),
       }).catch(() => {});
       return next;
     });
+    setThreads((prev) =>
+      prev.map((t) => {
+        const isMatched = t.orderIds?.includes(orderId);
+        if (!isMatched && !t.messages?.some((m) => m.attachments?.some((a) => a.type === 'order_invoice' && a.data?.id === orderId))) {
+          return t;
+        }
+        return {
+          ...t,
+          messages: t.messages.map((m) => {
+            if (m.attachments) {
+              const updatedAtt = m.attachments.map((att) => {
+                if (att.type === 'order_invoice' && att.data?.id === orderId) {
+                  return { ...att, data: { ...att.data, status, updatedAt: nowTs } };
+                }
+                return att;
+              });
+              return { ...m, attachments: updatedAtt };
+            }
+            return m;
+          }),
+        };
+      })
+    );
   };
 
   const handleUpdateOrder = (updatedOrder: Order) => {
+    const nowTs = Date.now();
+    const stampedOrder: Order = { ...updatedOrder, updatedAt: nowTs };
+    lastLocalOrderMutationAtRef.current = nowTs;
     setOrders((prev) => {
-      const next = prev.map((o) => (o.id === updatedOrder.id ? updatedOrder : o));
+      const next = prev.map((o) => (o.id === stampedOrder.id ? stampedOrder : o));
+      lastPersistedOrdersSigRef.current = getOrdersContentSignature(next);
       ordersRef.current = next;
       saveOrdersToLocalStorageSafely(next);
       saveToDesktopIndexedDB('pagechat_orders', next);
-      fetch(`/api/orders/${encodeURIComponent(updatedOrder.id)}`, {
+      fetch(`/api/orders/${encodeURIComponent(stampedOrder.id)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedOrder),
+        body: JSON.stringify(stampedOrder),
       }).catch(() => {});
       return next;
     });
